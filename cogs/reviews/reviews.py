@@ -283,6 +283,22 @@ def sep_wide() -> discord.ui.Separator:
     return discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
 
 
+def critiques_summary_line(
+    hit: MediaHit,
+    *,
+    count: int,
+    avg: float | None,
+    page: int = 0,
+    total_pages: int = 1,
+) -> str:
+    line = f"-# {count} critique(s) · moyenne {format_stars(avg or 0)} {(avg or 0):.1f}/5"
+    if count:
+        line += f" · page {page + 1}/{total_pages}"
+    if hit.url:
+        line += f"  ·  [{_link_label(hit)}]({hit.url})"
+    return line
+
+
 def section_with_thumbnail(text: str, url: str | None) -> discord.ui.Item:
     body = discord.ui.TextDisplay(text)
     if not url:
@@ -1011,15 +1027,18 @@ class PublicCritiquesView(ReviewsLayout):
         hit = self.hit
         body: list[discord.ui.Item] = list(fiche_intro(hit)[:2])
         rows: list[discord.ui.ActionRow] = []
+        total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
+        if self.reviews:
+            max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
+            self.page = min(self.page, max_page)
+        body.append(discord.ui.TextDisplay(critiques_summary_line(
+            hit, count=self.count, avg=self.avg, page=self.page, total_pages=total_pages,
+        )))
+        body.append(sep_tight())
         if not self.reviews:
-            empty = "*Pas encore de critique sur ce serveur.*"
-            if hit.url:
-                empty += f"\n-# [{_link_label(hit)}]({hit.url})"
-            body.append(discord.ui.TextDisplay(empty))
+            body.append(discord.ui.TextDisplay("*Pas encore de critique sur ce serveur.*"))
             self.set_layout(body)
             return
-        max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
-        self.page = min(self.page, max_page)
         start = self.page * REVIEWS_PAGE
         page_rows = self.reviews[start:start + REVIEWS_PAGE]
         for index, row in enumerate(page_rows):
@@ -1037,14 +1056,7 @@ class PublicCritiquesView(ReviewsLayout):
             if seen:
                 text += f"\n{seen}"
             body.append(section_with_thumbnail(text, avatar))
-        total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE)
-        page_note = (
-            f"-# {self.count} critique(s) · moyenne {format_stars(self.avg or 0)} "
-            f"{(self.avg or 0):.1f}/5 · page {self.page + 1}/{total_pages}"
-        )
-        if hit.url:
-            page_note += f"  ·  [{_link_label(hit)}]({hit.url})"
-        body.append(discord.ui.TextDisplay(page_note))
+        max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
         if max_page > 0:
             prev_btn = PublicCritiquesPageButton(self, -1, "← Précédent")
             next_btn = PublicCritiquesPageButton(self, 1, "Suivant →")
@@ -1337,11 +1349,16 @@ class MediaSessionView(ReviewsLayout):
                 body.append(discord.ui.TextDisplay(f"-# {footer}"))
         else:
             body.extend(fiche_intro(hit)[:2])
+            total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
+            if self.reviews:
+                max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
+                self.review_page = min(self.review_page, max_page)
+            body.append(discord.ui.TextDisplay(critiques_summary_line(
+                hit, count=self.count, avg=self.avg, page=self.review_page, total_pages=total_pages,
+            )))
+            body.append(sep_tight())
             if not self.reviews:
-                empty = "*Pas encore de critique sur ce serveur.*"
-                if hit.url:
-                    empty += f"\n-# [{_link_label(hit)}]({hit.url})"
-                body.append(discord.ui.TextDisplay(empty))
+                body.append(discord.ui.TextDisplay("*Pas encore de critique sur ce serveur.*"))
             else:
                 start = self.review_page * REVIEWS_PAGE
                 page_rows = self.reviews[start:start + REVIEWS_PAGE]
@@ -1360,14 +1377,6 @@ class MediaSessionView(ReviewsLayout):
                     if seen:
                         text += f"\n{seen}"
                     body.append(section_with_thumbnail(text, avatar))
-                total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE)
-                page_note = (
-                    f"-# {self.count} critique(s) · moyenne {format_stars(self.avg or 0)} "
-                    f"{(self.avg or 0):.1f}/5 · page {self.review_page + 1}/{total_pages}"
-                )
-                if hit.url:
-                    page_note += f"  ·  [{_link_label(hit)}]({hit.url})"
-                body.append(discord.ui.TextDisplay(page_note))
 
         rows.append(discord.ui.ActionRow(
             TabButton(self, "fiche", "Fiche"),
@@ -1607,37 +1616,6 @@ class FavoriteSlotButton(discord.ui.Button):
         await interaction.response.send_modal(FavoriteSearchModal(self._hub, self._slot))
 
 
-class FavoriteClearSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView", filled: list[int]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(f"Retirer · {FAVORITE_LABELS[slot]}", 95),
-                value=str(slot),
-                description="Enlever cette œuvre du profil",
-            )
-            for slot in filled
-        ]
-        super().__init__(placeholder="Retirer une préférée…", options=options, min_values=1, max_values=1)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self._hub.member.id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le propriétaire du profil peut modifier ses préférées.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return
-        await interaction.response.defer()
-        slot = int(self.values[0])
-        await self._hub.cog.clear_favorite(self._hub.guild, self._hub.member.id, slot)
-        await self._hub.refresh(interaction)
-        await interaction.followup.send(
-            f"**Préférée retirée ·** {FAVORITE_LABELS[slot]} est de nouveau vide.",
-            ephemeral=True,
-        )
-
-
 class FavoriteSearchModal(discord.ui.Modal):
     def __init__(self, profile: "ProfileView", slot: int):
         super().__init__(title=pretty.shorten_text(f"Choisir · {FAVORITE_LABELS[slot]}", 45))
@@ -1645,8 +1623,8 @@ class FavoriteSearchModal(discord.ui.Modal):
         self._slot = slot
         self.query_input = discord.ui.TextInput(
             label="Titre de l'œuvre",
-            placeholder="Ex. Inception, Dune 2021, Disco Elysium…",
-            min_length=2,
+            placeholder="Laisse vide pour retirer · Ex. Dune 2021",
+            required=False,
             max_length=80,
         )
         self.add_item(self.query_input)
@@ -1659,11 +1637,18 @@ class FavoriteSearchModal(discord.ui.Modal):
             )
             return
         await interaction.response.defer(ephemeral=True)
+        query = str(self.query_input.value or "").strip()
+        if not query:
+            await self._profile.clear_favorite_slot(self._slot)
+            await interaction.followup.send(
+                f"**{FAVORITE_LABELS[self._slot]} ·** emplacement retiré.",
+                ephemeral=True,
+            )
+            return
         catalog = self._profile.cog.catalog
         if catalog is None:
             await interaction.followup.send("**Erreur ·** Catalogue média indisponible.", ephemeral=True)
             return
-        query = str(self.query_input.value).strip()
         try:
             hits = await catalog.search(query, "all")
         except Exception:
@@ -1833,41 +1818,58 @@ class ProfileView(ReviewsLayout):
         next_btn.disabled = page >= max_page
         return discord.ui.ActionRow(prev_btn, next_btn)
 
+    def _slot_filled(self, slot: int) -> bool:
+        return slot - 1 < len(self.favorites) and self.favorites[slot - 1] is not None
+
+    def _best_recent(self) -> tuple[MediaHit, float] | None:
+        if not self.journal_entries:
+            return None
+        hit, row = max(
+            self.journal_entries,
+            key=lambda item: (float(item[1]["rating"]), int(item[1]["updated_at"] or 0)),
+        )
+        return hit, float(row["rating"])
+
+    def _favorite_block(self, label: str, hit: MediaHit, rating: float | None) -> discord.ui.Item:
+        year = f"  ·  {hit.year}" if hit.year else ""
+        lines = [
+            f"### {label}",
+            f"{type_emoji(hit.media_type)} **{hit.title}**{year}",
+            f"-# {type_label(hit.media_type)}"
+            + (f"  ·  {hit.subtitle}" if hit.subtitle else ""),
+        ]
+        if rating is not None:
+            lines.append(f"{format_stars(rating)}  **{rating:g}/5**")
+        return section_with_thumbnail("\n".join(lines), hit.poster_url)
+
     def _profil_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
         avatar = self.member.display_avatar.url if hasattr(self.member, "display_avatar") else None
         body: list[discord.ui.Item] = [section_with_thumbnail(self._profile_header(), avatar)]
-        for index, (slot, label) in enumerate(FAVORITE_LABELS.items()):
-            body.append(discord.ui.Separator())
-            entry = self.favorites[slot - 1] if slot - 1 < len(self.favorites) else None
-            if entry is None:
-                hint = "*Pas encore choisi.*"
-                if self.editable:
-                    hint += "\n-# Appuie sur le bouton pour en épingler une."
-                body.append(discord.ui.TextDisplay(f"### {label}\n{hint}"))
-            else:
+        filled = [
+            (label, self.favorites[slot - 1])
+            for slot, label in FAVORITE_LABELS.items()
+            if self._slot_filled(slot)
+        ]
+        shown: list[discord.ui.Item] = []
+        if filled:
+            for label, entry in filled:
+                assert entry is not None
                 hit, rating = entry
-                year = f"  ·  {hit.year}" if hit.year else ""
-                lines = [
-                    f"### {label}",
-                    f"{type_emoji(hit.media_type)} **{hit.title}**{year}",
-                    f"-# {type_label(hit.media_type)}"
-                    + (f"  ·  {hit.subtitle}" if hit.subtitle else ""),
-                ]
-                if rating is not None:
-                    lines.append(f"{format_stars(rating)}  **{rating:g}/5**")
-                body.append(section_with_thumbnail("\n".join(lines), hit.poster_url))
+                shown.append(self._favorite_block(label, hit, rating))
+        else:
+            fallback = self._best_recent()
+            if fallback is not None:
+                hit, rating = fallback
+                shown.append(self._favorite_block("Mieux notée", hit, rating))
+        for index, block in enumerate(shown):
+            body.append(sep_wide() if index == 0 else sep_tight())
+            body.append(block)
         rows: list[discord.ui.ActionRow] = []
         if self.editable:
             rows.append(discord.ui.ActionRow(*[
-                FavoriteSlotButton(self, slot, bool(self.favorites[slot - 1] if slot - 1 < len(self.favorites) else None))
+                FavoriteSlotButton(self, slot, self._slot_filled(slot))
                 for slot in FAVORITE_LABELS
             ]))
-            filled_slots = [
-                slot for slot in FAVORITE_LABELS
-                if slot - 1 < len(self.favorites) and self.favorites[slot - 1] is not None
-            ]
-            if filled_slots:
-                rows.append(discord.ui.ActionRow(FavoriteClearSelect(self, filled_slots)))
         return body, rows
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -1956,6 +1958,12 @@ class ProfileView(ReviewsLayout):
             except Exception:
                 logger.exception("Enrichissement de préférée impossible")
         await self.cog.set_favorite(self.guild, self.member.id, slot, hit)
+        await self.refresh()
+
+    async def clear_favorite_slot(self, slot: int) -> None:
+        if not self.editable:
+            return
+        await self.cog.clear_favorite(self.guild, self.member.id, slot)
         await self.refresh()
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
