@@ -1,4 +1,4 @@
-"""Emojis custom du serveur ACK, utilisés par le cog critiques."""
+"""Emojis custom du serveur CRIT, utilisés par le cog critiques."""
 
 TV = "<:tv:1545150274858127462>"
 GAME = "<:gamepad:1545150723547856896>"

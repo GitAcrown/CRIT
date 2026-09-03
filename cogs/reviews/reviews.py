@@ -42,7 +42,7 @@ from .progress import (
 from .providers import MediaCatalog, MediaHit, parse_search_query
 from utils import dataio, fuzzy, pretty
 
-logger = logging.getLogger("ACK.Reviews")
+logger = logging.getLogger("CRIT.Reviews")
 
 NO_PINGS = discord.AllowedMentions.none()
 
@@ -56,7 +56,7 @@ async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutVi
 
 
 class ReviewsLayout(discord.ui.LayoutView):
-    """LayoutView ACK : un Container (texte + ActionRows), comme MARIA."""
+    """LayoutView CRIT : un Container (texte + ActionRows), comme MARIA."""
 
     async def on_error(
         self,
@@ -2380,7 +2380,7 @@ class Reviews(commands.Cog):
             pass
         self._http = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=10),
-            headers={"User-Agent": "ACK-BOT/1.0 (Discord reviews)"},
+            headers={"User-Agent": "CRIT-BOT/1.0 (Discord reviews)"},
         )
         self.catalog = MediaCatalog(
             self._http,

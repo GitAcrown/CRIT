@@ -1,4 +1,4 @@
-# ACK
+# CRIT
 
 Bot Discord (discord.py) dédié aux critiques d'œuvres : un carnet de notes type Senscritique / Letterboxd, par serveur, avec fiches en Components V2 (`LayoutView`) et persistance SQLite.
 

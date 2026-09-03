@@ -41,7 +41,7 @@ logging.basicConfig(
     ],
 )
 
-logger = logging.getLogger("ACK.Main")
+logger = logging.getLogger("CRIT.Main")
 
 # Réduire le bruit des libs tierces
 logging.getLogger("discord").setLevel(logging.WARNING)

@@ -21,7 +21,7 @@ import discord
 
 from .providers import MediaHit
 
-logger = logging.getLogger("ACK.Reviews.Dyn")
+logger = logging.getLogger("CRIT.Reviews.Dyn")
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "dyn_fiches.db"
 TTL = timedelta(minutes=10)

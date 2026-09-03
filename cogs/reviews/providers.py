@@ -19,7 +19,7 @@ import aiohttp
 
 from .emojis import REVIEW_ACCLAIMED, REVIEW_BOMB, REVIEW_DOWN, REVIEW_MIXED, REVIEW_OK, REVIEW_UP
 
-logger = logging.getLogger("ACK.Reviews.Providers")
+logger = logging.getLogger("CRIT.Reviews.Providers")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500{}"

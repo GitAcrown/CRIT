@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Récompenses de profil
-# Ajoute tes emojis custom ACK dans `emoji` (<:name:id>) quand tu les as.
+# Ajoute tes emojis custom CRIT dans `emoji` (<:name:id>) quand tu les as.
 # `unlock_level` = niveau à partir duquel ça s'affiche sur le profil.
 # ---------------------------------------------------------------------------
 
