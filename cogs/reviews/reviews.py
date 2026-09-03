@@ -533,7 +533,7 @@ def append_fiche_sections(
 def fiche_intro(hit: MediaHit) -> list[discord.ui.Item]:
     items: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {_meta_line(hit)}"),
-        sep_wide(),
+        sep_tight(),
     ]
     backdrop = hit.extra.get("backdrop_url")
     if backdrop:
