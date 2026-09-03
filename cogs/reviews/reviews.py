@@ -2296,6 +2296,62 @@ class ReviewsConfigView(ReviewsLayout):
         await interaction.response.send_message(view=self, ephemeral=True)
 
 
+class HelpView(ReviewsLayout):
+    """Aide du bot : commandes + comment noter, en un seul LayoutView."""
+
+    def __init__(self, *, avatar_url: str | None = None):
+        super().__init__(timeout=300)
+        header = (
+            "## CRIT\n"
+            "Le carnet de notes du serveur. Note tes films, séries, jeux, albums, "
+            "morceaux et livres — puis compare tes goûts avec les autres."
+        )
+        noter = (
+            f"### {STAR} Comment noter\n"
+            "1. Lance `/note` avec un titre (année bienvenue). Tu peux déjà passer "
+            "une **note** et un **commentaire**.\n"
+            "2. S'il y a plusieurs résultats, choisis l'œuvre dans le menu.\n"
+            "3. Clique **Noter** : un formulaire demande la note "
+            f"({format_stars(0)} 0 → {format_stars(5)} 5, demies OK), un commentaire optionnel "
+            "et la date (vu, joué, écouté ou lu).\n"
+            "4. Si tu as déjà donné la note dans `/note` et que tu n'avais pas encore "
+            "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
+            "\n"
+            "Tu peux modifier ou supprimer ta note plus tard — une seule note par "
+            "œuvre et par membre.\n"
+            "-# Exemples · `Dune 2021`  ·  `film:Dune`  ·  `jeu:Hades`  ·  "
+            "`album:Blonde`  ·  `livre:Dune`  ·  une URL TMDB, Steam, Spotify ou IMDb"
+        )
+        commandes = (
+            "### Commandes\n"
+            "`/note` — cherche une œuvre et pose (ou prépare) ta note\n"
+            "`/carte` — préférées, journal et affinités d'un membre\n"
+            "`/search` — récentes, catalogue et top du serveur\n"
+            "`/config` — salon d'annonces et longueur des commentaires "
+            "*(Gérer le serveur)*\n"
+            "`/help` — cette aide"
+        )
+        extras = (
+            f"### {XP} Autour des notes\n"
+            f"{TV} Films et séries  ·  {GAME} Jeux  ·  {MUSIC} Albums et morceaux  ·  {BOOK} Livres\n"
+            "`/carte` range tes **préférées**, ton **journal** et tes **affinités** "
+            f"(jumeau {TWIN} / rival {RIVAL}, à partir de 3 œuvres en commun). "
+            "`/search` explore ce que le serveur a déjà noté.\n"
+            "-# Chaque note rapporte de l'XP · plafond quotidien"
+        )
+        self.set_layout(
+            [
+                section_with_thumbnail(header, avatar_url),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(noter),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(commandes),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(extras),
+            ]
+        )
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -3049,16 +3105,16 @@ class Reviews(commands.Cog):
         )
         await view.start(interaction, deferred=True)
 
-    @app_commands.command(name="profil")
+    @app_commands.command(name="carte")
     @app_commands.guild_only()
     @app_commands.rename(member="membre")
-    @app_commands.describe(member="Membre dont afficher le profil, le journal et les affinités")
-    async def critique_profil(
+    @app_commands.describe(member="Membre dont afficher la carte, le journal et les affinités")
+    async def critique_carte(
         self,
         interaction: discord.Interaction,
         member: discord.Member | None = None,
     ) -> None:
-        """Profil d'un membre : préférées, journal et affinités."""
+        """Carte d'un membre : préférées, journal et affinités."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
@@ -3176,6 +3232,18 @@ class Reviews(commands.Cog):
             api_status=self.catalog.status() if self.catalog else {},
         )
         await view.start(interaction)
+
+    @app_commands.command(name="help")
+    @app_commands.guild_only()
+    async def critique_help(self, interaction: discord.Interaction) -> None:
+        """Explique les commandes et comment noter."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        avatar = self.bot.user.display_avatar.url if self.bot.user else None
+        await interaction.response.send_message(view=HelpView(avatar_url=avatar), ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

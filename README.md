@@ -11,9 +11,10 @@ Noter (0 à 5, demies étoiles) films et séries (TMDB), jeux (Steam), albums et
 ## Commandes
 
 - `/note` — recherche une œuvre et enregistre (ou prépare) ta note
-- `/profil` — profil d'un membre : préférées, journal et affinités
+- `/carte` — carte d'un membre : préférées, journal et affinités
 - `/search` — explore le serveur : récentes, catalogue et top
 - `/config` — panneau de configuration réservé à la modération (annonces, commentaires)
+- `/help` — aide : commandes et comment noter
 
 ## Administration
 
