@@ -48,11 +48,11 @@ NO_PINGS = discord.AllowedMentions.none()
 
 
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
-    """Met à jour le message comme MARIA : `edit_message`, sans allowed_mentions."""
+    """Met à jour le message comme MARIA : `edit_message`, mentions visibles sans ping."""
     if interaction.response.is_done():
-        await interaction.edit_original_response(view=view)
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
     else:
-        await interaction.response.edit_message(view=view)
+        await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
 
 
 class ReviewsLayout(discord.ui.LayoutView):
@@ -273,6 +273,16 @@ def select_hit_description(hit: MediaHit) -> str:
     return pretty.shorten_text(" · ".join(parts), 95)
 
 
+def sep_tight() -> discord.ui.Separator:
+    """Séparateur compact, entre les critiques."""
+    return discord.ui.Separator(spacing=discord.SeparatorSpacing.small)
+
+
+def sep_wide() -> discord.ui.Separator:
+    """Séparateur large, sous un titre."""
+    return discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
+
+
 def section_with_thumbnail(text: str, url: str | None) -> discord.ui.Item:
     body = discord.ui.TextDisplay(text)
     if not url:
@@ -322,6 +332,23 @@ def _mention(guild: discord.Guild, bot: commands.Bot, user_id: int) -> str:
         return member.mention
     name, _avatar = _user_display(guild, bot, user_id)
     return f"**{name}**"
+
+
+def _mention_silent(user_id: int) -> str:
+    """Mention Discord ; le ping est coupé via AllowedMentions.none()."""
+    return f"<@{user_id}>"
+
+
+def _format_people_fr(mentions: list[str], extra: int = 0) -> str:
+    if extra > 0:
+        named = ", ".join(mentions)
+        autres = "autre" if extra == 1 else "autres"
+        return f"{named} et {extra} {autres}"
+    if len(mentions) == 1:
+        return mentions[0]
+    if len(mentions) == 2:
+        return f"{mentions[0]} et {mentions[1]}"
+    return f"{', '.join(mentions[:-1])} et {mentions[-1]}"
 
 
 def _titled(mention: str, title: str) -> str:
@@ -475,7 +502,7 @@ def append_fiche_sections(
 def fiche_intro(hit: MediaHit) -> list[discord.ui.Item]:
     items: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {_meta_line(hit)}"),
-        discord.ui.Separator(),
+        sep_wide(),
     ]
     backdrop = hit.extra.get("backdrop_url")
     if backdrop:
@@ -561,9 +588,9 @@ async def send_published_fiche(
     })
     view = render_published_fiche(hit, avg=avg, count=count, social=social, wid=wid, live=True)
     if followup:
-        message = await interaction.followup.send(view=view)
+        message = await interaction.followup.send(view=view, allowed_mentions=NO_PINGS)
     else:
-        await interaction.edit_original_response(view=view)
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
         message = await interaction.original_response()
     bind_record(wid, message.channel.id, message.id)
 
@@ -584,14 +611,14 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
     try:
         channel = cog.bot.get_channel(rec.channel_id) or await cog.bot.fetch_channel(rec.channel_id)
         message = await channel.fetch_message(rec.message_id)
-        await message.edit(view=view)
+        await message.edit(view=view, allowed_mentions=NO_PINGS)
     except Exception as exc:
         logger.info("Maj fiche publiée %s : %s", wid, exc)
 
 
 async def send_ephemeral_menu(interaction: discord.Interaction, view: ReviewsLayout) -> None:
     """Nouveau message éphémère — ne jamais éditer la fiche publique."""
-    await interaction.response.send_message(view=view, ephemeral=True)
+    await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
     view._interaction = interaction
 
 
@@ -606,7 +633,7 @@ async def handle_published_fiche_click(
             view = render_published_record(rec, live=False)
             if view is not None:
                 try:
-                    await interaction.response.edit_message(view=view)
+                    await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
                 except discord.HTTPException:
                     pass
             mark_stripped(rec.id)
@@ -990,7 +1017,10 @@ class PublicCritiquesView(ReviewsLayout):
         max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
         self.page = min(self.page, max_page)
         start = self.page * REVIEWS_PAGE
-        for row in self.reviews[start:start + REVIEWS_PAGE]:
+        page_rows = self.reviews[start:start + REVIEWS_PAGE]
+        for index, row in enumerate(page_rows):
+            if index:
+                body.append(sep_tight())
             user_id = int(row["user_id"])
             _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
             title = self.titles.get(user_id, title_for_level(1))
@@ -1314,7 +1344,9 @@ class MediaSessionView(ReviewsLayout):
             else:
                 start = self.review_page * REVIEWS_PAGE
                 page_rows = self.reviews[start:start + REVIEWS_PAGE]
-                for row in page_rows:
+                for index, row in enumerate(page_rows):
+                    if index:
+                        body.append(sep_tight())
                     user_id = int(row["user_id"])
                     _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
                     title = self.titles.get(user_id, title_for_level(1))
@@ -1372,9 +1404,9 @@ class MediaSessionView(ReviewsLayout):
             if interaction is not None:
                 await apply_view(interaction, self)
             elif self._message is not None:
-                await self._message.edit(view=self)
+                await self._message.edit(view=self, allowed_mentions=NO_PINGS)
             elif self._interaction is not None:
-                await self._interaction.edit_original_response(view=self)
+                await self._interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
         except discord.HTTPException as exc:
             logger.warning("Impossible de rafraîchir la fiche « %s » : %s", self.hit.title, exc)
 
@@ -1382,9 +1414,11 @@ class MediaSessionView(ReviewsLayout):
         self._interaction = interaction
         await self.prepare()
         if deferred:
-            await interaction.edit_original_response(view=self)
+            await interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
         else:
-            await interaction.response.send_message(view=self, ephemeral=self.ephemeral)
+            await interaction.response.send_message(
+                view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
+            )
 
 
 class _ReviewPageButton(discord.ui.Button):
@@ -1844,7 +1878,7 @@ class ProfileView(ReviewsLayout):
         if types:
             top_type = max(types, key=types.get)
             extra = f"-# {types[top_type]} {type_label(top_type).lower()}{'s' if types[top_type] > 1 else ''}"
-        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header(extra))]
+        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header(extra)), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
         if not self.journal_entries:
             body.append(discord.ui.TextDisplay("*Aucune œuvre notée pour l'instant.*"))
@@ -1853,7 +1887,9 @@ class ProfileView(ReviewsLayout):
         self.journal_page = min(self.journal_page, max_page)
         start = self.journal_page * JOURNAL_PAGE
         page_items = self.journal_entries[start:start + JOURNAL_PAGE]
-        for hit, row in page_items:
+        for index, (hit, row) in enumerate(page_items):
+            if index:
+                body.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
             text = f"{format_stars(row['rating'])}  **{hit.title}**{year}\n-# {type_label(hit.media_type)}"
             if row["comment"]:
@@ -2749,39 +2785,27 @@ class Reviews(commands.Cog):
         *,
         viewer_id: int | None,
     ) -> str:
-        if len(reviews) < 2:
+        if not reviews:
             return ""
 
-        def name(user_id: int) -> str:
-            return _user_display(guild, self.bot, user_id)[0]
+        groups: dict[float, list[int]] = {}
+        for row in reviews:
+            user_id = int(row["user_id"])
+            if viewer_id is not None and user_id == viewer_id:
+                continue
+            groups.setdefault(float(row["rating"]), []).append(user_id)
+        if not groups:
+            return ""
 
-        entries = [(int(row["user_id"]), float(row["rating"])) for row in reviews]
-        if viewer_id is not None:
-            mine = next((item for item in entries if item[0] == viewer_id), None)
-            others = [item for item in entries if item[0] != viewer_id]
-            if mine and others:
-                closest = min(others, key=lambda item: (abs(item[1] - mine[1]), item[0]))
-                farthest = max(others, key=lambda item: (abs(item[1] - mine[1]), item[0]))
-                if closest[0] == farthest[0]:
-                    return f"{name(closest[0])} a mis {closest[1]:g}/5"
-                return (
-                    f"{name(closest[0])} le plus proche ({closest[1]:g})  ·  "
-                    f"{name(farthest[0])} le plus loin ({farthest[1]:g})"
-                )
-
-        worst: tuple[float, int, float, int, float] | None = None
-        for index, (left_id, left_rating) in enumerate(entries):
-            for right_id, right_rating in entries[index + 1 :]:
-                diff = abs(left_rating - right_rating)
-                if worst is None or diff > worst[0]:
-                    worst = (diff, left_id, left_rating, right_id, right_rating)
-        if worst and worst[0] >= 1.5:
-            return (
-                f"Désaccord  ·  {name(worst[1])} {worst[2]:g} vs {name(worst[3])} {worst[4]:g}"
-            )
-        if worst:
-            return f"{name(worst[1])} et {name(worst[3])} sont plutôt d'accord"
-        return ""
+        named_max = 3
+        parts: list[str] = []
+        for rating, user_ids in sorted(groups.items(), key=lambda item: (-len(item[1]), -item[0])):
+            shown = user_ids[:named_max]
+            extra = max(0, len(user_ids) - named_max)
+            people = _format_people_fr([_mention_silent(uid) for uid in shown], extra)
+            verb = "a mis" if len(user_ids) == 1 else "ont mis"
+            parts.append(f"{people} {verb} {rating:g}/5")
+        return "  ·  ".join(parts)
 
     async def list_affinities(self, guild: discord.Guild, user_id: int) -> list[Affinity]:
         await self.ensure_progress(guild)
@@ -3150,7 +3174,7 @@ class Reviews(commands.Cog):
             viewer_id=interaction.user.id,
         )
         view._interaction = interaction
-        await interaction.edit_original_response(view=view)
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
 
     @app_commands.command(name="search")
     @app_commands.guild_only()
@@ -3209,7 +3233,7 @@ class Reviews(commands.Cog):
             tab="catalogue" if filtered else "recentes",
         )
         view._interaction = interaction
-        await interaction.edit_original_response(view=view)
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
 
     @app_commands.command(name="config")
     @app_commands.guild_only()

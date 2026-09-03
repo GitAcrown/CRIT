@@ -90,7 +90,7 @@ async def main() -> None:
         command_prefix=PREFIX,
         intents=intents,
         help_command=None,
-        allowed_mentions=discord.AllowedMentions(replied_user=False),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
     bot.config = dotenv_values(".env")  # type: ignore[attr-defined]
 
