@@ -78,8 +78,11 @@ class ReviewsLayout(discord.ui.LayoutView):
         self.clear_items()
         children = list(body)
         for row in rows:
-            if row is not None:
-                children.append(row)
+            if row is None:
+                continue
+            if children:
+                children.append(sep_tight())
+            children.append(row)
         if children:
             self.add_item(discord.ui.Container(*children))
 
