@@ -27,7 +27,7 @@ from .dyn import (
     sweep_expired,
     update_payload,
 )
-from .emojis import BOOK, EXPLICIT, GAME, MUSIC, RIVAL, SALE, STAR, STAR_EMPTY, STAR_HALF, TWIN, TV, XP
+from .emojis import BOOK, EXPLICIT, GAME, MUSIC, RIVAL, SALE, SHARE, STAR, STAR_EMPTY, STAR_HALF, TWIN, TV, XP
 from .progress import (
     Affinity,
     MIN_AFFINITY_OVERLAP,
@@ -1170,7 +1170,7 @@ class PublishFicheButton(discord.ui.Button):
 
 class ProfileShareButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
-        super().__init__(label="Partager le profil", style=discord.ButtonStyle.secondary)
+        super().__init__(emoji=SHARE, style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
