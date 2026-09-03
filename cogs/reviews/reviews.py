@@ -359,22 +359,35 @@ def _fmt_int(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+SOURCE_NAMES = {
+    "tmdb": "TMDB",
+    "steam": "Steam",
+    "spotify": "Spotify",
+    "openlibrary": "Open Library",
+}
+
+
+def _source_name(hit: MediaHit) -> str:
+    return SOURCE_NAMES.get(hit.source, hit.source)
+
+
 def _official_line(hit: MediaHit) -> str:
+    source = _source_name(hit)
     if hit.source == "tmdb":
         rating = float(hit.extra.get("vote_average") or 0)
         count = int(hit.extra.get("vote_count") or 0)
         if rating:
             stars = format_stars(rating / 2)
             votes = f"  ·  {_fmt_int(count)} votes" if count else ""
-            return f"{stars}  **{rating:.1f}/10**{votes}"
+            return f"**{source}** · {stars}  **{rating:.1f}/10**{votes}"
     if hit.source == "steam":
         label = hit.extra.get("review_label") or ""
         emoji = hit.extra.get("review_emoji") or ""
         if label:
-            return f"{emoji} {label}".strip()
+            return f"**{source}** · {f'{emoji} {label}'.strip()}"
     popularity = hit.extra.get("popularity")
     if hit.media_type == "track" and popularity:
-        return f"Popularité Spotify **{popularity}/100**"
+        return f"**{source}** · Popularité **{popularity}/100**"
     return ""
 
 
@@ -442,11 +455,10 @@ def _footer_line(hit: MediaHit) -> str:
     lang = extra.get("original_language") or ""
     if lang and lang != "fr":
         parts.append(lang.upper())
-    source_names = {"tmdb": "TMDB", "steam": "Steam", "spotify": "Spotify", "openlibrary": "Open Library"}
     if hit.url:
-        parts.append(f"[{source_names.get(hit.source, hit.source)}]({hit.url})")
+        parts.append(f"[{_source_name(hit)}]({hit.url})")
     elif hit.source:
-        parts.append(source_names.get(hit.source, hit.source))
+        parts.append(_source_name(hit))
     return "  ·  ".join(parts)
 
 
@@ -514,12 +526,7 @@ def fiche_intro(hit: MediaHit) -> list[discord.ui.Item]:
 
 
 def _link_label(hit: MediaHit) -> str:
-    return {
-        "tmdb": "TMDB",
-        "steam": "Steam",
-        "spotify": "Spotify",
-        "openlibrary": "Open Library",
-    }.get(hit.source, "Fiche")
+    return SOURCE_NAMES.get(hit.source, "Fiche")
 
 
 def render_published_fiche(
@@ -962,7 +969,6 @@ class PublicCritiquesView(ReviewsLayout):
         *,
         author_id: int,
         reviews: list[Any],
-        titles: dict[int, str],
         avg: float | None,
         count: int,
     ):
@@ -972,7 +978,6 @@ class PublicCritiquesView(ReviewsLayout):
         self.hit = hit
         self.author_id = author_id
         self.reviews = reviews
-        self.titles = titles
         self.avg = avg
         self.count = count
         self.page = 0
@@ -990,8 +995,7 @@ class PublicCritiquesView(ReviewsLayout):
         media_id = await cog.lookup_media_id(guild, hit)
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
-        titles = await cog.get_titles(guild, [int(row["user_id"]) for row in reviews])
-        return cls(cog, guild, hit, author_id=author_id, reviews=reviews, titles=titles, avg=avg, count=count)
+        return cls(cog, guild, hit, author_id=author_id, reviews=reviews, avg=avg, count=count)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -1023,9 +1027,8 @@ class PublicCritiquesView(ReviewsLayout):
                 body.append(sep_tight())
             user_id = int(row["user_id"])
             _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
-            title = self.titles.get(user_id, title_for_level(1))
             text = (
-                f"{_titled(_mention(self.guild, self.cog.bot, user_id), title)}\n"
+                f"{_mention(self.guild, self.cog.bot, user_id)}\n"
                 f"{format_stars(row['rating'])}  **{row['rating']:g}/5** · <t:{row['updated_at']}:R>"
             )
             if row["comment"]:
@@ -1235,7 +1238,6 @@ class MediaSessionView(ReviewsLayout):
         self.my_review: dict | None = None
         self.reviews: list[Any] = []
         self.social_line = ""
-        self.titles: dict[int, str] = {}
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
@@ -1280,7 +1282,6 @@ class MediaSessionView(ReviewsLayout):
             self.reviews,
             viewer_id=self.author_id if self.ephemeral else None,
         )
-        self.titles = await self.cog.get_titles(self.guild, [int(row["user_id"]) for row in self.reviews])
 
     async def save_review(
         self, interaction: discord.Interaction, rating: float, comment: str, experienced_at: str = "",
@@ -1349,9 +1350,8 @@ class MediaSessionView(ReviewsLayout):
                         body.append(sep_tight())
                     user_id = int(row["user_id"])
                     _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
-                    title = self.titles.get(user_id, title_for_level(1))
                     text = (
-                        f"{_titled(_mention(self.guild, self.cog.bot, user_id), title)}\n"
+                        f"{_mention(self.guild, self.cog.bot, user_id)}\n"
                         f"{format_stars(row['rating'])}  **{row['rating']:g}/5** · <t:{row['updated_at']}:R>"
                     )
                     if row["comment"]:
@@ -2003,7 +2003,6 @@ class ServerHubView(ReviewsLayout):
         recent: list[tuple[MediaHit, Any]],
         catalog: list[tuple[MediaHit, float, int]],
         top: list[tuple[MediaHit, float, int]],
-        titles: dict[int, str],
         catalog_subtitle: str,
         media_type: str = "all",
         period: str = "all",
@@ -2015,7 +2014,6 @@ class ServerHubView(ReviewsLayout):
         self.recent = recent
         self.catalog = catalog
         self.top_items = top
-        self.titles = titles
         self.catalog_subtitle = catalog_subtitle
         self.media_type = media_type
         self.period = period
@@ -2095,7 +2093,7 @@ class ServerHubView(ReviewsLayout):
             _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
             year = f" ({hit.year})" if hit.year else ""
             text = (
-                f"{_titled(_mention(self.guild, self.cog.bot, user_id), self.titles.get(user_id, title_for_level(1)))}\n"
+                f"{_mention(self.guild, self.cog.bot, user_id)}\n"
                 f"{format_stars(row['rating'])}  **{row['rating']:g}/5**\n"
                 f"**{hit.title}**{year} · {type_label(hit.media_type)} · <t:{row['updated_at']}:R>"
             )
@@ -2797,15 +2795,13 @@ class Reviews(commands.Cog):
         if not groups:
             return ""
 
+        rating, user_ids = max(groups.items(), key=lambda item: (len(item[1]), item[0]))
         named_max = 3
-        parts: list[str] = []
-        for rating, user_ids in sorted(groups.items(), key=lambda item: (-len(item[1]), -item[0])):
-            shown = user_ids[:named_max]
-            extra = max(0, len(user_ids) - named_max)
-            people = _format_people_fr([_mention_silent(uid) for uid in shown], extra)
-            verb = "a mis" if len(user_ids) == 1 else "ont mis"
-            parts.append(f"{people} {verb} {rating:g}/5")
-        return "  ·  ".join(parts)
+        shown = user_ids[:named_max]
+        extra = max(0, len(user_ids) - named_max)
+        people = _format_people_fr([_mention_silent(uid) for uid in shown], extra)
+        verb = "a mis" if len(user_ids) == 1 else "ont mis"
+        return f"{people} {verb} {rating:g}/5"
 
     async def list_affinities(self, guild: discord.Guild, user_id: int) -> list[Affinity]:
         await self.ensure_progress(guild)
@@ -3210,7 +3206,6 @@ class Reviews(commands.Cog):
             min_rating=min_rating,
         )
         top = await self.load_top(guild, media_type=media_type)
-        titles = await self.get_titles(guild, [int(row["user_id"]) for _hit, row in recent])
         subtitle_parts = []
         if query:
             subtitle_parts.append(f"« {pretty.shorten_text(query, 60)} »")
@@ -3227,7 +3222,6 @@ class Reviews(commands.Cog):
             recent=recent,
             catalog=catalog,
             top=top,
-            titles=titles,
             catalog_subtitle="  ·  ".join(subtitle_parts) or "Toutes les œuvres notées",
             media_type=media_type,
             tab="catalogue" if filtered else "recentes",
