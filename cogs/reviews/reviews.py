@@ -917,7 +917,6 @@ def build_announce_view(
     *,
     mention: str,
     title: str,
-    avatar_url: str | None,
     rating: float,
     comment: str,
     updated: bool,
@@ -927,7 +926,8 @@ def build_announce_view(
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
-    profile = f"{_titled(mention, title)}\n{verb}"
+    stamped = f"<t:{int(time.time())}:f>"
+    profile = f"{mention} · _{title}_ · le {stamped} · {verb}"
     film = f"{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
     shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
     if shown:
@@ -935,7 +935,7 @@ def build_announce_view(
     seen = experienced_line(hit.media_type, experienced_at)
     if seen:
         film += f"\n{seen}"
-    container.add_item(section_with_thumbnail(profile, avatar_url))
+    container.add_item(discord.ui.TextDisplay(profile))
     container.add_item(discord.ui.Separator())
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
@@ -4676,13 +4676,11 @@ class Reviews(commands.Cog):
         channel = await self.get_announce_channel(guild, hit.media_type)
         if channel is None:
             return
-        _name, avatar = _user_display(guild, self.bot, user.id)
         titles = await self.get_titles(guild, [user.id])
         view = build_announce_view(
             hit,
             mention=_mention(guild, self.bot, user.id),
             title=titles.get(user.id, title_for_level(1)),
-            avatar_url=avatar,
             rating=rating,
             comment=comment,
             updated=updated,
