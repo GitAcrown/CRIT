@@ -29,7 +29,23 @@ from .dyn import (
     sweep_expired,
     update_payload,
 )
-from .emojis import BOOK, EXPLICIT, GAME, MUSIC, RIVAL, SALE, STAR, STAR_EMPTY, STAR_HALF, TWIN, TV, XP
+from .emojis import (
+    A_VOIR_OFF,
+    A_VOIR_ON,
+    BOOK,
+    EXPLICIT,
+    GAME,
+    MUSIC,
+    RIVAL,
+    SALE,
+    SHARE,
+    STAR,
+    STAR_EMPTY,
+    STAR_HALF,
+    TWIN,
+    TV,
+    XP,
+)
 from .progress import (
     Affinity,
     MIN_AFFINITY_OVERLAP,
@@ -96,6 +112,12 @@ MAX_COMMENT_MAX = 500
 JOURNAL_PAGE = 4
 REVIEWS_PAGE = 5
 CATALOG_PAGE = 8
+LIST_PAGE = 4
+MAX_SHARED_LISTS = 20
+MAX_LIST_ITEMS = 100
+LIST_TITLE_MAX = 80
+LIST_DESC_MAX = 200
+LIST_EDIT_MODES = ("owner", "members", "public")
 
 TYPE_META: dict[str, tuple[str, str]] = {
     "movie": (TV, "Film"),
@@ -347,6 +369,14 @@ def autocomplete_query_value(hit: MediaHit) -> str:
     if hit.source == "openlibrary":
         return f"ol:{hit.source_id}"
     return pretty.shorten_text(hit.title, 100)
+
+
+def list_edit_label(mode: str) -> str:
+    return {
+        "owner": "Créateur seul",
+        "members": "Membres choisis",
+        "public": "Tout le serveur",
+    }.get(mode, "Créateur seul")
 
 
 def parse_rating(raw: str) -> float | None:
@@ -1309,14 +1339,23 @@ class RateButton(discord.ui.Button):
 
 class WatchlistButton(discord.ui.Button):
     def __init__(self, parent: "MediaSessionView"):
-        on = bool(parent.on_watchlist)
+        rated = bool(parent.my_review)
+        on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            label="Retirer" if on else "À voir",
-            style=discord.ButtonStyle.secondary if on else discord.ButtonStyle.primary,
+            emoji=discord.PartialEmoji.from_str(A_VOIR_ON if on else A_VOIR_OFF),
+            style=discord.ButtonStyle.secondary if (on or rated) else discord.ButtonStyle.primary,
+            disabled=rated,
         )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if self._hub.my_review:
+            await interaction.response.send_message(
+                "**Déjà noté ·** Cette œuvre n'est plus dans ta liste à voir.",
+                ephemeral=True,
+                delete_after=8,
+            )
+            return
         await interaction.response.defer()
         if self._hub.on_watchlist:
             media_id = await self._hub.cog.lookup_media_id(self._hub.guild, self._hub.hit)
@@ -1361,7 +1400,11 @@ class PublishFicheButton(discord.ui.Button):
 
 class ProfileShareButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
-        super().__init__(label="Partager", style=discord.ButtonStyle.secondary)
+        super().__init__(
+            label="Partager",
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(SHARE),
+        )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -2041,6 +2084,683 @@ class FavoritePickView(ReviewsLayout):
         return True
 
 
+# ---------------------------------------------------------------------------
+# Listes communes
+# ---------------------------------------------------------------------------
+
+class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
+    def __init__(self, parent: "ListsHubView"):
+        super().__init__()
+        self._hub = parent
+        self.title_input = discord.ui.TextInput(
+            label="Titre",
+            placeholder="Ex. Soirée Horreur",
+            max_length=LIST_TITLE_MAX,
+            required=True,
+        )
+        self.desc_input = discord.ui.TextInput(
+            label="Description (optionnel)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Une courte phrase pour présenter la liste",
+            max_length=LIST_DESC_MAX,
+            required=False,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.desc_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        title = str(self.title_input.value or "").strip()
+        if not title:
+            await interaction.response.send_message("**Erreur ·** Donne un titre à la liste.", ephemeral=True)
+            return
+        owned = await self._hub.cog.count_owned_lists(self._hub.guild, interaction.user.id)
+        if owned >= MAX_SHARED_LISTS:
+            await interaction.response.send_message(
+                f"**Erreur ·** Tu as déjà {MAX_SHARED_LISTS} listes sur ce serveur.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+        record = await self._hub.cog.create_shared_list(
+            self._hub.guild,
+            interaction.user.id,
+            title,
+            str(self.desc_input.value or "").strip(),
+        )
+        view = await SharedListView.create(
+            self._hub.cog, self._hub.guild, record["id"], viewer_id=self._hub.viewer_id,
+        )
+        if view is None:
+            await self._hub.refresh(interaction)
+            return
+        view._interaction = interaction
+        await apply_view(interaction, view)
+
+
+class EditSharedListModal(discord.ui.Modal, title="Modifier la liste"):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__()
+        self._hub = parent
+        self.title_input = discord.ui.TextInput(
+            label="Titre",
+            default=parent.record["title"][:LIST_TITLE_MAX],
+            max_length=LIST_TITLE_MAX,
+            required=True,
+        )
+        self.desc_input = discord.ui.TextInput(
+            label="Description (optionnel)",
+            style=discord.TextStyle.paragraph,
+            default=(parent.record["description"] or "")[:LIST_DESC_MAX] or None,
+            max_length=LIST_DESC_MAX,
+            required=False,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.desc_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        title = str(self.title_input.value or "").strip()
+        if not title:
+            await interaction.response.send_message("**Erreur ·** Donne un titre à la liste.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await self._hub.cog.update_shared_list(
+            self._hub.guild,
+            self._hub.record["id"],
+            title=title,
+            description=str(self.desc_input.value or "").strip(),
+        )
+        await self._hub.refresh(interaction)
+
+
+class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__()
+        self._hub = parent
+        self.query_input = discord.ui.TextInput(
+            label="Titre de l'œuvre",
+            placeholder="Ex. Dune 2021",
+            max_length=80,
+            required=True,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self._hub.can_edit(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        query = str(self.query_input.value or "").strip()
+        catalog = self._hub.cog.catalog
+        if catalog is None:
+            await interaction.followup.send("**Erreur ·** Catalogue média indisponible.", ephemeral=True)
+            return
+        try:
+            hits = await catalog.search(query, "all")
+        except Exception:
+            logger.exception("Recherche pour liste commune impossible")
+            await interaction.followup.send("**Erreur ·** Recherche impossible pour le moment.", ephemeral=True)
+            return
+        if not hits:
+            await interaction.followup.send(
+                f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} ».",
+                ephemeral=True,
+            )
+            return
+        if len(hits) == 1:
+            error = await self._hub.cog.add_shared_list_item(
+                self._hub.guild, self._hub.record["id"], interaction.user.id, hits[0],
+            )
+            await self._hub.refresh()
+            await interaction.followup.send(
+                f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}",
+                ephemeral=True,
+            )
+            return
+        view = SharedListPickView(self._hub, hits)
+        await interaction.followup.send(view=view, ephemeral=True)
+
+
+class SharedListHitSelect(discord.ui.Select):
+    def __init__(self, parent: "SharedListPickView", hits: list[MediaHit]):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                value=str(index),
+                description=select_hit_description(hit),
+                emoji=select_emoji(hit.media_type),
+            )
+            for index, hit in enumerate(hits[:25])
+        ]
+        super().__init__(placeholder="Choisir une œuvre", options=options, min_values=1, max_values=1)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        hit = self._hub.hits[int(self.values[0])]
+        error = await self._hub.liste.cog.add_shared_list_item(
+            self._hub.liste.guild, self._hub.liste.record["id"], interaction.user.id, hit,
+        )
+        await self._hub.liste.refresh()
+        done = discord.ui.LayoutView(timeout=30)
+        box = discord.ui.Container()
+        box.add_item(discord.ui.TextDisplay(
+            f"**Liste ·** {error}" if error else f"**Ajouté ·** {hit.title}"
+        ))
+        done.add_item(box)
+        await interaction.edit_original_response(view=done)
+
+
+class SharedListPickView(ReviewsLayout):
+    def __init__(self, liste: "SharedListView", hits: list[MediaHit]):
+        super().__init__(timeout=180)
+        self.liste = liste
+        self.hits = hits
+        self.set_layout(
+            [discord.ui.TextDisplay(
+                f"## Ajouter à {pretty.shorten_text(liste.record['title'], 60)}\n"
+                f"-# {len(hits)} résultat(s) — choisis l'œuvre"
+            )],
+            discord.ui.ActionRow(SharedListHitSelect(self, hits)),
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.liste.viewer_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ce menu ne s'affiche que pour toi.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+
+class ListsHubOpenSelect(discord.ui.Select):
+    def __init__(self, parent: "ListsHubView", page_items: list[dict[str, Any]]):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(record["title"], 95),
+                value=str(record["id"]),
+                description=pretty.shorten_text(
+                    f"{record['item_count']} œuvre{'s' if record['item_count'] != 1 else ''} · {list_edit_label(record['edit_mode'])}",
+                    95,
+                ),
+            )
+            for record in page_items
+        ]
+        super().__init__(placeholder="Ouvrir une liste", options=options)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        view = await SharedListView.create(
+            self._hub.cog, self._hub.guild, int(self.values[0]), viewer_id=self._hub.viewer_id,
+        )
+        if view is None:
+            await self._hub.refresh(interaction)
+            return
+        view._interaction = interaction
+        await apply_view(interaction, view)
+
+
+class CreateSharedListButton(discord.ui.Button):
+    def __init__(self, parent: "ListsHubView"):
+        super().__init__(label="Créer une liste", style=discord.ButtonStyle.green)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(CreateSharedListModal(self._hub))
+
+
+class SharedListBackButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="← Listes", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        hub = await ListsHubView.create(
+            self._hub.cog, self._hub.guild, viewer_id=self._hub.viewer_id,
+        )
+        hub._interaction = interaction
+        await apply_view(interaction, hub)
+
+
+class SharedListAddButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Ajouter", style=discord.ButtonStyle.green)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.can_edit(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.send_modal(SharedListAddModal(self._hub))
+
+
+class SharedListDrawButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Tirage", style=discord.ButtonStyle.primary, disabled=not parent.items)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        hit = await self._hub.cog.draw_shared_list(self._hub.guild, self._hub.record["id"])
+        if hit is None:
+            await interaction.followup.send("**Tirage ·** Cette liste est vide.", ephemeral=True)
+            return
+        await open_session_followup(
+            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
+        )
+
+
+class SharedListEditButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Modifier", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur peut modifier le titre.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.send_modal(EditSharedListModal(self._hub))
+
+
+class SharedListDeleteButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Supprimer", style=discord.ButtonStyle.red)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur peut supprimer cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.defer()
+        await self._hub.cog.delete_shared_list(self._hub.guild, self._hub.record["id"])
+        hub = await ListsHubView.create(
+            self._hub.cog, self._hub.guild, viewer_id=self._hub.viewer_id,
+        )
+        hub._interaction = interaction
+        await apply_view(interaction, hub)
+
+
+class SharedListOpenSelect(discord.ui.Select):
+    def __init__(self, parent: "SharedListView", page_items: list[tuple[MediaHit, Any]]):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                value=str(index),
+                description=pretty.shorten_text(f"{type_label(hit.media_type)} · {hit.year or '—'}", 95),
+                emoji=select_emoji(hit.media_type),
+            )
+            for index, (hit, _row) in enumerate(page_items)
+        ]
+        super().__init__(placeholder="Ouvrir une fiche", options=options)
+        self._hub = parent
+        self._items = page_items
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        hit, _row = self._items[int(self.values[0])]
+        await interaction.response.defer()
+        await open_session_followup(
+            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
+        )
+
+
+class SharedListRemoveSelect(discord.ui.Select):
+    def __init__(self, parent: "SharedListView", page_items: list[tuple[MediaHit, Any]]):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                value=str(index),
+                description="Retirer de la liste",
+                emoji=select_emoji(hit.media_type),
+            )
+            for index, (hit, _row) in enumerate(page_items)
+        ]
+        super().__init__(placeholder="Retirer une œuvre", options=options)
+        self._hub = parent
+        self._items = page_items
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.can_edit(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.defer()
+        hit, _row = self._items[int(self.values[0])]
+        media_id = await self._hub.cog.lookup_media_id(self._hub.guild, hit)
+        if media_id:
+            await self._hub.cog.remove_shared_list_item(self._hub.guild, self._hub.record["id"], media_id)
+        await self._hub.refresh(interaction)
+
+
+class SharedListModeSelect(discord.ui.Select):
+    def __init__(self, parent: "SharedListView"):
+        options = [
+            discord.SelectOption(
+                label="Créateur seul",
+                value="owner",
+                description="Toi uniquement",
+                default=parent.record["edit_mode"] == "owner",
+            ),
+            discord.SelectOption(
+                label="Membres choisis",
+                value="members",
+                description="Toi + les membres du menu ci-dessous",
+                default=parent.record["edit_mode"] == "members",
+            ),
+            discord.SelectOption(
+                label="Tout le serveur",
+                value="public",
+                description="N'importe qui peut ajouter ou retirer",
+                default=parent.record["edit_mode"] == "public",
+            ),
+        ]
+        super().__init__(placeholder="Qui peut éditer ?", options=options, min_values=1, max_values=1)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur choisit qui peut éditer.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.defer()
+        await self._hub.cog.update_shared_list(
+            self._hub.guild, self._hub.record["id"], edit_mode=self.values[0],
+        )
+        await self._hub.refresh(interaction)
+
+
+class SharedListEditorsSelect(discord.ui.UserSelect):
+    def __init__(self, parent: "SharedListView"):
+        kwargs: dict[str, Any] = {
+            "placeholder": "Membres qui peuvent éditer…",
+            "min_values": 0,
+            "max_values": 25,
+        }
+        if parent.editor_ids:
+            kwargs["default_values"] = [discord.Object(id=user_id) for user_id in parent.editor_ids[:25]]
+        super().__init__(**kwargs)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur choisit les éditeurs.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.defer()
+        ids = [
+            user.id
+            for user in self.values
+            if not getattr(user, "bot", False) and user.id != self._hub.record["owner_id"]
+        ]
+        await self._hub.cog.set_shared_list_editors(self._hub.guild, self._hub.record["id"], ids)
+        await self._hub.refresh(interaction)
+
+
+class ListsHubView(ReviewsLayout):
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        lists: list[dict[str, Any]],
+        viewer_id: int,
+    ):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild = guild
+        self.lists = lists
+        self.viewer_id = viewer_id
+        self.page = 0
+        self._interaction: discord.Interaction | None = None
+        self._build()
+
+    @classmethod
+    async def create(cls, cog: "Reviews", guild: discord.Guild, *, viewer_id: int) -> "ListsHubView":
+        return cls(cog, guild, lists=await cog.load_shared_lists(guild), viewer_id=viewer_id)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.viewer_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ce menu ne s'affiche que pour toi.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    def _page_nav(self, max_page: int) -> discord.ui.ActionRow | None:
+        if max_page <= 0:
+            return None
+        prev_btn = HubPageButton(self, "page", -1, "← Précédent", max_page)
+        next_btn = HubPageButton(self, "page", 1, "Suivant →", max_page)
+        prev_btn.disabled = self.page <= 0
+        next_btn.disabled = self.page >= max_page
+        return discord.ui.ActionRow(prev_btn, next_btn)
+
+    def _build(self) -> None:
+        body: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(
+                f"## Listes\n-# {len(self.lists)} liste{'s' if len(self.lists) != 1 else ''} sur ce serveur"
+            ),
+            sep_wide(),
+        ]
+        rows: list[discord.ui.ActionRow] = []
+        if not self.lists:
+            body.append(discord.ui.TextDisplay(
+                "*Aucune liste pour l'instant. Crée-en une avec un titre et une courte description.*"
+            ))
+            rows.append(discord.ui.ActionRow(CreateSharedListButton(self)))
+            self.set_layout(body, *rows)
+            return
+        max_page = max(0, (len(self.lists) - 1) // LIST_PAGE)
+        self.page = min(self.page, max_page)
+        start = self.page * LIST_PAGE
+        page_items = self.lists[start:start + LIST_PAGE]
+        for index, record in enumerate(page_items):
+            if index:
+                body.append(sep_tight())
+            desc = pretty.shorten_text(record["description"], 160) if record["description"] else "*Pas de description.*"
+            n = record["item_count"]
+            text = (
+                f"### {record['title']}\n{desc}\n"
+                f"-# {_mention(self.guild, self.cog.bot, record['owner_id'])} · "
+                f"{n} œuvre{'s' if n != 1 else ''} · {list_edit_label(record['edit_mode'])}"
+            )
+            body.append(discord.ui.TextDisplay(text))
+        rows.append(discord.ui.ActionRow(ListsHubOpenSelect(self, page_items)))
+        rows.append(discord.ui.ActionRow(CreateSharedListButton(self)))
+        nav = self._page_nav(max_page)
+        if nav:
+            rows.append(nav)
+        self.set_layout(body, *rows)
+
+    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+        self.lists = await self.cog.load_shared_lists(self.guild)
+        self._build()
+        editor = interaction or self._interaction
+        if editor is None:
+            return
+        try:
+            await apply_view(editor, self)
+        except discord.HTTPException as exc:
+            logger.warning("Impossible de rafraîchir les listes : %s", exc)
+
+
+class SharedListView(ReviewsLayout):
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        record: dict[str, Any],
+        items: list[tuple[MediaHit, Any]],
+        editor_ids: list[int],
+        viewer_id: int,
+    ):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild = guild
+        self.record = record
+        self.items = items
+        self.editor_ids = editor_ids
+        self.viewer_id = viewer_id
+        self.item_page = 0
+        self._interaction: discord.Interaction | None = None
+        self._build()
+
+    @classmethod
+    async def create(
+        cls, cog: "Reviews", guild: discord.Guild, list_id: int, *, viewer_id: int
+    ) -> "SharedListView | None":
+        record = await cog.get_shared_list(guild, list_id)
+        if record is None:
+            return None
+        return cls(
+            cog,
+            guild,
+            record=record,
+            items=await cog.load_shared_list_items(guild, list_id),
+            editor_ids=await cog.load_shared_list_editors(guild, list_id),
+            viewer_id=viewer_id,
+        )
+
+    def is_owner(self, user_id: int) -> bool:
+        return user_id == int(self.record["owner_id"])
+
+    def can_edit(self, user_id: int) -> bool:
+        return self.cog.can_edit_shared_list(self.record, user_id, self.editor_ids)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.viewer_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ce menu ne s'affiche que pour toi.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    def _page_nav(self, max_page: int) -> discord.ui.ActionRow | None:
+        if max_page <= 0:
+            return None
+        prev_btn = HubPageButton(self, "item_page", -1, "← Précédent", max_page)
+        next_btn = HubPageButton(self, "item_page", 1, "Suivant →", max_page)
+        prev_btn.disabled = self.item_page <= 0
+        next_btn.disabled = self.item_page >= max_page
+        return discord.ui.ActionRow(prev_btn, next_btn)
+
+    def _header(self) -> str:
+        desc = pretty.shorten_text(self.record["description"], 220) if self.record["description"] else "*Pas de description.*"
+        n = len(self.items)
+        lines = [
+            f"## {self.record['title']}",
+            desc,
+            f"-# {_mention(self.guild, self.cog.bot, self.record['owner_id'])} · "
+            f"{n} œuvre{'s' if n != 1 else ''} · édition : {list_edit_label(self.record['edit_mode']).lower()}",
+        ]
+        if self.record["edit_mode"] == "members" and self.editor_ids:
+            shown = [_mention(self.guild, self.cog.bot, user_id) for user_id in self.editor_ids[:8]]
+            extra = len(self.editor_ids) - len(shown)
+            lines.append(f"-# Éditeurs · {', '.join(shown)}" + (f" et {extra} autre(s)" if extra else ""))
+        elif self.record["edit_mode"] == "members":
+            lines.append("-# Aucun membre choisi pour l'instant.")
+        return "\n".join(lines)
+
+    def _build(self) -> None:
+        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
+        rows: list[discord.ui.ActionRow] = []
+        if not self.items:
+            body.append(discord.ui.TextDisplay("*Cette liste est vide.*"))
+        else:
+            max_page = max(0, (len(self.items) - 1) // LIST_PAGE)
+            self.item_page = min(self.item_page, max_page)
+            start = self.item_page * LIST_PAGE
+            page_items = self.items[start:start + LIST_PAGE]
+            for index, (hit, row) in enumerate(page_items):
+                if index:
+                    body.append(sep_tight())
+                year = f" ({hit.year})" if hit.year else ""
+                added_by = 0
+                added_at = 0
+                try:
+                    added_by = int(row["added_by"] or 0)
+                    added_at = int(row["added_at"] or 0)
+                except (KeyError, IndexError, TypeError):
+                    if isinstance(row, dict):
+                        added_by = int(row.get("added_by") or 0)
+                        added_at = int(row.get("added_at") or 0)
+                who = _mention(self.guild, self.cog.bot, added_by) if added_by else "quelqu'un"
+                when = f" · <t:{added_at}:R>" if added_at else ""
+                text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)} · ajouté par {who}{when}"
+                body.append(section_with_thumbnail(text, hit.poster_url))
+            rows.append(discord.ui.ActionRow(SharedListOpenSelect(self, page_items)))
+            if self.can_edit(self.viewer_id):
+                rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
+            nav = self._page_nav(max_page)
+            if nav:
+                rows.append(nav)
+        if self.is_owner(self.viewer_id):
+            rows.append(discord.ui.ActionRow(SharedListModeSelect(self)))
+            if self.record["edit_mode"] == "members":
+                rows.append(discord.ui.ActionRow(SharedListEditorsSelect(self)))
+        actions: list[discord.ui.Item] = [SharedListBackButton(self), SharedListDrawButton(self)]
+        if self.can_edit(self.viewer_id):
+            actions.insert(1, SharedListAddButton(self))
+        if self.is_owner(self.viewer_id):
+            actions.append(SharedListEditButton(self))
+            if len(actions) < 5:
+                actions.append(SharedListDeleteButton(self))
+        rows.append(discord.ui.ActionRow(*actions[:5]))
+        self.set_layout(body, *rows)
+
+    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+        record = await self.cog.get_shared_list(self.guild, self.record["id"])
+        if record is None:
+            hub = await ListsHubView.create(self.cog, self.guild, viewer_id=self.viewer_id)
+            hub._interaction = interaction or self._interaction
+            editor = interaction or self._interaction
+            if editor is not None:
+                await apply_view(editor, hub)
+            return
+        self.record = record
+        self.items = await self.cog.load_shared_list_items(self.guild, record["id"])
+        self.editor_ids = await self.cog.load_shared_list_editors(self.guild, record["id"])
+        self._build()
+        editor = interaction or self._interaction
+        if editor is None:
+            return
+        try:
+            await apply_view(editor, self)
+        except discord.HTTPException as exc:
+            logger.warning("Impossible de rafraîchir la liste « %s » : %s", self.record["title"], exc)
+
+
 class ProfileView(ReviewsLayout):
     def __init__(
         self,
@@ -2284,24 +3004,18 @@ class ProfileView(ReviewsLayout):
         return body, rows
 
     def _affinites_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
-        _me, avatar = _user_display(self.guild, self.cog.bot, self.member.id)
+        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header()), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
-        extra = (
-            f"-# {len(self.affinities)} affinité(s) · min. {MIN_AFFINITY_OVERLAP} en commun"
-            if self.affinities else ""
-        )
         if not self.affinities:
-            body = [section_with_thumbnail(
-                f"{self._profile_header()}\n"
+            body.append(discord.ui.TextDisplay(
                 f"*Pas encore assez d'œuvres en commun avec quelqu'un "
-                f"(minimum {MIN_AFFINITY_OVERLAP}).*",
-                avatar,
-            )]
+                f"(minimum {MIN_AFFINITY_OVERLAP}).*"
+            ))
             return body, rows
         twins = self.affinities[:3]
         rival = min(self.affinities, key=lambda a: (a.percent, -a.overlap))
         lines = [
-            self._profile_header(extra),
+            f"-# {len(self.affinities)} affinité(s) · min. {MIN_AFFINITY_OVERLAP} en commun",
             "",
             f"### {TWIN} Jumeaux",
         ]
@@ -2313,7 +3027,7 @@ class ProfileView(ReviewsLayout):
             lines.append(f"### {RIVAL} Rival")
             lines.append(self._person(rival.user_id))
             lines.append(f"-# {rival.percent:.0f} %")
-        body = [section_with_thumbnail("\n".join(lines), avatar)]
+        body.append(discord.ui.TextDisplay("\n".join(lines)))
         rows.append(discord.ui.ActionRow(AffinityCompareSelect(self)))
         return body, rows
 
@@ -2757,9 +3471,11 @@ class HelpView(ReviewsLayout):
         commandes = (
             "### Commandes\n"
             "`/note` — catalogues (TMDB, Steam, Spotify, Open Library) : noter ou à voir\n"
-            "`/carnet` — page d'un membre : préférées, journal, à voir, affinités\n"
+            "`/carnet` — page d'un membre : préférées, journal, à voir, affinités "
+            "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
-            "`/tirage` — une œuvre au hasard dans une liste à voir (toi ou le serveur)\n"
+            "`/listes` — listes communes : créer, ajouter des œuvres, tirer au hasard\n"
+            "`/tirage` — une œuvre au hasard (à voir, ou une liste commune)\n"
             "`/config` — salon d'annonces et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -2768,7 +3484,9 @@ class HelpView(ReviewsLayout):
             f"### {XP} Autour des notes\n"
             f"{TV} Films et séries  ·  {GAME} Jeux  ·  {MUSIC} Albums et morceaux  ·  {BOOK} Livres\n"
             "Le journal de `/carnet` se filtre par type et se trie (récentes / mieux notées). "
-            "Ton commentaire spoiler reste lisible dans ton journal, pas en public.\n"
+            "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
+            "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
+            "(lui seul, des membres, ou tout le serveur).\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -2865,6 +3583,32 @@ class Reviews(commands.Cog):
                 PRIMARY KEY (user_id, media_id)
             )"""
         )
+        shared_lists_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS shared_lists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                edit_mode TEXT NOT NULL DEFAULT 'owner',
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        shared_list_editors_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS shared_list_editors (
+                list_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (list_id, user_id)
+            )"""
+        )
+        shared_list_items_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS shared_list_items (
+                list_id INTEGER NOT NULL,
+                media_id INTEGER NOT NULL,
+                added_by INTEGER NOT NULL,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (list_id, media_id)
+            )"""
+        )
         self.data.link(
             discord.Guild,
             settings,
@@ -2873,6 +3617,9 @@ class Reviews(commands.Cog):
             profiles_table,
             favorites_table,
             watchlist_table,
+            shared_lists_table,
+            shared_list_editors_table,
+            shared_list_items_table,
         )
 
     async def cog_load(self) -> None:
@@ -2899,11 +3646,20 @@ class Reviews(commands.Cog):
         if missing:
             logger.warning("Fournisseurs incomplets : %s", ", ".join(missing))
         self.bot.add_dynamic_items(FicheDynButton)
+        self._carnet_menu = app_commands.ContextMenu(
+            name="Voir le carnet",
+            callback=self.critique_carnet_user,
+        )
+        existing = self.bot.tree.get_command("Voir le carnet", type=discord.AppCommandType.user)
+        if existing is not None:
+            self.bot.tree.remove_command("Voir le carnet", type=discord.AppCommandType.user)
+        self.bot.tree.add_command(self._carnet_menu)
         self._sweep_fiches.start()
 
     async def cog_unload(self) -> None:
         self._sweep_fiches.cancel()
         self.bot.remove_dynamic_items(FicheDynButton)
+        self.bot.tree.remove_command("Voir le carnet", type=discord.AppCommandType.user)
         if self._http is not None:
             await self._http.close()
             self._http = None
@@ -3000,6 +3756,32 @@ class Reviews(commands.Cog):
                 media_id INTEGER NOT NULL,
                 added_at INTEGER NOT NULL,
                 PRIMARY KEY (user_id, media_id)
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS shared_lists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                edit_mode TEXT NOT NULL DEFAULT 'owner',
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS shared_list_editors (
+                list_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (list_id, user_id)
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS shared_list_items (
+                list_id INTEGER NOT NULL,
+                media_id INTEGER NOT NULL,
+                added_by INTEGER NOT NULL,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (list_id, media_id)
             )"""
         )
         scaled = await db.get_dict_value("settings", "RatingsOnTen")
@@ -3128,6 +3910,213 @@ class Reviews(commands.Cog):
         if not rows:
             return None
         return hit_from_row(random.choice(rows))
+
+    def can_edit_shared_list(self, record: dict[str, Any], user_id: int, editor_ids: list[int]) -> bool:
+        if int(record["owner_id"]) == user_id:
+            return True
+        mode = record.get("edit_mode") or "owner"
+        if mode == "public":
+            return True
+        return mode == "members" and user_id in editor_ids
+
+    def _shared_list_from_row(self, row: Any, *, item_count: int | None = None) -> dict[str, Any]:
+        count = item_count
+        if count is None:
+            try:
+                count = int(row["item_count"] or 0)
+            except (KeyError, IndexError, TypeError):
+                count = 0
+        return {
+            "id": int(row["id"]),
+            "owner_id": int(row["owner_id"]),
+            "title": row["title"] or "Sans titre",
+            "description": row["description"] or "",
+            "edit_mode": row["edit_mode"] if row["edit_mode"] in LIST_EDIT_MODES else "owner",
+            "created_at": int(row["created_at"] or 0),
+            "item_count": count,
+        }
+
+    async def load_shared_lists(self, guild: discord.Guild) -> list[dict[str, Any]]:
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            """SELECT l.*, COUNT(i.media_id) AS item_count
+               FROM shared_lists l
+               LEFT JOIN shared_list_items i ON i.list_id = l.id
+               GROUP BY l.id
+               ORDER BY l.created_at DESC"""
+        )
+        return [self._shared_list_from_row(row) for row in rows]
+
+    async def get_shared_list(self, guild: discord.Guild, list_id: int) -> dict[str, Any] | None:
+        await self._ensure_schema(guild)
+        row = await self.data.get(guild).fetchone(
+            """SELECT l.*, COUNT(i.media_id) AS item_count
+               FROM shared_lists l
+               LEFT JOIN shared_list_items i ON i.list_id = l.id
+               WHERE l.id=?
+               GROUP BY l.id""",
+            list_id,
+        )
+        return self._shared_list_from_row(row) if row else None
+
+    async def count_owned_lists(self, guild: discord.Guild, user_id: int) -> int:
+        await self._ensure_schema(guild)
+        row = await self.data.get(guild).fetchone(
+            "SELECT COUNT(*) AS n FROM shared_lists WHERE owner_id=?",
+            user_id,
+        )
+        return int(row["n"]) if row else 0
+
+    async def create_shared_list(
+        self, guild: discord.Guild, user_id: int, title: str, description: str
+    ) -> dict[str, Any]:
+        await self._ensure_schema(guild)
+        now = int(time.time())
+        db = self.data.get(guild)
+        await db.execute(
+            """INSERT INTO shared_lists (owner_id, title, description, edit_mode, created_at)
+               VALUES (?, ?, ?, 'owner', ?)""",
+            user_id,
+            title.strip()[:LIST_TITLE_MAX],
+            description.strip()[:LIST_DESC_MAX],
+            now,
+        )
+        row = await db.fetchone("SELECT last_insert_rowid() AS id")
+        created = await self.get_shared_list(guild, int(row["id"])) if row else None
+        assert created is not None
+        return created
+
+    async def update_shared_list(
+        self,
+        guild: discord.Guild,
+        list_id: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        edit_mode: str | None = None,
+    ) -> None:
+        await self._ensure_schema(guild)
+        record = await self.get_shared_list(guild, list_id)
+        if record is None:
+            return
+        await self.data.get(guild).execute(
+            "UPDATE shared_lists SET title=?, description=?, edit_mode=? WHERE id=?",
+            (title.strip()[:LIST_TITLE_MAX] if title is not None else record["title"]),
+            (description.strip()[:LIST_DESC_MAX] if description is not None else record["description"]),
+            (edit_mode if edit_mode in LIST_EDIT_MODES else record["edit_mode"]),
+            list_id,
+        )
+
+    async def delete_shared_list(self, guild: discord.Guild, list_id: int) -> None:
+        await self._ensure_schema(guild)
+        db = self.data.get(guild)
+        await db.execute("DELETE FROM shared_list_items WHERE list_id=?", list_id)
+        await db.execute("DELETE FROM shared_list_editors WHERE list_id=?", list_id)
+        await db.execute("DELETE FROM shared_lists WHERE id=?", list_id)
+
+    async def load_shared_list_editors(self, guild: discord.Guild, list_id: int) -> list[int]:
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            "SELECT user_id FROM shared_list_editors WHERE list_id=?",
+            list_id,
+        )
+        return [int(row["user_id"]) for row in rows]
+
+    async def set_shared_list_editors(
+        self, guild: discord.Guild, list_id: int, user_ids: list[int]
+    ) -> None:
+        await self._ensure_schema(guild)
+        db = self.data.get(guild)
+        await db.execute("DELETE FROM shared_list_editors WHERE list_id=?", list_id)
+        unique = []
+        seen: set[int] = set()
+        for user_id in user_ids:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            unique.append(user_id)
+        if unique:
+            await db.executemany(
+                "INSERT INTO shared_list_editors (list_id, user_id) VALUES (?, ?)",
+                [(list_id, user_id) for user_id in unique[:25]],
+            )
+
+    async def load_shared_list_items(
+        self, guild: discord.Guild, list_id: int
+    ) -> list[tuple[MediaHit, Any]]:
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            """SELECT i.*, m.source, m.source_id, m.media_type, m.title, m.subtitle, m.year,
+                      m.poster_url, m.url, m.overview, m.genres, m.extra_json
+               FROM shared_list_items i JOIN media m ON m.id = i.media_id
+               WHERE i.list_id=?
+               ORDER BY i.added_at DESC""",
+            list_id,
+        )
+        return [(hit_from_row(row), row) for row in rows]
+
+    async def add_shared_list_item(
+        self, guild: discord.Guild, list_id: int, user_id: int, hit: MediaHit
+    ) -> str | None:
+        await self._ensure_schema(guild)
+        record = await self.get_shared_list(guild, list_id)
+        if record is None:
+            return "Cette liste n'existe plus."
+        if record["item_count"] >= MAX_LIST_ITEMS:
+            return f"Cette liste est pleine ({MAX_LIST_ITEMS} œuvres)."
+        media_id = await self.upsert_media(guild, hit)
+        existing = await self.data.get(guild).fetchone(
+            "SELECT 1 AS n FROM shared_list_items WHERE list_id=? AND media_id=?",
+            list_id,
+            media_id,
+        )
+        if existing:
+            return "Cette œuvre est déjà dans la liste."
+        await self.data.get(guild).execute(
+            "INSERT INTO shared_list_items (list_id, media_id, added_by, added_at) VALUES (?, ?, ?, ?)",
+            list_id,
+            media_id,
+            user_id,
+            int(time.time()),
+        )
+        return None
+
+    async def remove_shared_list_item(
+        self, guild: discord.Guild, list_id: int, media_id: int
+    ) -> None:
+        await self._ensure_schema(guild)
+        await self.data.get(guild).execute(
+            "DELETE FROM shared_list_items WHERE list_id=? AND media_id=?",
+            list_id,
+            media_id,
+        )
+
+    async def draw_shared_list(
+        self,
+        guild: discord.Guild,
+        list_id: int,
+        *,
+        media_type: str = "all",
+        period: str = "all",
+    ) -> MediaHit | None:
+        items = await self.load_shared_list_items(guild, list_id)
+        since = int(time.time()) - PERIOD_SECONDS[period] if period in PERIOD_SECONDS else 0
+        pool = []
+        for hit, row in items:
+            if media_type != "all" and hit.media_type != media_type:
+                continue
+            added = 0
+            try:
+                added = int(row["added_at"] or 0)
+            except (KeyError, IndexError, TypeError):
+                if isinstance(row, dict):
+                    added = int(row.get("added_at") or 0)
+            if since and added < since:
+                continue
+            pool.append(hit)
+        if not pool:
+            return None
+        return random.choice(pool)
 
     async def load_journal(
         self, guild: discord.Guild, user_id: int, media_type: str = "all"
@@ -3671,23 +4660,26 @@ class Reviews(commands.Cog):
                 break
         return choices
 
-    @app_commands.command(name="carnet")
-    @app_commands.guild_only()
-    @app_commands.rename(member="membre")
-    @app_commands.describe(member="Membre dont afficher le carnet, le journal et les affinités")
-    async def critique_carnet(
+    async def _open_carnet(
         self,
         interaction: discord.Interaction,
-        member: discord.Member | None = None,
+        target: discord.Member | discord.User,
     ) -> None:
-        """Carnet d'un membre : préférées, journal, à voir et affinités."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        target = member or interaction.user
-        await interaction.response.defer(ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.",
+                    ephemeral=True,
+                )
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         await self.ensure_progress(guild)
         xp = await self.get_profile_xp(guild, target.id)
         journal_entries = await self.load_journal(guild, target.id)
@@ -3718,6 +4710,26 @@ class Reviews(commands.Cog):
         )
         view._interaction = interaction
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="carnet")
+    @app_commands.guild_only()
+    @app_commands.rename(member="membre")
+    @app_commands.describe(member="Membre dont afficher le carnet, le journal et les affinités")
+    async def critique_carnet(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ) -> None:
+        """Carnet d'un membre : préférées, journal, à voir et affinités."""
+        await self._open_carnet(interaction, member or interaction.user)
+
+    @app_commands.guild_only()
+    async def critique_carnet_user(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | discord.User,
+    ) -> None:
+        await self._open_carnet(interaction, member)
 
     @app_commands.command(name="explore")
     @app_commands.guild_only()
@@ -3776,13 +4788,28 @@ class Reviews(commands.Cog):
         view._interaction = interaction
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
 
+    @app_commands.command(name="listes")
+    @app_commands.guild_only()
+    async def critique_listes(self, interaction: discord.Interaction) -> None:
+        """Listes communes du serveur : créer, éditer et tirer au hasard."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
+        view._interaction = interaction
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+
     @app_commands.command(name="tirage")
     @app_commands.guild_only()
-    @app_commands.rename(scope="portee", media_type="type", period="quand")
+    @app_commands.rename(scope="portee", media_type="type", period="quand", liste="liste")
     @app_commands.describe(
-        scope="Tirer dans ta liste ou dans celles du serveur",
+        scope="Tirer dans ta liste à voir ou dans celles du serveur",
         media_type="Restreindre à un type",
         period="Quand l'œuvre a été ajoutée à la liste",
+        liste="Tirer dans une liste commune (prioritaire sur la portée)",
     )
     @app_commands.choices(scope=SCOPE_CHOICES, media_type=TYPE_CHOICES, period=WHEN_CHOICES)
     async def critique_tirage(
@@ -3791,26 +4818,38 @@ class Reviews(commands.Cog):
         scope: str = "moi",
         media_type: str = "all",
         period: str = "all",
+        liste: str | None = None,
     ) -> None:
-        """Tire une œuvre encore à voir, pour la noter ou la garder."""
+        """Tire une œuvre encore à voir, ou dans une liste commune."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
                 "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
             )
         await interaction.response.defer(ephemeral=True)
-        hit = await self.draw_watchlist(
-            guild,
-            user_id=interaction.user.id if scope == "moi" else None,
-            media_type=media_type,
-            period=period,
-        )
-        if hit is None:
+        list_id = int(liste) if liste and liste.isdigit() else None
+        if list_id:
+            record = await self.get_shared_list(guild, list_id)
+            if record is None:
+                await interaction.edit_original_response(content="**Tirage ·** Cette liste n'existe plus.")
+                return
+            hit = await self.draw_shared_list(
+                guild, list_id, media_type=media_type, period=period,
+            )
+            empty = f"**Tirage ·** « {record['title']} » n'a rien pour ce filtre."
+        else:
+            hit = await self.draw_watchlist(
+                guild,
+                user_id=interaction.user.id if scope == "moi" else None,
+                media_type=media_type,
+                period=period,
+            )
             empty = (
                 "**Tirage ·** Ta liste à voir est vide."
                 if scope == "moi"
                 else "**Tirage ·** Personne n'a d'œuvre à voir pour ce filtre."
             )
+        if hit is None:
             await interaction.edit_original_response(content=empty)
             return
         view = MediaSessionView(
@@ -3821,6 +4860,31 @@ class Reviews(commands.Cog):
             ephemeral=True,
         )
         await view.start(interaction, deferred=True)
+
+    @critique_tirage.autocomplete("liste")
+    async def tirage_liste_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return []
+        try:
+            lists = await self.load_shared_lists(guild)
+        except Exception:
+            return []
+        needle = (current or "").casefold()
+        choices: list[app_commands.Choice[str]] = []
+        for record in lists:
+            if needle and needle not in record["title"].casefold():
+                continue
+            name = pretty.shorten_text(
+                f"{record['title']} · {record['item_count']} œuvre{'s' if record['item_count'] != 1 else ''}",
+                100,
+            )
+            choices.append(app_commands.Choice(name=name, value=str(record["id"])))
+            if len(choices) >= 25:
+                break
+        return choices
 
     @app_commands.command(name="config")
     @app_commands.guild_only()
