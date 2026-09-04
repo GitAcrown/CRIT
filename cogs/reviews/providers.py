@@ -220,6 +220,14 @@ def parse_search_query(raw: str) -> SearchSpec:
             spec.query = ""
             spec.lookup_id = rest
             return spec
+
+    if source == "openlibrary":
+        key = rest.strip()
+        if key.startswith("/works/") or re.match(r"^OL\d+W$", key, re.I):
+            spec.query = ""
+            spec.lookup_id = key if key.startswith("/") else f"/works/{key}"
+            spec.lookup_kind = "work"
+            return spec
     return spec
 
 
@@ -877,6 +885,35 @@ class OpenLibraryClient:
             )
         return hits
 
+    async def lookup(self, work_key: str) -> list[MediaHit]:
+        key = (work_key or "").strip()
+        if not key:
+            return []
+        if not key.startswith("/"):
+            key = f"/works/{key}"
+        try:
+            payload = await _json(
+                self.session,
+                f"https://openlibrary.org{key}.json",
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+        except Exception as exc:
+            logger.warning("Lookup Open Library échoué (%s) : %s", key, exc)
+            return []
+        title = payload.get("title") or "?"
+        covers = payload.get("covers") or []
+        cover_id = covers[0] if covers and isinstance(covers[0], int) else None
+        return [
+            MediaHit(
+                source="openlibrary",
+                source_id=key,
+                media_type="book",
+                title=title,
+                poster_url=OPENLIB_COVER.format(cover_id) if cover_id else None,
+                url=OPENLIB_WORK.format(key),
+            )
+        ]
+
 
 _TYPE_PRIORITY = {
     "movie": 0,
@@ -987,6 +1024,8 @@ class MediaCatalog:
         if spec.source == "spotify":
             kind = spec.lookup_kind if spec.lookup_kind in ("album", "track") else effective
             return await self.spotify.lookup(spec.lookup_id or "", kind if kind in ("album", "track") else None)
+        if spec.source == "openlibrary":
+            return await self.books.lookup(spec.lookup_id or "")
         return []
 
     async def enrich(self, hit: MediaHit) -> MediaHit:

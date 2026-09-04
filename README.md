@@ -6,13 +6,14 @@ Bot Discord (discord.py) dédié aux critiques d'œuvres : un carnet de notes ty
 
 ## Fonctionnalités
 
-Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (Steam), albums et morceaux (Spotify) ou livres (Open Library), avec commentaire optionnel. Fiches d'œuvre, journal, affinités de goût, profil + XP, top du serveur, et annonces des nouvelles notes. Les récompenses de profil se craftent dans `cogs/reviews/progress.py`.
+Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (Steam), albums et morceaux (Spotify) ou livres (Open Library), avec commentaire optionnel (spoiler possible). Fiches d'œuvre, journal, liste à voir, affinités de goût, profil + XP, top du serveur, et annonces des nouvelles notes. Les récompenses de profil se craftent dans `cogs/reviews/progress.py`.
 
 ## Commandes
 
-- `/note` — recherche une œuvre et enregistre (ou prépare) ta note
-- `/carte` — carte d'un membre : préférées, journal et affinités
-- `/search` — explore le serveur : récentes, catalogue et top
+- `/note` — catalogues externes : noter une œuvre ou l'ajouter à voir (autocomplete dès 2 lettres)
+- `/carnet` — page d'un membre : préférées, journal, à voir et affinités
+- `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
+- `/tirage` — tire une œuvre encore à voir (ta liste ou celles du serveur)
 - `/config` — panneau de configuration réservé à la modération (annonces, commentaires)
 - `/help` — aide : commandes et comment noter
 
