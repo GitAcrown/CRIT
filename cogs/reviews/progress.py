@@ -133,7 +133,7 @@ def agreement_percent(pairs: list[tuple[float, float]]) -> float:
     if not pairs:
         return 0.0
     mean_diff = sum(abs(a - b) for a, b in pairs) / len(pairs)
-    return max(0.0, min(100.0, 100.0 * (1.0 - mean_diff / 5.0)))
+    return max(0.0, min(100.0, 100.0 * (1.0 - mean_diff / 10.0)))
 
 
 @dataclass

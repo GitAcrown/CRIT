@@ -27,7 +27,7 @@ from .dyn import (
     sweep_expired,
     update_payload,
 )
-from .emojis import BOOK, EXPLICIT, GAME, MUSIC, RIVAL, SALE, SHARE, STAR, STAR_EMPTY, STAR_HALF, TWIN, TV, XP
+from .emojis import BOOK, EXPLICIT, GAME, MUSIC, RIVAL, SALE, STAR, STAR_EMPTY, STAR_HALF, TWIN, TV, XP
 from .progress import (
     Affinity,
     MIN_AFFINITY_OVERLAP,
@@ -86,7 +86,8 @@ class ReviewsLayout(discord.ui.LayoutView):
         if children:
             self.add_item(discord.ui.Container(*children))
 
-VALID_RATINGS = tuple(i / 2 for i in range(11))
+VALID_RATINGS = tuple(range(11))
+RATING_MAX = 10
 DEFAULT_COMMENT_MAX = 280
 MIN_COMMENT_MAX = 50
 MAX_COMMENT_MAX = 500
@@ -127,37 +128,46 @@ FAVORITE_LABELS = {
 # ---------------------------------------------------------------------------
 
 def format_stars(rating: float) -> str:
-    """Rangée de 5 étoiles custom, pour les fiches et messages."""
-    full = int(rating)
-    half = (rating - full) >= 0.45
+    """Rangée de 5 étoiles : chaque étoile vaut 2 points, une demi vaut 1."""
+    points = int(round(max(0.0, min(float(RATING_MAX), float(rating)))))
+    full = points // 2
+    half = points % 2 == 1
     empty = 5 - full - (1 if half else 0)
     return STAR * full + (STAR_HALF if half else "") + STAR_EMPTY * empty
 
 
 def format_stars_compact(rating: float) -> str:
     """Une seule étoile custom + note, pour boutons et texte rich."""
-    if rating <= 0:
+    points = int(round(max(0.0, min(float(RATING_MAX), float(rating)))))
+    if points <= 0:
         icon = STAR_EMPTY
-    elif rating % 1 >= 0.45:
+    elif points % 2 == 1:
         icon = STAR_HALF
     else:
         icon = STAR
-    return f"{icon} {rating:g}"
+    return f"{icon} {points}"
 
 
 def format_stars_select(rating: float) -> str:
     """Étoiles unicode : un Select n'affiche pas les customs dans label/description."""
-    if rating <= 0:
+    points = int(round(max(0.0, min(float(RATING_MAX), float(rating)))))
+    if points <= 0:
         icon = "☆"
-    elif rating % 1 >= 0.45:
+    elif points % 2 == 1:
         icon = "★☆"
     else:
         icon = "★"
-    return f"{icon} {rating:g}"
+    return f"{icon} {points}"
+
+
+def format_score(rating: float, *, average: bool = False) -> str:
+    if average:
+        return f"{rating:.1f}/{RATING_MAX}"
+    return f"{int(round(rating))}/{RATING_MAX}"
 
 
 RATING_CHOICES = [
-    app_commands.Choice(name=f"{format_stars_select(r)}/5", value=r)
+    app_commands.Choice(name=f"{format_stars_select(r)}/{RATING_MAX}", value=float(r))
     for r in VALID_RATINGS
 ]
 
@@ -238,14 +248,12 @@ def experienced_to_input(raw: str) -> str:
 
 
 def parse_rating(raw: str) -> float | None:
-    cleaned = raw.strip().replace(",", ".").replace("/5", "").strip()
-    try:
-        value = float(cleaned)
-    except ValueError:
+    cleaned = raw.strip().replace("/10", "").replace("/5", "").strip()
+    if not cleaned.isdigit():
         return None
-    snapped = round(value * 2) / 2
-    if 0 <= snapped <= 5:
-        return snapped
+    value = int(cleaned)
+    if 0 <= value <= RATING_MAX:
+        return float(value)
     return None
 
 
@@ -294,7 +302,7 @@ def critiques_summary_line(
     page: int = 0,
     total_pages: int = 1,
 ) -> str:
-    line = f"-# {count} critique(s) · moyenne {format_stars(avg or 0)} {(avg or 0):.1f}/5"
+    line = f"-# {count} critique(s) · moyenne {format_stars(avg or 0)} {format_score(avg or 0, average=True)}"
     if count:
         line += f" · page {page + 1}/{total_pages}"
     if hit.url:
@@ -396,7 +404,7 @@ def _official_line(hit: MediaHit) -> str:
         rating = float(hit.extra.get("vote_average") or 0)
         count = int(hit.extra.get("vote_count") or 0)
         if rating:
-            stars = format_stars(rating / 2)
+            stars = format_stars(rating)
             votes = f"  ·  {_fmt_int(count)} votes" if count else ""
             return f"**{source}** · {stars}  **{rating:.1f}/10**{votes}"
     if hit.source == "steam":
@@ -497,14 +505,14 @@ def append_fiche_sections(
     if count:
         stars = format_stars(avg or 0)
         head.append(
-            f"**Serveur** · {stars}  **{(avg or 0):.1f}/5**  ·  "
+            f"**Serveur** · {stars}  **{format_score(avg or 0, average=True)}**  ·  "
             f"{count} critique{'s' if count > 1 else ''}"
         )
     else:
         head.append("*Aucune note sur ce serveur pour l'instant.*")
     if my_review:
         comment = pretty.shorten_text(my_review["comment"], 180) if my_review["comment"] else ""
-        mine = f"Ta note · {format_stars(my_review['rating'])}  **{my_review['rating']:g}/5**"
+        mine = f"Ta note · {format_stars(my_review['rating'])}  **{format_score(my_review['rating'])}**"
         if comment:
             mine += f"\n*{comment}*"
         seen = experienced_line(hit.media_type, experienced_from_row(my_review))
@@ -712,7 +720,7 @@ def build_announce_view(
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
-    header = f"{_titled(mention, title)}\n{verb}\n{_title_line(hit)}\n{format_stars(rating)}  **{rating:g}/5**"
+    header = f"{_titled(mention, title)}\n{verb}\n{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
     if comment:
         header += f"\n*{pretty.shorten_text(comment, 240)}*"
     seen = experienced_line(hit.media_type, experienced_at)
@@ -731,7 +739,7 @@ def build_announce_view(
 
 def _review_saved_lines(hit: MediaHit, rating: float, created: bool, award: XpAward) -> list[str]:
     verb = "enregistrée" if created else "mise à jour"
-    parts = [f"**Critique {verb} ·** {format_stars(rating)}  **{rating:g}/5** — {hit.title}."]
+    parts = [f"**Critique {verb} ·** {format_stars(rating)}  **{format_score(rating)}** — {hit.title}."]
     if award.gained:
         parts.append(f"{XP} +{award.gained} · niveau {award.level}")
         if award.capped:
@@ -758,10 +766,10 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
         super().__init__()
         self._hub = parent
         self.rating_input = discord.ui.TextInput(
-            label="Note (0 à 5, demies autorisées)",
-            placeholder="Ex. 4.5",
-            default="" if default_rating is None else f"{default_rating:g}",
-            max_length=4,
+            label="Note (0 à 10, entier)",
+            placeholder="Ex. 8",
+            default="" if default_rating is None else f"{int(round(default_rating))}",
+            max_length=2,
             required=True,
         )
         self.comment_input = discord.ui.TextInput(
@@ -787,7 +795,7 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
         rating = parse_rating(self.rating_input.value)
         if rating is None:
             await interaction.response.send_message(
-                "**Erreur ·** La note doit être comprise entre 0 et 5 (demies étoiles acceptées, ex. `3.5`).",
+                "**Erreur ·** La note doit être un entier entre 0 et 10 (ex. `8`).",
                 ephemeral=True,
             )
             return
@@ -894,7 +902,7 @@ class MyNoteView(ReviewsLayout):
         if mine:
             text = (
                 f"{_title_line(hit)}\n"
-                f"{format_stars(mine['rating'])}  **{mine['rating']:g}/5**\n"
+                f"{format_stars(mine['rating'])}  **{format_score(mine['rating'])}**\n"
             )
             if mine.get("comment"):
                 text += f"*{pretty.shorten_text(mine['comment'], 240)}*\n"
@@ -1051,7 +1059,7 @@ class PublicCritiquesView(ReviewsLayout):
             _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
             text = (
                 f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                f"{format_stars(row['rating'])}  **{row['rating']:g}/5** · <t:{row['updated_at']}:R>"
+                f"{format_stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
             )
             if row["comment"]:
                 text += f"\n{pretty.shorten_text(row['comment'], 220)}"
@@ -1173,7 +1181,7 @@ class PublishFicheButton(discord.ui.Button):
 
 class ProfileShareButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
-        super().__init__(emoji=SHARE, style=discord.ButtonStyle.secondary)
+        super().__init__(label="Partager", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1372,7 +1380,7 @@ class MediaSessionView(ReviewsLayout):
                     _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
                     text = (
                         f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                        f"{format_stars(row['rating'])}  **{row['rating']:g}/5** · <t:{row['updated_at']}:R>"
+                        f"{format_stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
                     )
                     if row["comment"]:
                         text += f"\n{pretty.shorten_text(row['comment'], 220)}"
@@ -1455,7 +1463,7 @@ class JournalOpenSelect(discord.ui.Select):
             discord.SelectOption(
                 label=pretty.shorten_text(f"{format_stars_select(row['rating'])}  {hit.title}", 95),
                 value=str(index),
-                description=pretty.shorten_text(f"{type_label(hit.media_type)} · {hit.year or '—'} · {row['rating']:g}/5", 95),
+                description=pretty.shorten_text(f"{type_label(hit.media_type)} · {hit.year or '—'} · {format_score(row['rating'])}", 95),
                 emoji=select_emoji(hit.media_type),
             )
             for index, (hit, row) in enumerate(page_items)
@@ -1477,7 +1485,7 @@ class CatalogOpenSelect(discord.ui.Select):
                 label=pretty.shorten_text(hit.title, 95),
                 value=str(index),
                 description=pretty.shorten_text(
-                    f"{type_label(hit.media_type)} · {format_stars_select(avg)}/5 · {count} note{'s' if count > 1 else ''}",
+                    f"{type_label(hit.media_type)} · {format_stars_select(avg)}/{RATING_MAX} · {count} note{'s' if count > 1 else ''}",
                     95,
                 ),
                 emoji=select_emoji(hit.media_type),
@@ -1500,7 +1508,7 @@ class RecentOpenSelect(discord.ui.Select):
             discord.SelectOption(
                 label=pretty.shorten_text(hit.title, 95),
                 value=str(index),
-                description=pretty.shorten_text(f"{format_stars_select(row['rating'])}/5 · {type_label(hit.media_type)}", 95),
+                description=pretty.shorten_text(f"{format_stars_select(row['rating'])}/{RATING_MAX} · {type_label(hit.media_type)}", 95),
                 emoji=select_emoji(hit.media_type),
             )
             for index, (hit, row) in enumerate(page_items)
@@ -1598,15 +1606,24 @@ class AffinityCompareView(ReviewsLayout):
         self.set_layout(body)
 
 
-class FavoriteSlotButton(discord.ui.Button):
-    def __init__(self, parent: "ProfileView", slot: int, filled: bool):
-        label = FAVORITE_LABELS[slot]
-        super().__init__(
-            label=label,
-            style=discord.ButtonStyle.secondary if filled else discord.ButtonStyle.green,
-        )
+class FavoriteSlotSelect(discord.ui.Select):
+    def __init__(self, parent: "ProfileView"):
+        options = []
+        for slot, label in FAVORITE_LABELS.items():
+            description = "Pas encore choisi"
+            if parent._slot_filled(slot):
+                entry = parent.favorites[slot - 1]
+                if entry is not None:
+                    description = pretty.shorten_text(entry[0].title, 95) or "Choisie"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(slot),
+                    description=description,
+                )
+            )
+        super().__init__(placeholder="Choisir une préférée…", options=options, min_values=1, max_values=1)
         self._hub = parent
-        self._slot = slot
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self._hub.member.id:
@@ -1616,7 +1633,7 @@ class FavoriteSlotButton(discord.ui.Button):
                 delete_after=10,
             )
             return
-        await interaction.response.send_modal(FavoriteSearchModal(self._hub, self._slot))
+        await interaction.response.send_modal(FavoriteSearchModal(self._hub, int(self.values[0])))
 
 
 class FavoriteSearchModal(discord.ui.Modal):
@@ -1792,7 +1809,7 @@ class ProfileView(ReviewsLayout):
         mention = _mention(self.guild, self.cog.bot, self.member.id)
         notes = f"**{self.review_count}** note{'s' if self.review_count != 1 else ''}"
         if self.average is not None:
-            notes += f"  ·  moyenne **{self.average:.1f}/5**"
+            notes += f"  ·  moyenne **{format_score(self.average, average=True)}**"
         lines = [
             f"## {mention}",
             f"{XP} **{total} XP** · niveau **{level}**  ·  {notes}",
@@ -1808,7 +1825,6 @@ class ProfileView(ReviewsLayout):
             HubTabButton(self, "profil", "Profil"),
             HubTabButton(self, "journal", f"Journal ({self.review_count})"),
             HubTabButton(self, "affinites", "Affinités"),
-            ProfileShareButton(self),
         )
 
     def _page_nav(self, attr: str, max_page: int) -> discord.ui.ActionRow | None:
@@ -1842,7 +1858,7 @@ class ProfileView(ReviewsLayout):
             + (f"  ·  {hit.subtitle}" if hit.subtitle else ""),
         ]
         if rating is not None:
-            lines.append(f"{format_stars(rating)}  **{rating:g}/5**")
+            lines.append(f"{format_stars(rating)}  **{format_score(rating)}**")
         return section_with_thumbnail("\n".join(lines), hit.poster_url)
 
     def _profil_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -1869,10 +1885,7 @@ class ProfileView(ReviewsLayout):
             body.append(block)
         rows: list[discord.ui.ActionRow] = []
         if self.editable:
-            rows.append(discord.ui.ActionRow(*[
-                FavoriteSlotButton(self, slot, self._slot_filled(slot))
-                for slot in FAVORITE_LABELS
-            ]))
+            rows.append(discord.ui.ActionRow(FavoriteSlotSelect(self)))
         return body, rows
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -1951,6 +1964,7 @@ class ProfileView(ReviewsLayout):
         else:
             body, rows = self._profil_layout()
         self.set_layout(body, *rows, self._tabs_row())
+        self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))
 
     async def apply_favorite(self, slot: int, hit: MediaHit) -> None:
         if not self.editable:
@@ -2105,7 +2119,7 @@ class ServerHubView(ReviewsLayout):
             year = f" ({hit.year})" if hit.year else ""
             text = (
                 f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                f"{format_stars(row['rating'])}  **{row['rating']:g}/5**\n"
+                f"{format_stars(row['rating'])}  **{format_score(row['rating'])}**\n"
                 f"**{hit.title}**{year} · {type_label(hit.media_type)} · <t:{row['updated_at']}:R>"
             )
             if row["comment"]:
@@ -2357,7 +2371,8 @@ class HelpView(ReviewsLayout):
             "une **note** et un **commentaire**.\n"
             "2. S'il y a plusieurs résultats, choisis l'œuvre dans le menu.\n"
             "3. Clique **Noter** : un formulaire demande la note "
-            f"({format_stars(0)} 0 → {format_stars(5)} 5, demies OK), un commentaire optionnel "
+            f"({format_stars(0)} 0 → {format_stars(10)} 10, entier — une étoile = 2), "
+            "un commentaire optionnel "
             "et la date (vu, joué, écouté ou lu).\n"
             "4. Si tu as déjà donné la note dans `/note` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
@@ -2418,6 +2433,7 @@ class Reviews(commands.Cog):
                 "LastAnnounceChannelID": 0,
                 "MaxCommentLength": DEFAULT_COMMENT_MAX,
                 "BackfilledXP": "0",
+                "RatingsOnTen": "0",
             },
         )
         media_table = dataio.TableBuilder(
@@ -2587,11 +2603,19 @@ class Reviews(commands.Cog):
         columns = await db.column_names("reviews")
         if "experienced_at" not in columns:
             await db.execute("ALTER TABLE reviews ADD COLUMN experienced_at TEXT NOT NULL DEFAULT ''")
+        scaled = await db.get_dict_value("settings", "RatingsOnTen")
+        if scaled != "1":
+            row = await db.fetchone("SELECT MAX(rating) AS m FROM reviews")
+            max_rating = float(row["m"]) if row and row["m"] is not None else 0.0
+            if 0 < max_rating <= 5:
+                await db.execute("UPDATE reviews SET rating = rating * 2")
+            await db.set_dict_value("settings", "RatingsOnTen", "1")
         self._schema_ready.add(guild.id)
 
     async def get_favorites(
         self, guild: discord.Guild, user_id: int
     ) -> list[tuple[MediaHit, float | None] | None]:
+        await self._ensure_schema(guild)
         rows = await self.data.get(guild).fetchall(
             """SELECT f.slot, m.*, r.rating AS fav_rating
                FROM favorites f
@@ -2812,7 +2836,7 @@ class Reviews(commands.Cog):
         extra = max(0, len(user_ids) - named_max)
         people = _format_people_fr([_mention_silent(uid) for uid in shown], extra)
         verb = "a mis" if len(user_ids) == 1 else "ont mis"
-        return f"{people} {verb} {rating:g}/5"
+        return f"{people} {verb} {format_score(rating)}"
 
     async def list_affinities(self, guild: discord.Guild, user_id: int) -> list[Affinity]:
         await self.ensure_progress(guild)
@@ -3103,7 +3127,7 @@ class Reviews(commands.Cog):
     @app_commands.describe(
         query="Titre, année, ou préfixe (tmdb:Dune, tmdb:27205, URL TMDB)",
         media_type="Restreindre la recherche à un type de média",
-        rating="Note de 0 à 5 (demies étoiles autorisées)",
+        rating="Note de 0 à 10 (entier, une étoile = 2 points)",
         comment="Court commentaire optionnel",
     )
     @app_commands.choices(media_type=TYPE_CHOICES, rating=RATING_CHOICES)
@@ -3225,7 +3249,7 @@ class Reviews(commands.Cog):
         if media_type != "all":
             subtitle_parts.append(type_label(media_type))
         if min_rating is not None:
-            subtitle_parts.append(f"≥ {min_rating:g}/5")
+            subtitle_parts.append(f"≥ {format_score(min_rating)}")
         filtered = bool(query or member or min_rating is not None or media_type != "all")
         view = ServerHubView(
             self,
