@@ -92,7 +92,7 @@ class ReviewsLayout(discord.ui.LayoutView):
         except discord.HTTPException:
             pass
 
-    def set_layout(self, body: list[discord.ui.Item], *rows: discord.ui.ActionRow | None) -> None:
+    def set_layout(self, body: list[discord.ui.Item], *rows: discord.ui.Item | None) -> None:
         self.clear_items()
         children = list(body)
         for row in rows:
@@ -2464,13 +2464,13 @@ class SharedListModeSelect(discord.ui.Select):
             discord.SelectOption(
                 label="Membres choisis",
                 value="members",
-                description="Toi + les membres du menu ci-dessous",
+                description="Toi + ceux qui peuvent ajouter des œuvres",
                 default=parent.record["edit_mode"] == "members",
             ),
             discord.SelectOption(
                 label="Tout le serveur",
                 value="public",
-                description="N'importe qui peut ajouter ou retirer",
+                description="Tout le monde peut ajouter des œuvres",
                 default=parent.record["edit_mode"] == "public",
             ),
         ]
@@ -2495,7 +2495,7 @@ class SharedListModeSelect(discord.ui.Select):
 class SharedListEditorsSelect(discord.ui.UserSelect):
     def __init__(self, parent: "SharedListView"):
         kwargs: dict[str, Any] = {
-            "placeholder": "Membres qui peuvent éditer…",
+            "placeholder": "Choisir des membres…",
             "min_values": 0,
             "max_values": 25,
         }
@@ -2728,6 +2728,7 @@ class SharedListView(ReviewsLayout):
         if self.is_owner(self.viewer_id):
             rows.append(discord.ui.ActionRow(SharedListModeSelect(self)))
             if self.record["edit_mode"] == "members":
+                rows.append(discord.ui.TextDisplay("-# Peuvent éditer la liste"))
                 rows.append(discord.ui.ActionRow(SharedListEditorsSelect(self)))
         actions: list[discord.ui.Item] = [SharedListBackButton(self), SharedListDrawButton(self)]
         if self.can_edit(self.viewer_id):
