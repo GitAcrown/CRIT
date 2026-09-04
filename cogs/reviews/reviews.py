@@ -511,7 +511,7 @@ def _format_people_fr(mentions: list[str], extra: int = 0) -> str:
 
 
 def _titled(mention: str, title: str) -> str:
-    return f"{mention}\n-# {title}"
+    return f"{mention}\n-# ***{title}***"
 
 
 def _fmt_int(value: int) -> str:
@@ -2840,7 +2840,7 @@ class ProfileView(ReviewsLayout):
             lines.append(stats)
         if extra:
             lines.append(extra)
-        lines.append(f"-# {title}")
+        lines.append(f"-# ***{title}***")
         return "\n".join(lines)
 
     def _tabs_row(self) -> discord.ui.ActionRow:
