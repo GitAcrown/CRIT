@@ -216,7 +216,7 @@ async def sweep_expired(bot: Any, render) -> None:
 
 class FicheDynButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"ack:rev:(?P<wid>[0-9a-f]{8}):(?P<act>fiche|critiques|noter)",
+    template=r"ack:rev:(?P<wid>[0-9a-f]{8}):(?P<act>fiche|critiques|noter|voir)",
 ):
     def __init__(
         self,
