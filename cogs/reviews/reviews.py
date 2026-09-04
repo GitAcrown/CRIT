@@ -35,6 +35,7 @@ from .emojis import (
     BOOK,
     EXPLICIT,
     GAME,
+    MOVIE,
     MUSIC,
     RIVAL,
     SALE,
@@ -120,7 +121,7 @@ LIST_DESC_MAX = 200
 LIST_EDIT_MODES = ("owner", "members", "public")
 
 TYPE_META: dict[str, tuple[str, str]] = {
-    "movie": (TV, "Film"),
+    "movie": (MOVIE, "Film"),
     "tv": (TV, "Série"),
     "game": (GAME, "Jeu"),
     "album": (MUSIC, "Album"),
@@ -926,14 +927,17 @@ def build_announce_view(
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
-    header = f"{_titled(mention, title)}\n{verb}\n{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
+    profile = f"{_titled(mention, title)}\n{verb}"
+    film = f"{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
     shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
     if shown:
-        header += f"\n{shown}"
+        film += f"\n{shown}"
     seen = experienced_line(hit.media_type, experienced_at)
     if seen:
-        header += f"\n{seen}"
-    container.add_item(section_with_thumbnail(header, avatar_url or hit.poster_url))
+        film += f"\n{seen}"
+    container.add_item(section_with_thumbnail(profile, avatar_url))
+    container.add_item(discord.ui.Separator())
+    container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
     view.add_item(container)
@@ -3562,7 +3566,7 @@ class HelpView(ReviewsLayout):
         )
         extras = (
             f"### {XP} Autour des notes\n"
-            f"{TV} Films et séries  ·  {GAME} Jeux  ·  {MUSIC} Albums et morceaux  ·  {BOOK} Livres\n"
+            f"{MOVIE} Films  ·  {TV} Séries  ·  {GAME} Jeux  ·  {MUSIC} Albums et morceaux  ·  {BOOK} Livres\n"
             "Le journal de `/carnet` se filtre par type et se trie (récentes / mieux notées). "
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "

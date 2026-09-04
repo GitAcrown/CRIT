@@ -1,5 +1,6 @@
 """Emojis custom du serveur CRIT, utilisés par le cog critiques."""
 
+MOVIE = "<:movie:1545580934265442424>"
 TV = "<:tv:1545150274858127462>"
 GAME = "<:gamepad:1545150723547856896>"
 MUSIC = "<:music:1545150718833332375>"
