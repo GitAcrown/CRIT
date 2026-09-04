@@ -15,7 +15,7 @@ Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (
 - `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
 - `/listes` — listes communes : titre, description, droits d'édition, tirage
 - `/tirage` — tire une œuvre encore à voir (ta liste, le serveur) ou dans une liste commune
-- `/config` — panneau de configuration réservé à la modération (annonces, commentaires)
+- `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
 
 ## Administration

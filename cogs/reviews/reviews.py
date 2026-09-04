@@ -138,6 +138,9 @@ TYPE_CHOICES = [
     app_commands.Choice(name="Livre", value="book"),
 ]
 
+ANNOUNCE_ROUTE_ALL = "all"
+ANNOUNCE_ROUTE_ORDER = (ANNOUNCE_ROUTE_ALL, *TYPE_META)
+
 PERIOD_SECONDS = {"semaine": 7 * 86400, "mois": 30 * 86400}
 
 SCOPE_CHOICES = [
@@ -397,6 +400,19 @@ def type_emoji(media_type: str) -> str:
     return TYPE_META.get(media_type, ("", "Média"))[0]
 
 
+def announce_route_label(route: str) -> str:
+    if route == ANNOUNCE_ROUTE_ALL:
+        return "Tous les types"
+    return type_label(route)
+
+
+def resolve_guild_text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
+    if not channel_id:
+        return None
+    channel = guild.get_channel(int(channel_id))
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
 def select_emoji(media_type: str) -> discord.PartialEmoji | None:
     raw = type_emoji(media_type)
     if not raw:
@@ -510,8 +526,12 @@ def _format_people_fr(mentions: list[str], extra: int = 0) -> str:
     return f"{', '.join(mentions[:-1])} et {mentions[-1]}"
 
 
+def format_grade(title: str) -> str:
+    return f"-# **_{title}_**"
+
+
 def _titled(mention: str, title: str) -> str:
-    return f"{mention}\n-# ***{title}***"
+    return f"{mention}\n{format_grade(title)}"
 
 
 def _fmt_int(value: int) -> str:
@@ -2840,7 +2860,7 @@ class ProfileView(ReviewsLayout):
             lines.append(stats)
         if extra:
             lines.append(extra)
-        lines.append(f"-# ***{title}***")
+        lines.append(format_grade(title))
         return "\n".join(lines)
 
     def _tabs_row(self) -> discord.ui.ActionRow:
@@ -3289,68 +3309,68 @@ class EditCommentMaxButton(discord.ui.Button):
         await interaction.response.send_modal(CommentMaxModal(self._view_ref))
 
 
-class ToggleAnnounceButton(discord.ui.Button):
+class AnnounceRouteModal(discord.ui.Modal, title="Salon d'annonce"):
     def __init__(self, view_ref: "ReviewsConfigView"):
-        active = view_ref.announce_channel is not None
-        super().__init__(
-            label="Désactiver" if active else "Activer",
-            style=discord.ButtonStyle.red if active else discord.ButtonStyle.green,
-        )
+        super().__init__()
         self._view_ref = view_ref
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        cog, guild = self._view_ref.cog, self._view_ref.guild
-        settings = cog.data.get(guild)
-        if self._view_ref.announce_channel is not None:
-            await settings.set_dict_value("settings", "LastAnnounceChannelID", self._view_ref.announce_channel.id)
-            await settings.set_dict_value("settings", "AnnounceChannelID", 0)
-            await self._view_ref.refresh(interaction)
-            return
-        last_id = await settings.get_dict_value("settings", "LastAnnounceChannelID", cast=int)
-        channel = guild.get_channel(last_id) if last_id else None
-        if not isinstance(channel, discord.TextChannel):
-            await interaction.followup.send(
-                "**Erreur ·** Sélectionnez d'abord un salon via le menu ci-dessous.", ephemeral=True
-            )
-            return
-        if not channel.permissions_for(guild.me).send_messages:
-            await interaction.followup.send(
-                "**Erreur ·** Je n'ai pas la permission d'envoyer des messages sur ce salon.", ephemeral=True
-            )
-            return
-        await settings.set_dict_value("settings", "AnnounceChannelID", channel.id)
-        await self._view_ref.refresh(interaction)
-
-
-class AnnounceChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, view_ref: "ReviewsConfigView"):
-        super().__init__(
-            channel_types=[discord.ChannelType.text],
-            placeholder="Sélectionner le salon d'annonce",
-            min_values=0,
-            max_values=1,
-        )
-        self._view_ref = view_ref
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        cog, guild = self._view_ref.cog, self._view_ref.guild
-        if not self.values:
-            if self._view_ref.announce_channel is not None:
-                await cog.data.get(guild).set_dict_value(
-                    "settings", "LastAnnounceChannelID", self._view_ref.announce_channel.id
+        configured = set(view_ref.announce_channels)
+        options: list[discord.SelectOption] = []
+        for route in ANNOUNCE_ROUTE_ORDER:
+            taken = route in configured
+            options.append(
+                discord.SelectOption(
+                    label=announce_route_label(route),
+                    value=route,
+                    description="Mettre à jour le salon" if taken else "Nouveau salon",
+                    emoji=select_emoji(route) if route != ANNOUNCE_ROUTE_ALL else None,
                 )
-            await cog.data.get(guild).set_dict_value("settings", "AnnounceChannelID", 0)
-            await self._view_ref.refresh(interaction)
+            )
+        self.type_select = discord.ui.Select(
+            placeholder="Type de média",
+            min_values=1,
+            max_values=1,
+            required=True,
+            options=options,
+        )
+        self.channel_select = discord.ui.ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            placeholder="Salon textuel",
+            min_values=1,
+            max_values=1,
+            required=True,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Type",
+                description="« Tous les types » sert de salon par défaut",
+                component=self.type_select,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Salon",
+                description="Là où les nouvelles notes de ce type sont postées",
+                component=self.channel_select,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        route = str(self.type_select.values[0]) if self.type_select.values else ""
+        if route not in ANNOUNCE_ROUTE_ORDER:
+            await interaction.followup.send("**Erreur ·** Type invalide.", ephemeral=True)
             return
-        channel = self.values[0].resolve()
+        if not self.channel_select.values:
+            await interaction.followup.send("**Erreur ·** Choisis un salon.", ephemeral=True)
+            return
+        channel = self.channel_select.values[0].resolve()
         if channel is None:
             try:
-                channel = await self.values[0].fetch()
+                channel = await self.channel_select.values[0].fetch()
             except discord.HTTPException:
                 await interaction.followup.send("**Erreur ·** Salon introuvable.", ephemeral=True)
                 return
+        guild = self._view_ref.guild
         if not isinstance(channel, discord.TextChannel):
             await interaction.followup.send(
                 "**Erreur ·** Seuls les salons textuels sont pris en charge.", ephemeral=True
@@ -3358,10 +3378,50 @@ class AnnounceChannelSelect(discord.ui.ChannelSelect):
             return
         if not channel.permissions_for(guild.me).send_messages:
             await interaction.followup.send(
-                "**Erreur ·** Je n'ai pas la permission d'envoyer des messages sur ce salon.", ephemeral=True
+                "**Erreur ·** Je n'ai pas la permission d'envoyer des messages sur ce salon.",
+                ephemeral=True,
             )
             return
-        await cog.data.get(guild).set_dict_value("settings", "AnnounceChannelID", channel.id)
+        await self._view_ref.cog.set_announce_route(guild, route, channel.id)
+        await self._view_ref.refresh(interaction)
+
+
+class AddAnnounceButton(discord.ui.Button):
+    def __init__(self, view_ref: "ReviewsConfigView"):
+        super().__init__(label="Ajouter", style=discord.ButtonStyle.green)
+        self._view_ref = view_ref
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(AnnounceRouteModal(self._view_ref))
+
+
+class RemoveAnnounceSelect(discord.ui.Select):
+    def __init__(self, view_ref: "ReviewsConfigView"):
+        options = [
+            discord.SelectOption(
+                label=f"Retirer · {announce_route_label(route)}",
+                value=route,
+                description=f"#{view_ref.announce_channels[route].name}",
+                emoji=select_emoji(route) if route != ANNOUNCE_ROUTE_ALL else None,
+            )
+            for route in ANNOUNCE_ROUTE_ORDER
+            if route in view_ref.announce_channels
+        ]
+        super().__init__(
+            placeholder="Retirer un salon…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self._view_ref = view_ref
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        route = str(self.values[0]) if self.values else ""
+        if route not in ANNOUNCE_ROUTE_ORDER:
+            await self._view_ref.refresh(interaction)
+            return
+        await self._view_ref.cog.set_announce_route(self._view_ref.guild, route, None)
         await self._view_ref.refresh(interaction)
 
 
@@ -3371,7 +3431,7 @@ class ReviewsConfigView(ReviewsLayout):
         cog: "Reviews",
         guild: discord.Guild,
         *,
-        announce_channel: discord.TextChannel | None,
+        announce_channels: dict[str, discord.TextChannel],
         comment_max: int,
         review_count: int,
         media_count: int,
@@ -3380,7 +3440,7 @@ class ReviewsConfigView(ReviewsLayout):
         super().__init__(timeout=300)
         self.cog = cog
         self.guild = guild
-        self.announce_channel = announce_channel
+        self.announce_channels = announce_channels
         self.comment_max = comment_max
         self.review_count = review_count
         self.media_count = media_count
@@ -3396,15 +3456,37 @@ class ReviewsConfigView(ReviewsLayout):
             return False
         return True
 
+    def _announce_body(self) -> str:
+        lines: list[str] = []
+        for route in ANNOUNCE_ROUTE_ORDER:
+            channel = self.announce_channels.get(route)
+            if channel is None:
+                continue
+            if route == ANNOUNCE_ROUTE_ALL:
+                lines.append(f"Tous les types · {channel.mention}")
+            else:
+                lines.append(f"{type_emoji(route)} {type_label(route)} · {channel.mention}")
+        if not lines:
+            return "**Salons d'annonce**\n*Aucun salon — les notes ne sont pas annoncées.*"
+        hint = (
+            "-# Un type sans salon dédié utilise *Tous les types*."
+            if ANNOUNCE_ROUTE_ALL in self.announce_channels
+            else "-# Les types sans salon dédié ne sont pas annoncés."
+        )
+        return "**Salons d'annonce**\n" + "\n".join(lines) + f"\n{hint}"
+
     def _build(self) -> None:
         apis = "  ·  ".join(f"{name} {'ok' if ok else 'manquant'}" for name, ok in self.api_status.items())
+        rows: list[discord.ui.Item] = []
+        if self.announce_channels:
+            rows.append(discord.ui.ActionRow(RemoveAnnounceSelect(self)))
         self.set_layout(
             [
                 discord.ui.TextDisplay(f"## Configuration des critiques — {self.guild.name}"),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    f"**Salon d'annonce**\n{self.announce_channel.mention if self.announce_channel else '*Non configuré*'}",
-                    accessory=ToggleAnnounceButton(self),
+                    self._announce_body(),
+                    accessory=AddAnnounceButton(self),
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
@@ -3416,11 +3498,11 @@ class ReviewsConfigView(ReviewsLayout):
                     f"-# {self.review_count} critique(s) · {self.media_count} œuvre(s)\n-# APIs · {apis}"
                 ),
             ],
-            discord.ui.ActionRow(AnnounceChannelSelect(self)),
+            *rows,
         )
 
     async def _reload(self) -> None:
-        self.announce_channel = await self.cog.get_announce_channel(self.guild)
+        self.announce_channels = await self.cog.get_announce_channels(self.guild)
         self.comment_max = await self.cog.get_comment_max(self.guild)
         self.review_count, self.media_count = await self.cog.counts(self.guild)
         self.api_status = self.cog.catalog.status() if self.cog.catalog else {}
@@ -3474,7 +3556,7 @@ class HelpView(ReviewsLayout):
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes : créer, ajouter des œuvres, tirer au hasard\n"
             "`/tirage` — une œuvre au hasard (à voir, ou une liste commune)\n"
-            "`/config` — salon d'annonces et longueur des commentaires "
+            "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
         )
@@ -3484,7 +3566,8 @@ class HelpView(ReviewsLayout):
             "Le journal de `/carnet` se filtre par type et se trie (récentes / mieux notées). "
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
-            "(lui seul, des membres, ou tout le serveur).\n"
+            "(lui seul, des membres, ou tout le serveur). "
+            "`/config` peut poster les notes dans un salon différent selon le type.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -3519,6 +3602,7 @@ class Reviews(commands.Cog):
             {
                 "AnnounceChannelID": 0,
                 "LastAnnounceChannelID": 0,
+                "AnnounceChannelsByType": "{}",
                 "MaxCommentLength": DEFAULT_COMMENT_MAX,
                 "BackfilledXP": "0",
                 "RatingsOnTen": "0",
@@ -3678,10 +3762,68 @@ class Reviews(commands.Cog):
     # Paramètres
     # ------------------------------------------------------------------
 
-    async def get_announce_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        channel_id = await self.data.get(guild).get_dict_value("settings", "AnnounceChannelID", cast=int)
-        channel = guild.get_channel(channel_id) if channel_id else None
-        return channel if isinstance(channel, discord.TextChannel) else None
+    async def get_announce_route_ids(self, guild: discord.Guild) -> dict[str, int]:
+        settings = self.data.get(guild)
+        routes: dict[str, int] = {}
+        default_id = await settings.get_dict_value("settings", "AnnounceChannelID", cast=int)
+        if default_id:
+            routes[ANNOUNCE_ROUTE_ALL] = int(default_id)
+        raw = await settings.get_dict_value("settings", "AnnounceChannelsByType")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    if key not in TYPE_META:
+                        continue
+                    try:
+                        channel_id = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if channel_id:
+                        routes[key] = channel_id
+        return routes
+
+    async def get_announce_channels(self, guild: discord.Guild) -> dict[str, discord.TextChannel]:
+        resolved: dict[str, discord.TextChannel] = {}
+        for route, channel_id in (await self.get_announce_route_ids(guild)).items():
+            channel = resolve_guild_text_channel(guild, channel_id)
+            if channel is not None:
+                resolved[route] = channel
+        return resolved
+
+    async def set_announce_route(
+        self, guild: discord.Guild, route: str, channel_id: int | None
+    ) -> None:
+        settings = self.data.get(guild)
+        if route == ANNOUNCE_ROUTE_ALL:
+            await settings.set_dict_value("settings", "AnnounceChannelID", channel_id or 0)
+            return
+        if route not in TYPE_META:
+            return
+        typed = {
+            key: value
+            for key, value in (await self.get_announce_route_ids(guild)).items()
+            if key in TYPE_META
+        }
+        if channel_id:
+            typed[route] = int(channel_id)
+        else:
+            typed.pop(route, None)
+        await settings.set_dict_value("settings", "AnnounceChannelsByType", json.dumps(typed))
+
+    async def get_announce_channel(
+        self, guild: discord.Guild, media_type: str | None = None
+    ) -> discord.TextChannel | None:
+        routes = await self.get_announce_route_ids(guild)
+        channel_id = None
+        if media_type and media_type in routes:
+            channel_id = routes[media_type]
+        elif ANNOUNCE_ROUTE_ALL in routes:
+            channel_id = routes[ANNOUNCE_ROUTE_ALL]
+        return resolve_guild_text_channel(guild, channel_id)
 
     async def get_comment_max(self, guild: discord.Guild) -> int:
         value = await self.data.get(guild).get_dict_value("settings", "MaxCommentLength", cast=int)
@@ -4527,7 +4669,7 @@ class Reviews(commands.Cog):
         experienced_at: str = "",
         spoiler: bool = False,
     ) -> None:
-        channel = await self.get_announce_channel(guild)
+        channel = await self.get_announce_channel(guild, hit.media_type)
         if channel is None:
             return
         _name, avatar = _user_display(guild, self.bot, user.id)
@@ -4898,7 +5040,7 @@ class Reviews(commands.Cog):
         view = ReviewsConfigView(
             self,
             guild,
-            announce_channel=await self.get_announce_channel(guild),
+            announce_channels=await self.get_announce_channels(guild),
             comment_max=await self.get_comment_max(guild),
             review_count=review_count,
             media_count=media_count,
