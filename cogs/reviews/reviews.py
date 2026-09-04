@@ -1677,11 +1677,10 @@ class MediaSessionView(ReviewsLayout):
             rate_btn = RateButton(self)
             rate_btn.label = rate_label
             actions: list[discord.ui.Item] = [rate_btn]
-            if self.ephemeral:
-                actions.append(WatchlistButton(self))
             if self.ephemeral and self.my_review:
                 actions.append(DeleteReviewButton(self))
             if self.ephemeral:
+                actions.append(WatchlistButton(self))
                 actions.append(PublishFicheButton(self))
             rows.append(discord.ui.ActionRow(*actions[:5]))
         if self.tab == "critiques" and len(self.reviews) > REVIEWS_PAGE:
