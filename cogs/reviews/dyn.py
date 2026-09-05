@@ -1,7 +1,9 @@
-"""Boutons persistants d'une fiche publiée (DynamicItem), TTL 10 min comme MARIA.
+"""Boutons persistants (DynamicItem) + SQLite, restaurés au démarrage.
 
-custom_id `ack:rev:{id}:{action}` + SQLite. À l'échéance (ou clic trop tard),
-le message est réécrit sans boutons. Un clic ouvre le menu en éphémère.
+- Fiches publiques · `ack:rev:{id}:{action}` · TTL 10 min
+- Annonces · `ack:ann:{id}:noter` · TTL 6 h
+
+À l'échéance (ou clic trop tard), le message est réécrit sans boutons.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ logger = logging.getLogger("CRIT.Reviews.Dyn")
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "dyn_fiches.db"
 TTL = timedelta(minutes=10)
+ANNOUNCE_TTL = timedelta(hours=6)
 PURGE_AFTER = timedelta(hours=1)
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -142,12 +145,12 @@ def get_record(wid: str) -> FicheRecord | None:
     return _row_to_rec(row) if row else None
 
 
-def create_record(payload: dict[str, Any]) -> str:
+def create_record(payload: dict[str, Any], *, ttl: timedelta | None = None) -> str:
     wid = uuid.uuid4().hex[:8]
     with _db() as conn:
         conn.execute(
             "INSERT INTO fiches (id, payload, expires_at) VALUES (?, ?, ?)",
-            (wid, json.dumps(payload, ensure_ascii=False), (_now() + TTL).isoformat()),
+            (wid, json.dumps(payload, ensure_ascii=False), (_now() + (ttl or TTL)).isoformat()),
         )
     return wid
 
@@ -207,9 +210,9 @@ async def sweep_expired(bot: Any, render) -> None:
                     if channel is None:
                         channel = await bot.fetch_channel(rec.channel_id)
                     msg = await channel.fetch_message(rec.message_id)
-                    await msg.edit(view=view)
+                    await msg.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
                 except Exception as exc:
-                    logger.info("dyn fiche strip %s : %s", rec.id, exc)
+                    logger.info("dyn strip %s : %s", rec.id, exc)
         mark_stripped(rec.id)
     _purge(now)
 
@@ -255,6 +258,49 @@ class FicheDynButton(
         from .reviews import handle_published_fiche_click
 
         await handle_published_fiche_click(interaction, self.wid, self.action)
+
+
+class AnnounceDynButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"ack:ann:(?P<wid>[0-9a-f]{8}):(?P<act>noter)",
+):
+    def __init__(
+        self,
+        wid: str,
+        action: str = "noter",
+        *,
+        label: str = "Noter",
+        style: discord.ButtonStyle = discord.ButtonStyle.green,
+    ) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=style,
+                label=(label or "Noter")[:80],
+                custom_id=f"ack:ann:{wid}:{action}",
+            )
+        )
+        self.wid = wid
+        self.action = action
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Button,
+        match: re.Match[str],
+        /,
+    ):
+        return cls(
+            match["wid"],
+            match["act"],
+            label=item.label or "Noter",
+            style=item.style,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        from .reviews import handle_announce_click
+
+        await handle_announce_click(interaction, self.wid, self.action)
 
 
 _init_db()

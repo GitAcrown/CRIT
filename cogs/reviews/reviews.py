@@ -17,6 +17,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from .dyn import (
+    ANNOUNCE_TTL,
+    AnnounceDynButton,
     FicheDynButton,
     FicheRecord,
     bind_record,
@@ -863,6 +865,7 @@ async def send_published_fiche(
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
     wid = create_record({
+        "kind": "fiche",
         "guild_id": guild.id,
         "hit": hit_to_dict(hit),
         "avg": avg,
@@ -952,6 +955,42 @@ async def handle_published_fiche_click(
     await send_ephemeral_menu(interaction, menu)
 
 
+async def handle_announce_click(
+    interaction: discord.Interaction,
+    wid: str,
+    action: str,
+) -> None:
+    rec = get_record(wid)
+    if not is_live(rec):
+        if rec is not None:
+            view = render_announce_record(rec, live=False)
+            if view is not None:
+                try:
+                    await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
+                except discord.HTTPException:
+                    pass
+            mark_stripped(rec.id)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("Les boutons ont expiré.", ephemeral=True)
+        return
+    cog = interaction.client.get_cog("Reviews")
+    guild = interaction.guild
+    raw = rec.payload.get("hit") if rec else None
+    if cog is None or not isinstance(guild, discord.Guild) or not isinstance(raw, dict):
+        await interaction.response.send_message(
+            "**Erreur ·** Impossible d'ouvrir ce menu.",
+            ephemeral=True,
+        )
+        return
+    if action != "noter":
+        await interaction.response.send_message("**Erreur ·** Action inconnue.", ephemeral=True)
+        return
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    menu = await MyNoteView.create(cog, guild, hit_from_dict(raw), interaction.user.id, published_wid=None)
+    await send_ephemeral_menu(interaction, menu)
+
+
 async def _public_watchlist_click(
     cog: "Reviews",
     guild: discord.Guild,
@@ -1022,11 +1061,14 @@ def build_announce_view(
     updated: bool,
     experienced_at: str = "",
     spoiler: bool = False,
+    posted_at: int | None = None,
+    wid: str | None = None,
+    live: bool = False,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
-    stamped = f"<t:{int(time.time())}:f>"
+    stamped = f"<t:{int(posted_at or time.time())}:f>"
     profile = f"{mention} · _{title}_ · le {stamped} · {verb}"
     film = f"{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
     shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
@@ -1040,8 +1082,40 @@ def build_announce_view(
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
+    if live and wid:
+        container.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, "noter", label="Noter")))
     view.add_item(container)
     return view
+
+
+def render_announce_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutView | None:
+    raw = rec.payload.get("hit")
+    if not isinstance(raw, dict):
+        return None
+    posted = rec.payload.get("posted_at")
+    try:
+        posted_at = int(posted) if posted else None
+    except (TypeError, ValueError):
+        posted_at = None
+    return build_announce_view(
+        hit_from_dict(raw),
+        mention=str(rec.payload.get("mention") or ""),
+        title=str(rec.payload.get("title") or ""),
+        rating=float(rec.payload.get("rating") or 0),
+        comment=str(rec.payload.get("comment") or ""),
+        updated=bool(rec.payload.get("updated")),
+        experienced_at=str(rec.payload.get("experienced_at") or ""),
+        spoiler=bool(rec.payload.get("spoiler")),
+        posted_at=posted_at,
+        wid=rec.id,
+        live=live,
+    )
+
+
+def render_dyn_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutView | None:
+    if rec.payload.get("kind") == "announce":
+        return render_announce_record(rec, live=live)
+    return render_published_record(rec, live=live)
 
 
 # ---------------------------------------------------------------------------
@@ -3844,7 +3918,7 @@ class Reviews(commands.Cog):
         missing = [name for name, ok in status.items() if not ok]
         if missing:
             logger.warning("Fournisseurs incomplets : %s", ", ".join(missing))
-        self.bot.add_dynamic_items(FicheDynButton)
+        self.bot.add_dynamic_items(FicheDynButton, AnnounceDynButton)
         self._carnet_menu = app_commands.ContextMenu(
             name="Voir le carnet",
             callback=self.critique_carnet_user,
@@ -3857,7 +3931,7 @@ class Reviews(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._sweep_fiches.cancel()
-        self.bot.remove_dynamic_items(FicheDynButton)
+        self.bot.remove_dynamic_items(FicheDynButton, AnnounceDynButton)
         self.bot.tree.remove_command("Voir le carnet", type=discord.AppCommandType.user)
         if self._http is not None:
             await self._http.close()
@@ -3867,7 +3941,7 @@ class Reviews(commands.Cog):
     @tasks.loop(seconds=30)
     async def _sweep_fiches(self) -> None:
         try:
-            await sweep_expired(self.bot, render_published_record)
+            await sweep_expired(self.bot, render_dyn_record)
         except Exception:
             logger.exception("sweep fiches publiées")
 
@@ -4798,20 +4872,46 @@ class Reviews(commands.Cog):
         if channel is None:
             return
         titles = await self.get_titles(guild, [user.id])
+        mention = _mention(guild, self.bot, user.id)
+        grade = titles.get(user.id, title_for_level(1))
+        posted_at = int(time.time())
+        wid = create_record(
+            {
+                "kind": "announce",
+                "guild_id": guild.id,
+                "user_id": user.id,
+                "hit": hit_to_dict(hit),
+                "mention": mention,
+                "title": grade,
+                "rating": rating,
+                "comment": comment,
+                "updated": updated,
+                "experienced_at": experienced_at,
+                "spoiler": spoiler,
+                "posted_at": posted_at,
+            },
+            ttl=ANNOUNCE_TTL,
+        )
         view = build_announce_view(
             hit,
-            mention=_mention(guild, self.bot, user.id),
-            title=titles.get(user.id, title_for_level(1)),
+            mention=mention,
+            title=grade,
             rating=rating,
             comment=comment,
             updated=updated,
             experienced_at=experienced_at,
             spoiler=spoiler,
+            posted_at=posted_at,
+            wid=wid,
+            live=True,
         )
         try:
-            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
+            mark_stripped(wid)
             logger.error("Impossible d'annoncer une critique sur %s : %s", guild.name, exc)
+            return
+        bind_record(wid, message.channel.id, message.id)
 
     async def _search_or_reply(
         self,
