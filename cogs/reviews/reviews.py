@@ -1082,9 +1082,9 @@ def build_announce_view(
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
-    if live and wid:
-        container.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, "noter", label="Noter")))
     view.add_item(container)
+    if live and wid:
+        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid)))
     return view
 
 

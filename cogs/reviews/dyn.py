@@ -269,13 +269,13 @@ class AnnounceDynButton(
         wid: str,
         action: str = "noter",
         *,
-        label: str = "Noter",
-        style: discord.ButtonStyle = discord.ButtonStyle.green,
+        label: str = "Voir ma note",
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
     ) -> None:
         super().__init__(
             discord.ui.Button(
                 style=style,
-                label=(label or "Noter")[:80],
+                label=(label or "Voir ma note")[:80],
                 custom_id=f"ack:ann:{wid}:{action}",
             )
         )
@@ -293,7 +293,7 @@ class AnnounceDynButton(
         return cls(
             match["wid"],
             match["act"],
-            label=item.label or "Noter",
+            label=item.label or "Voir ma note",
             style=item.style,
         )
 
