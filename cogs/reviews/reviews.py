@@ -482,8 +482,41 @@ def date_pref_label(value: str) -> str:
     return "Aujourd'hui" if value == "today" else "Vide"
 
 
+def parse_search_types(value: str) -> tuple[str, ...]:
+    if not value or value == "all":
+        return ()
+    chosen = {part.strip() for part in value.split(",")}
+    return tuple(kind for kind in TYPE_META if kind in chosen)
+
+
+def normalize_search_pref(value: Any) -> str:
+    if value is None or value == "" or value == "all":
+        return "all"
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        parts = [str(part).strip() for part in value]
+    else:
+        return "all"
+    if "all" in parts:
+        return "all"
+    types = [kind for kind in TYPE_META if kind in parts]
+    return ",".join(types) if types else "all"
+
+
 def search_pref_label(value: str) -> str:
-    return "Tous les types" if value == "all" else type_label(value)
+    types = parse_search_types(normalize_search_pref(value))
+    if not types:
+        return "Tous les types"
+    return pretty.shorten_text(" · ".join(type_label(kind) for kind in types), 100)
+
+
+def search_pref_includes(media_type: str, *kinds: str) -> bool:
+    normalized = normalize_search_pref(media_type)
+    if normalized == "all":
+        return False
+    chosen = set(parse_search_types(normalized))
+    return any(kind in chosen for kind in kinds)
 
 
 def announce_pref_label(value: bool) -> str:
@@ -503,11 +536,11 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         return UserPrefs()
     date_value = str(_row_field(row, "default_date", "empty") or "empty")
     edit_value = str(_row_field(row, "default_list_edit", "owner") or "owner")
-    search_value = str(_row_field(row, "default_search_type", "all") or "all")
+    search_value = normalize_search_pref(_row_field(row, "default_search_type", "all") or "all")
     return UserPrefs(
         default_date=date_value if date_value in DATE_PREF_VALUES else "empty",
         default_list_edit=edit_value if edit_value in LIST_EDIT_MODES else "owner",
-        default_search_type=search_value if search_value in TYPE_META or search_value == "all" else "all",
+        default_search_type=search_value,
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
     )
 
@@ -3550,6 +3583,46 @@ class PrefFieldSelect(discord.ui.Select):
         await apply_view(interaction, self._hub)
 
 
+class PrefSearchTypeSelect(discord.ui.Select):
+    def __init__(self, parent: "PreferencesView"):
+        current = normalize_search_pref(parent.prefs.default_search_type)
+        chosen = set(parse_search_types(current))
+        options = [
+            discord.SelectOption(
+                label="Tous les types",
+                value="all",
+                description="Films, séries, jeux et musique — pas les livres",
+                default=current == "all",
+            )
+        ]
+        for kind in TYPE_META:
+            options.append(
+                discord.SelectOption(
+                    label=type_label(kind),
+                    value=kind,
+                    emoji=select_emoji(kind),
+                    description="Peut être combiné avec d'autres types",
+                    default=current != "all" and kind in chosen,
+                )
+            )
+        super().__init__(
+            placeholder=search_pref_label(current),
+            options=options,
+            min_values=1,
+            max_values=len(options),
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.prefs = await self._hub.cog.set_user_prefs(
+            self._hub.guild,
+            self._hub.user_id,
+            default_search_type=normalize_search_pref(self.values),
+        )
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
 class PreferencesView(ReviewsLayout):
     def __init__(
         self,
@@ -3577,7 +3650,7 @@ class PreferencesView(ReviewsLayout):
             return False
         return True
 
-    def _section(self, title: str, hint: str, select: PrefFieldSelect) -> list[discord.ui.Item]:
+    def _section(self, title: str, hint: str, select: discord.ui.Select) -> list[discord.ui.Item]:
         return [
             discord.ui.TextDisplay(f"**{title}**\n-# {hint}"),
             discord.ui.ActionRow(select),
@@ -3647,27 +3720,9 @@ class PreferencesView(ReviewsLayout):
             ),
             sep_wide(),
             *self._section(
-                "Type de recherche",
-                "Utilisé par /search si tu ne précises pas de type.",
-                PrefFieldSelect(
-                    self,
-                    field="default_search_type",
-                    placeholder=search_pref_label(prefs.default_search_type),
-                    options=[
-                        discord.SelectOption(
-                            label=choice.name,
-                            value=choice.value,
-                            emoji=select_emoji(choice.value) if choice.value != "all" else None,
-                            description=(
-                                "Si tu ne précises pas de type dans /search"
-                                if choice.value == "all"
-                                else pretty.shorten_text(f"Restreint /search à « {choice.name} »", 100)
-                            ),
-                            default=prefs.default_search_type == choice.value,
-                        )
-                        for choice in TYPE_CHOICES
-                    ],
-                ),
+                "Types de recherche",
+                "Un ou plusieurs types pour /search. « Tous les types » ignore les autres choix.",
+                PrefSearchTypeSelect(self),
             ),
             sep_wide(),
             *self._section(
@@ -4310,10 +4365,7 @@ class Reviews(commands.Cog):
             value = updates["default_list_edit"]
             cleaned["default_list_edit"] = value if value in LIST_EDIT_MODES else current.default_list_edit
         if "default_search_type" in updates:
-            value = updates["default_search_type"]
-            cleaned["default_search_type"] = (
-                value if value in TYPE_META or value == "all" else current.default_search_type
-            )
+            cleaned["default_search_type"] = normalize_search_pref(updates["default_search_type"])
         if "announce_notes" in updates:
             cleaned["announce_notes"] = bool(updates["announce_notes"])
         prefs = replace(current, **cleaned) if cleaned else current
@@ -4341,9 +4393,7 @@ class Reviews(commands.Cog):
         if explicit in TYPE_META or explicit == "all":
             return explicit
         prefs = await self.get_user_prefs(guild, user_id)
-        if prefs.default_search_type in TYPE_META or prefs.default_search_type == "all":
-            return prefs.default_search_type
-        return "all"
+        return normalize_search_pref(prefs.default_search_type)
 
     async def counts(self, guild: discord.Guild) -> tuple[int, int]:
         db = self.data.get(guild)
@@ -5269,15 +5319,20 @@ class Reviews(commands.Cog):
             await interaction.edit_original_response(content="**Erreur ·** Catalogue média indisponible.")
             return None
         wants_tmdb = spec.source in (None, "tmdb") and (
-            spec.lookup_id or media_type in ("all", "movie", "tv") or spec.media_type in ("movie", "tv")
+            spec.lookup_id
+            or media_type == "all"
+            or search_pref_includes(media_type, "movie", "tv")
+            or spec.media_type in ("movie", "tv")
         )
         if wants_tmdb and spec.source == "tmdb" and not self.catalog.tmdb.available:
             await interaction.edit_original_response(content="**Erreur ·** Clé TMDB manquante (`TMDB_API_KEY` dans `.env`).")
             return None
-        if media_type in ("movie", "tv") and spec.source is None and not self.catalog.tmdb.available:
+        if search_pref_includes(media_type, "movie", "tv") and spec.source is None and not self.catalog.tmdb.available:
             await interaction.edit_original_response(content="**Erreur ·** Clé TMDB manquante (`TMDB_API_KEY` dans `.env`).")
             return None
-        wants_spotify = spec.source == "spotify" or (spec.source is None and media_type in ("album", "track"))
+        wants_spotify = spec.source == "spotify" or (
+            spec.source is None and search_pref_includes(media_type, "album", "track")
+        )
         if wants_spotify and not self.catalog.spotify.available:
             await interaction.edit_original_response(
                 content="**Erreur ·** Clés Spotify manquantes (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` dans `.env`)."
@@ -5309,7 +5364,7 @@ class Reviews(commands.Cog):
     @app_commands.rename(query="recherche", media_type="type", rating="note", comment="commentaire")
     @app_commands.describe(
         query="Titre, année, ou préfixe (tmdb:Dune, tmdb:27205, URL TMDB)",
-        media_type="Restreindre la recherche à un type (sinon ton défaut /preferences)",
+        media_type="Restreindre à un type (sinon tes types /preferences)",
         rating="Note de 0 à 10 (entier, une étoile = 2 points)",
         comment="Court commentaire optionnel",
     )

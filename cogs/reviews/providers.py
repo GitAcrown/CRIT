@@ -120,6 +120,16 @@ class SearchSpec:
     lookup_kind: str | None = None
 
 
+_SEARCH_KINDS = frozenset({"movie", "tv", "game", "album", "track", "book"})
+
+
+def _search_kinds(media_type: str) -> frozenset[str] | None:
+    if not media_type or media_type == "all":
+        return None
+    kinds = frozenset(part.strip() for part in media_type.split(",") if part.strip() in _SEARCH_KINDS)
+    return kinds or None
+
+
 def parse_query_year(query: str) -> tuple[str, int | None]:
     match = _YEAR_RE.search(query)
     if not match:
@@ -915,7 +925,12 @@ class MediaCatalog:
 
     async def search(self, query: str, media_type: str, *, quick: bool = False) -> list[MediaHit]:
         spec = parse_search_query(query)
-        effective = spec.media_type or (None if media_type == "all" else media_type)
+        kinds = _search_kinds(media_type)
+        if spec.media_type:
+            kinds = frozenset({spec.media_type})
+        effective = spec.media_type
+        if not effective and kinds is not None and len(kinds) == 1:
+            effective = next(iter(kinds))
         if spec.lookup_id:
             return await self._lookup(spec, effective)
 
@@ -923,31 +938,37 @@ class MediaCatalog:
         if len(text) < 2:
             return []
         source = spec.source
-        wide = effective is None
+        wide = kinds is None
         per = 4 if wide else 8
         clean, _year = parse_query_year(text)
+
+        def wants(kind: str) -> bool:
+            return kinds is None or kind in kinds
+
         # Autocomplete / tous types : Steam et Open Library sont trop lents
         # (OL ~4 s) et bloquaient TMDB + Spotify déjà prêts.
         skip_slow = quick and wide
         tasks: list[tuple[str, Any, float]] = []
         # Film + série en parallèle : /search/multi ignore trop souvent les films
         # et, en cas d'échec silencieux, Spotify se retrouvait en tête.
-        want_tmdb = source in (None, "tmdb") and (effective in (None, "movie", "tv"))
+        want_tmdb = source in (None, "tmdb") and (wants("movie") or wants("tv"))
         tmdb_budget = 2.5 if quick else 4.0
         if want_tmdb:
-            if effective in ("movie", "tv"):
-                tasks.append(("tmdb", self.tmdb.search(text, effective, 8), tmdb_budget))
+            if kinds is not None and "movie" in kinds and "tv" not in kinds:
+                tasks.append(("tmdb", self.tmdb.search(text, "movie", 8), tmdb_budget))
+            elif kinds is not None and "tv" in kinds and "movie" not in kinds:
+                tasks.append(("tmdb", self.tmdb.search(text, "tv", 8), tmdb_budget))
             else:
                 tasks.append(("tmdb-movie", self.tmdb.search(text, "movie", 8), tmdb_budget))
                 tasks.append(("tmdb-tv", self.tmdb.search(text, "tv", 6), tmdb_budget))
-        if source in (None, "steam") and effective in (None, "game") and not skip_slow:
-            steam_budget = 4.0 if effective == "game" else 2.5
+        if source in (None, "steam") and wants("game") and not skip_slow:
+            steam_budget = 4.0 if kinds == frozenset({"game"}) else 2.5
             tasks.append(("steam", self.steam.search(clean, per), steam_budget))
-        if source in (None, "spotify") and effective in (None, "album"):
+        if source in (None, "spotify") and wants("album"):
             tasks.append(("spotify-album", self.spotify.search(clean, "album", per), 2.5 if quick else 3.5))
-        if source in (None, "spotify") and effective in (None, "track"):
+        if source in (None, "spotify") and wants("track"):
             tasks.append(("spotify-track", self.spotify.search(clean, "track", 3 if wide else 8), 2.5 if quick else 3.5))
-        if source == "openlibrary" or effective == "book":
+        if source == "openlibrary" or (kinds is not None and "book" in kinds):
             tasks.append(("books", self.books.search(clean, per), 6.0))
 
         async def one_source(name: str, coro: Any, budget: float) -> list[MediaHit]:
