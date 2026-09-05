@@ -3309,16 +3309,14 @@ class ProfileView(ReviewsLayout):
         twins = self.affinities[:3]
         rival = min(self.affinities, key=lambda a: (a.percent, -a.overlap))
         lines = [
+            f"**{TWIN} Jumeaux**",
             f"-# {len(self.affinities)} affinité(s) · min. {MIN_AFFINITY_OVERLAP} en commun",
-            "",
-            f"### {TWIN} Jumeaux",
         ]
         for twin in twins:
             lines.append(self._person(twin.user_id))
             lines.append(f"-# {twin.percent:.0f} % · {twin.overlap} en commun")
         if rival.user_id not in {t.user_id for t in twins}:
-            lines.append("")
-            lines.append(f"### {RIVAL} Rival")
+            lines.append(f"**{RIVAL} Rival**")
             lines.append(self._person(rival.user_id))
             lines.append(f"-# {rival.percent:.0f} %")
         body.append(discord.ui.TextDisplay("\n".join(lines)))
