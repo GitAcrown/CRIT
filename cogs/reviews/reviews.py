@@ -66,16 +66,56 @@ logger = logging.getLogger("CRIT.Reviews")
 NO_PINGS = discord.AllowedMentions.none()
 
 
+MENU_TIMEOUT = 840.0
+
+
+def _disable_interactive(item: discord.ui.Item) -> None:
+    if getattr(item, "disabled", None) is False:
+        item.disabled = True  # type: ignore[attr-defined]
+    children = getattr(item, "children", None)
+    if children:
+        for child in children:
+            _disable_interactive(child)
+
+
+def bind_view_message(
+    view: discord.ui.LayoutView,
+    message: discord.Message | discord.WebhookMessage | None,
+) -> None:
+    if message is None:
+        return
+    view.message = message
+    if hasattr(view, "_message"):
+        view._message = message
+
+
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
-    """Met à jour le message comme MARIA : `edit_message`, mentions visibles sans ping."""
-    if interaction.response.is_done():
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+    """Met à jour le message qui porte les boutons, pas un autre webhook."""
+    kwargs = {"view": view, "allowed_mentions": NO_PINGS}
+    message: discord.Message | discord.WebhookMessage | None = None
+    if not interaction.response.is_done():
+        await interaction.response.edit_message(**kwargs)
+        message = interaction.message
     else:
-        await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
+        edited = False
+        if interaction.message is not None:
+            try:
+                message = await interaction.message.edit(**kwargs)
+                edited = True
+            except discord.HTTPException:
+                edited = False
+        if not edited:
+            message = await interaction.edit_original_response(**kwargs)
+    bind_view_message(view, message or interaction.message)
 
 
 class ReviewsLayout(discord.ui.LayoutView):
     """LayoutView CRIT : un Container (texte + ActionRows), comme MARIA."""
+
+    def __init__(self, *, timeout: float | None = MENU_TIMEOUT):
+        super().__init__(timeout=timeout)
+        self._interaction: discord.Interaction | None = None
+        self._message: discord.WebhookMessage | discord.Message | None = None
 
     async def on_error(
         self,
@@ -92,6 +132,38 @@ class ReviewsLayout(discord.ui.LayoutView):
                 )
         except discord.HTTPException:
             pass
+
+    async def on_timeout(self) -> None:
+        for item in list(self.children):
+            _disable_interactive(item)
+        message = self.message or self._message
+        if message is None:
+            return
+        try:
+            await message.edit(view=self, allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            pass
+
+    async def attach(self, interaction: discord.Interaction) -> None:
+        self._interaction = interaction
+        try:
+            bind_view_message(self, await interaction.original_response())
+        except discord.HTTPException:
+            bind_view_message(self, interaction.message)
+
+    async def push(self, interaction: discord.Interaction | None = None) -> None:
+        try:
+            if interaction is not None:
+                await apply_view(interaction, self)
+                return
+            message = self.message or self._message
+            if message is not None:
+                await message.edit(view=self, allowed_mentions=NO_PINGS)
+                return
+            if self._interaction is not None:
+                await apply_view(self._interaction, self)
+        except discord.HTTPException as exc:
+            logger.warning("Impossible de rafraîchir %s : %s", type(self).__name__, exc)
 
     def set_layout(self, body: list[discord.ui.Item], *rows: discord.ui.Item | None) -> None:
         self.clear_items()
@@ -829,8 +901,13 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
 
 async def send_ephemeral_menu(interaction: discord.Interaction, view: ReviewsLayout) -> None:
     """Nouveau message éphémère — ne jamais éditer la fiche publique."""
-    await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
     view._interaction = interaction
+    if interaction.response.is_done():
+        message = await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+        bind_view_message(view, message)
+        return
+    await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+    await view.attach(interaction)
 
 
 async def handle_published_fiche_click(
@@ -864,6 +941,8 @@ async def handle_published_fiche_click(
     if action == "voir":
         await _public_watchlist_click(cog, guild, interaction, hit)
         return
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
     if action == "noter":
         menu = await MyNoteView.create(cog, guild, hit, interaction.user.id, published_wid=wid)
     elif action == "critiques":
@@ -879,23 +958,25 @@ async def _public_watchlist_click(
     interaction: discord.Interaction,
     hit: MediaHit,
 ) -> None:
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
     media_id = await cog.lookup_media_id(guild, hit)
     if media_id:
         mine = await cog.get_review(guild, interaction.user.id, media_id)
         if mine:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "**Déjà noté ·** Cette œuvre n'est plus dans ta liste à voir.",
                 ephemeral=True,
             )
             return
         if await cog.is_on_watchlist(guild, interaction.user.id, media_id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"**À voir ·** {hit.title} est déjà dans ta liste.",
                 ephemeral=True,
             )
             return
     await cog.add_watchlist(guild, interaction.user.id, hit)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"**À voir ·** {hit.title} a été ajouté à ta liste.",
         ephemeral=True,
     )
@@ -921,9 +1002,10 @@ async def open_session_followup(
     view = MediaSessionView(cog, guild, [hit], author_id=author_id, ephemeral=True)
     await view.prepare()
     view._interaction = interaction
-    view._message = await interaction.followup.send(
+    message = await interaction.followup.send(
         view=view, ephemeral=True, allowed_mentions=NO_PINGS,
     )
+    bind_view_message(view, message)
 
 
 # ---------------------------------------------------------------------------
@@ -1068,7 +1150,7 @@ class MyNoteEditButton(discord.ui.Button):
         await interaction.response.send_modal(
             RateModal(
                 self._hub,
-                max_comment=await self._hub.cog.get_comment_max(self._hub.guild),
+                max_comment=self._hub.cog.cached_comment_max(self._hub.guild),
                 default_rating=existing.get("rating"),
                 default_comment=existing.get("comment") or "",
                 default_experienced=existing.get("experienced_at") or "",
@@ -1100,7 +1182,7 @@ class MyNoteView(ReviewsLayout):
         my_review: dict | None,
         published_wid: str | None,
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.hit = hit
@@ -1124,6 +1206,7 @@ class MyNoteView(ReviewsLayout):
     ) -> "MyNoteView":
         media_id = await cog.lookup_media_id(guild, hit)
         mine = await cog.get_review(guild, author_id, media_id) if media_id else None
+        await cog.get_comment_max(guild)
         return cls(cog, guild, hit, author_id=author_id, my_review=mine, published_wid=published_wid)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1210,7 +1293,7 @@ class PublicFichePeekView(ReviewsLayout):
     """Menu éphémère lecture seule — ouvert depuis le bouton Fiche public."""
 
     def __init__(self, hit: MediaHit, *, avg: float | None, count: int, social: str):
-        super().__init__(timeout=300)
+        super().__init__()
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
         body.extend(fiche_intro(hit))
@@ -1256,7 +1339,7 @@ class PublicCritiquesView(ReviewsLayout):
         avg: float | None,
         count: int,
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.hit = hit
@@ -1361,10 +1444,17 @@ class MediaSelect(discord.ui.Select):
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
         self._hub.selected = int(self.values[0])
-        await self._hub.enrich_selected()
-        await self._hub.refresh(interaction)
+        self._hub.review_page = 0
+        self._hub.tab = "fiche"
+        await self._hub.reload_stats()
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+        if self._hub.selected not in self._hub._enriched:
+            await self._hub.enrich_selected()
+            self._hub._enriched.add(self._hub.selected)
+            self._hub._build()
+            await self._hub.push()
 
 
 class TabButton(discord.ui.Button):
@@ -1390,19 +1480,17 @@ class RateButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self._hub
-        media_id = await parent.cog.lookup_media_id(parent.guild, parent.hit)
-        existing = await parent.cog.get_review(parent.guild, interaction.user.id, media_id) if media_id else None
+        existing = parent.my_review if interaction.user.id == parent.author_id else None
         pending = parent.pending_rating
         if pending is not None and existing is None and interaction.user.id == parent.author_id:
             await interaction.response.defer()
             await parent.save_review(interaction, pending, parent.pending_comment)
             return
-        max_comment = await parent.cog.get_comment_max(parent.guild)
         existing = existing or {}
         await interaction.response.send_modal(
             RateModal(
                 parent,
-                max_comment=max_comment,
+                max_comment=parent.cog.cached_comment_max(parent.guild),
                 default_rating=existing.get("rating", parent.pending_rating if interaction.user.id == parent.author_id else None),
                 default_comment=existing.get("comment") or (parent.pending_comment if interaction.user.id == parent.author_id else ""),
                 default_experienced=existing.get("experienced_at") or "",
@@ -1542,7 +1630,7 @@ class MediaSessionView(ReviewsLayout):
         pending_comment: str = "",
         selected: int = 0,
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.hits = hits
@@ -1563,6 +1651,7 @@ class MediaSessionView(ReviewsLayout):
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
         self.from_published_modal = False
+        self._enriched: set[int] = set()
 
     @property
     def hit(self) -> MediaHit:
@@ -1579,7 +1668,9 @@ class MediaSessionView(ReviewsLayout):
         return True
 
     async def prepare(self) -> None:
+        await self.cog.get_comment_max(self.guild)
         await self.enrich_selected()
+        self._enriched.add(self.selected)
         await self.reload_stats()
         self._build()
 
@@ -1738,15 +1829,7 @@ class MediaSessionView(ReviewsLayout):
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         await self.reload_stats()
         self._build()
-        try:
-            if interaction is not None:
-                await apply_view(interaction, self)
-            elif self._message is not None:
-                await self._message.edit(view=self, allowed_mentions=NO_PINGS)
-            elif self._interaction is not None:
-                await self._interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de rafraîchir la fiche « %s » : %s", self.hit.title, exc)
+        await self.push(interaction)
 
     async def start(self, interaction: discord.Interaction, *, deferred: bool = False) -> None:
         self._interaction = interaction
@@ -1757,6 +1840,7 @@ class MediaSessionView(ReviewsLayout):
             await interaction.response.send_message(
                 view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
             )
+        await self.attach(interaction)
 
 
 class _ReviewPageButton(discord.ui.Button):
@@ -1810,7 +1894,6 @@ class JournalTypeSelect(discord.ui.Select):
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
         self._hub.journal_type = self.values[0]
         self._hub.journal_page = 0
         self._hub._build()
@@ -1827,7 +1910,6 @@ class JournalSortSelect(discord.ui.Select):
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
         self._hub.journal_sort = self.values[0]
         self._hub.journal_page = 0
         self._hub._build()
@@ -1964,7 +2046,7 @@ class AffinityCompareSelect(discord.ui.Select):
             titles=self._hub.titles,
         )
         view._interaction = interaction
-        view._message = await interaction.followup.send(view=view)
+        bind_view_message(view, await interaction.followup.send(view=view))
 
 
 class AffinityCompareView(ReviewsLayout):
@@ -1978,7 +2060,7 @@ class AffinityCompareView(ReviewsLayout):
         affinity: Affinity,
         titles: dict[int, str],
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.left_id = left_id
@@ -2069,7 +2151,7 @@ class FavoriteSearchModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         query = str(self.query_input.value or "").strip()
         if not query:
             await self._profile.clear_favorite_slot(self._slot)
@@ -2135,7 +2217,7 @@ class FavoriteHitSelect(discord.ui.Select):
 
 class FavoritePickView(ReviewsLayout):
     def __init__(self, profile: "ProfileView", slot: int, hits: list[MediaHit]):
-        super().__init__(timeout=180)
+        super().__init__()
         self.profile = profile
         self.slot = slot
         self.hits = hits
@@ -2186,14 +2268,14 @@ class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
         if not title:
             await interaction.response.send_message("**Erreur ·** Donne un titre à la liste.", ephemeral=True)
             return
+        await interaction.response.defer()
         owned = await self._hub.cog.count_owned_lists(self._hub.guild, interaction.user.id)
         if owned >= MAX_SHARED_LISTS:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"**Erreur ·** Tu as déjà {MAX_SHARED_LISTS} listes sur ce serveur.",
                 ephemeral=True,
             )
             return
-        await interaction.response.defer()
         record = await self._hub.cog.create_shared_list(
             self._hub.guild,
             interaction.user.id,
@@ -2329,7 +2411,7 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         query = str(self.query_input.value or "").strip()
         catalog = self._hub.cog.catalog
         if catalog is None:
@@ -2351,7 +2433,7 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
             error = await self._hub.cog.add_shared_list_item(
                 self._hub.guild, self._hub.record["id"], interaction.user.id, hits[0],
             )
-            await self._hub.refresh()
+            await self._hub.refresh(interaction)
             await interaction.followup.send(
                 f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}",
                 ephemeral=True,
@@ -2393,7 +2475,7 @@ class SharedListHitSelect(discord.ui.Select):
 
 class SharedListPickView(ReviewsLayout):
     def __init__(self, liste: "SharedListView", hits: list[MediaHit]):
-        super().__init__(timeout=180)
+        super().__init__()
         self.liste = liste
         self.hits = hits
         self.set_layout(
@@ -2598,7 +2680,7 @@ class ListsHubView(ReviewsLayout):
         lists: list[dict[str, Any]],
         viewer_id: int,
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.lists = lists
@@ -2670,13 +2752,7 @@ class ListsHubView(ReviewsLayout):
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         self.lists = await self.cog.load_shared_lists(self.guild)
         self._build()
-        editor = interaction or self._interaction
-        if editor is None:
-            return
-        try:
-            await apply_view(editor, self)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de rafraîchir les listes : %s", exc)
+        await self.push(interaction)
 
 
 class SharedListView(ReviewsLayout):
@@ -2690,7 +2766,7 @@ class SharedListView(ReviewsLayout):
         editor_ids: list[int],
         viewer_id: int,
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.record = record
@@ -2828,13 +2904,7 @@ class SharedListView(ReviewsLayout):
         self.items = await self.cog.load_shared_list_items(self.guild, record["id"])
         self.editor_ids = await self.cog.load_shared_list_editors(self.guild, record["id"])
         self._build()
-        editor = interaction or self._interaction
-        if editor is None:
-            return
-        try:
-            await apply_view(editor, self)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de rafraîchir la liste « %s » : %s", self.record["title"], exc)
+        await self.push(interaction)
 
 
 class ProfileView(ReviewsLayout):
@@ -2857,7 +2927,7 @@ class ProfileView(ReviewsLayout):
         viewer_id: int,
         tab: str = "profil",
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.member = member
@@ -3140,13 +3210,7 @@ class ProfileView(ReviewsLayout):
         self.favorites = await self.cog.get_favorites(self.guild, self.member.id)
         self.watchlist_entries = await self.cog.load_watchlist(self.guild, self.member.id)
         self._build()
-        editor = interaction or self._interaction
-        if editor is None:
-            return
-        try:
-            await apply_view(editor, self)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de rafraîchir le profil : %s", exc)
+        await self.push(interaction)
 
 
 class TopPeriodSelect(discord.ui.Select):
@@ -3187,7 +3251,7 @@ class ServerHubView(ReviewsLayout):
         period: str = "all",
         tab: str = "recentes",
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.recent = recent
@@ -3320,13 +3384,7 @@ class ServerHubView(ReviewsLayout):
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         self._build()
-        editor = interaction or self._interaction
-        if editor is None:
-            return
-        try:
-            await apply_view(editor, self)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de rafraîchir l'explorateur : %s", exc)
+        await self.push(interaction)
 
 
 # ---------------------------------------------------------------------------
@@ -3355,6 +3413,7 @@ class CommentMaxModal(discord.ui.Modal, title="Longueur max. du commentaire"):
             )
             return
         await self._view_ref.cog.data.get(self._view_ref.guild).set_dict_value("settings", "MaxCommentLength", int(raw))
+        self._view_ref.cog._comment_max[self._view_ref.guild.id] = int(raw)
         await self._view_ref.refresh(interaction)
 
 
@@ -3495,7 +3554,7 @@ class ReviewsConfigView(ReviewsLayout):
         media_count: int,
         api_status: dict[str, bool],
     ):
-        super().__init__(timeout=300)
+        super().__init__()
         self.cog = cog
         self.guild = guild
         self.announce_channels = announce_channels
@@ -3568,20 +3627,19 @@ class ReviewsConfigView(ReviewsLayout):
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         await self._reload()
         self._build()
-        editor = interaction or self._interaction
-        if editor is not None:
-            await apply_view(editor, self)
+        await self.push(interaction)
 
     async def start(self, interaction: discord.Interaction) -> None:
         self._interaction = interaction
         await interaction.response.send_message(view=self, ephemeral=True)
+        await self.attach(interaction)
 
 
 class HelpView(ReviewsLayout):
     """Aide du bot : commandes + comment noter, en un seul LayoutView."""
 
     def __init__(self, *, avatar_url: str | None = None):
-        super().__init__(timeout=300)
+        super().__init__()
         header = (
             "## CRIT\n"
             "**Vous avez toujours rêvé de critiquer les films streamés ?** "
@@ -3654,6 +3712,7 @@ class Reviews(commands.Cog):
         self._http: aiohttp.ClientSession | None = None
         self.catalog: MediaCatalog | None = None  # type: ignore[assignment]
         self._schema_ready: set[int] = set()
+        self._comment_max: dict[int, int] = {}
 
         settings = dataio.DictTableBuilder(
             "settings",
@@ -3883,11 +3942,19 @@ class Reviews(commands.Cog):
             channel_id = routes[ANNOUNCE_ROUTE_ALL]
         return resolve_guild_text_channel(guild, channel_id)
 
+    def cached_comment_max(self, guild: discord.Guild) -> int:
+        return self._comment_max.get(guild.id, DEFAULT_COMMENT_MAX)
+
     async def get_comment_max(self, guild: discord.Guild) -> int:
+        cached = self._comment_max.get(guild.id)
+        if cached is not None:
+            return cached
         value = await self.data.get(guild).get_dict_value("settings", "MaxCommentLength", cast=int)
         if not value:
-            return DEFAULT_COMMENT_MAX
-        return max(MIN_COMMENT_MAX, min(MAX_COMMENT_MAX, int(value)))
+            value = DEFAULT_COMMENT_MAX
+        value = max(MIN_COMMENT_MAX, min(MAX_COMMENT_MAX, int(value)))
+        self._comment_max[guild.id] = value
+        return value
 
     async def counts(self, guild: discord.Guild) -> tuple[int, int]:
         db = self.data.get(guild)
@@ -4915,6 +4982,7 @@ class Reviews(commands.Cog):
         )
         view._interaction = interaction
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        await view.attach(interaction)
 
     @app_commands.command(name="carnet")
     @app_commands.guild_only()
@@ -4992,6 +5060,7 @@ class Reviews(commands.Cog):
         )
         view._interaction = interaction
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        await view.attach(interaction)
 
     @app_commands.command(name="listes")
     @app_commands.guild_only()
@@ -5006,6 +5075,7 @@ class Reviews(commands.Cog):
         view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
         view._interaction = interaction
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        await view.attach(interaction)
 
     @app_commands.command(name="tirage")
     @app_commands.guild_only()

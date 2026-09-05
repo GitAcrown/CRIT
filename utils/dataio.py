@@ -92,6 +92,7 @@ class ModelDataManager:
         self.db_path = db_path
         self.builders = tuple(builders)
         self._conn: aiosqlite.Connection | None = None
+        self._dict_tables_ok: set[str] = set()
 
     def __repr__(self) -> str:
         return f"<ModelDataManager model={self.model!r}>"
@@ -103,6 +104,9 @@ class ModelDataManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(self.db_path)
         conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=5000")
+        await conn.execute("PRAGMA synchronous=NORMAL")
         self._conn = conn
 
         existing_tables = {row[0] for row in await conn.execute_fetchall(
@@ -180,11 +184,14 @@ class ModelDataManager:
     # --- Raccourcis tables clé/valeur ---
 
     async def _check_dict_table(self, table_name: str) -> None:
+        if table_name in self._dict_tables_ok:
+            return
         if table_name not in await self.tables():
             raise ValueError(f"La table {table_name!r} n'existe pas")
         columns = await self.column_names(table_name)
         if "key" not in columns or "value" not in columns:
             raise ValueError(f"La table {table_name!r} n'est pas une table clé/valeur")
+        self._dict_tables_ok.add(table_name)
 
     async def get_dict_value(self, table_name: str, key: str, *, cast: type = str) -> Any:
         await self._check_dict_table(table_name)
