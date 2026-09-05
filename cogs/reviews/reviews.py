@@ -219,11 +219,6 @@ ANNOUNCE_ROUTE_ORDER = (ANNOUNCE_ROUTE_ALL, *TYPE_META)
 
 PERIOD_SECONDS = {"semaine": 7 * 86400, "mois": 30 * 86400}
 
-SCOPE_CHOICES = [
-    app_commands.Choice(name="Ma liste", value="moi"),
-    app_commands.Choice(name="Tout le serveur", value="serveur"),
-]
-
 WHEN_CHOICES = [
     app_commands.Choice(name="N'importe quand", value="all"),
     app_commands.Choice(name="Ajoutée cette semaine", value="semaine"),
@@ -3722,7 +3717,7 @@ class HelpView(ReviewsLayout):
         )
         noter = (
             f"### {STAR} Comment noter\n"
-            "1. Lance `/note` avec un titre (année bienvenue). Dès 2 lettres, "
+            "1. Lance `/search` avec un titre (année bienvenue). Dès 2 lettres, "
             "des suggestions apparaissent. Tu peux déjà passer une **note** "
             "et un **commentaire**.\n"
             "2. S'il y a plusieurs résultats, choisis l'œuvre dans le menu.\n"
@@ -3731,7 +3726,7 @@ class HelpView(ReviewsLayout):
             "un commentaire optionnel, la date (vu, joué, écouté ou lu) "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
             "4. **À voir** l'ajoute à ta liste — elle disparaît dès que tu notes.\n"
-            "5. Si tu as déjà donné la note dans `/note` et que tu n'avais pas encore "
+            "5. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
             "\n"
             "Une seule note par œuvre et par membre.\n"
@@ -3740,12 +3735,12 @@ class HelpView(ReviewsLayout):
         )
         commandes = (
             "### Commandes\n"
-            "`/note` — catalogues (TMDB, Steam, Spotify, Open Library) : noter ou à voir\n"
+            "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou à voir\n"
             "`/carnet` — page d'un membre : préférées, journal, à voir, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
-            "`/listes` — listes communes : créer, ajouter des œuvres, tirer au hasard\n"
-            "`/tirage` — une œuvre au hasard (à voir, ou une liste commune)\n"
+            "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
+            "`/tirage` — une œuvre au hasard (ta liste à voir, celle d'un membre, ou une liste commune)\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -4946,7 +4941,7 @@ class Reviews(commands.Cog):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Recherche /note échouée : %s", exc)
+            logger.exception("Recherche /search échouée : %s", exc)
             await interaction.edit_original_response(
                 content="**Erreur ·** La recherche a échoué. Réessaie dans un instant."
             )
@@ -4962,7 +4957,7 @@ class Reviews(commands.Cog):
     # Commandes
     # ==================================================================
 
-    @app_commands.command(name="note")
+    @app_commands.command(name="search")
     @app_commands.guild_only()
     @app_commands.rename(query="recherche", media_type="type", rating="note", comment="commentaire")
     @app_commands.describe(
@@ -4972,7 +4967,7 @@ class Reviews(commands.Cog):
         comment="Court commentaire optionnel",
     )
     @app_commands.choices(media_type=TYPE_CHOICES, rating=RATING_CHOICES)
-    async def critique_note(
+    async def critique_search(
         self,
         interaction: discord.Interaction,
         query: str,
@@ -4980,7 +4975,7 @@ class Reviews(commands.Cog):
         rating: float | None = None,
         comment: str | None = None,
     ) -> None:
-        """Recherche une œuvre et enregistre (ou prépare) ta note."""
+        """Recherche une œuvre : ouvrir la fiche, noter, ou ajouter à voir."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
@@ -5001,8 +4996,8 @@ class Reviews(commands.Cog):
         )
         await view.start(interaction, deferred=True)
 
-    @critique_note.autocomplete("query")
-    async def note_query_autocomplete(
+    @critique_search.autocomplete("query")
+    async def search_query_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         current = (current or "").strip()
@@ -5165,82 +5160,7 @@ class Reviews(commands.Cog):
         await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
         await view.attach(interaction)
 
-    @app_commands.command(name="listes")
-    @app_commands.guild_only()
-    async def critique_listes(self, interaction: discord.Interaction) -> None:
-        """Listes communes du serveur : créer, éditer et tirer au hasard."""
-        guild = interaction.guild
-        if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        await interaction.response.defer(ephemeral=True)
-        view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
-        view._interaction = interaction
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
-        await view.attach(interaction)
-
-    @app_commands.command(name="tirage")
-    @app_commands.guild_only()
-    @app_commands.rename(scope="portee", media_type="type", period="quand", liste="liste")
-    @app_commands.describe(
-        scope="Tirer dans ta liste à voir ou dans celles du serveur",
-        media_type="Restreindre à un type",
-        period="Quand l'œuvre a été ajoutée à la liste",
-        liste="Tirer dans une liste commune (prioritaire sur la portée)",
-    )
-    @app_commands.choices(scope=SCOPE_CHOICES, media_type=TYPE_CHOICES, period=WHEN_CHOICES)
-    async def critique_tirage(
-        self,
-        interaction: discord.Interaction,
-        scope: str = "moi",
-        media_type: str = "all",
-        period: str = "all",
-        liste: str | None = None,
-    ) -> None:
-        """Tire une œuvre encore à voir, ou dans une liste commune."""
-        guild = interaction.guild
-        if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        await interaction.response.defer(ephemeral=True)
-        list_id = int(liste) if liste and liste.isdigit() else None
-        if list_id:
-            record = await self.get_shared_list(guild, list_id)
-            if record is None:
-                await interaction.edit_original_response(content="**Tirage ·** Cette liste n'existe plus.")
-                return
-            hit = await self.draw_shared_list(
-                guild, list_id, media_type=media_type, period=period,
-            )
-            empty = f"**Tirage ·** « {record['title']} » n'a rien pour ce filtre."
-        else:
-            hit = await self.draw_watchlist(
-                guild,
-                user_id=interaction.user.id if scope == "moi" else None,
-                media_type=media_type,
-                period=period,
-            )
-            empty = (
-                "**Tirage ·** Ta liste à voir est vide."
-                if scope == "moi"
-                else "**Tirage ·** Personne n'a d'œuvre à voir pour ce filtre."
-            )
-        if hit is None:
-            await interaction.edit_original_response(content=empty)
-            return
-        view = MediaSessionView(
-            self,
-            guild,
-            [hit],
-            author_id=interaction.user.id,
-            ephemeral=True,
-        )
-        await view.start(interaction, deferred=True)
-
-    @critique_tirage.autocomplete("liste")
-    async def tirage_liste_autocomplete(
+    async def _shared_list_choices(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         guild = interaction.guild
@@ -5263,6 +5183,102 @@ class Reviews(commands.Cog):
             if len(choices) >= 25:
                 break
         return choices
+
+    @app_commands.command(name="listes")
+    @app_commands.guild_only()
+    @app_commands.describe(liste="Ouvrir une liste directement")
+    async def critique_listes(self, interaction: discord.Interaction, liste: str | None = None) -> None:
+        """Listes communes du serveur : créer, éditer et tirer au hasard."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        list_id = int(liste) if liste and liste.isdigit() else None
+        view: ReviewsLayout | None = None
+        if list_id:
+            view = await SharedListView.create(self, guild, list_id, viewer_id=interaction.user.id)
+            if view is None:
+                await interaction.edit_original_response(content="**Listes ·** Cette liste n'existe plus.")
+                return
+        else:
+            view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
+        view._interaction = interaction
+        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        await view.attach(interaction)
+
+    @critique_listes.autocomplete("liste")
+    async def listes_liste_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._shared_list_choices(interaction, current)
+
+    @app_commands.command(name="tirage")
+    @app_commands.guild_only()
+    @app_commands.rename(member="membre", media_type="type", period="quand", liste="liste")
+    @app_commands.describe(
+        member="Tirer dans la liste à voir de ce membre (par défaut : la tienne)",
+        media_type="Restreindre à un type",
+        period="Quand l'œuvre a été ajoutée à la liste",
+        liste="Tirer dans une liste commune (prioritaire sur le membre)",
+    )
+    @app_commands.choices(media_type=TYPE_CHOICES, period=WHEN_CHOICES)
+    async def critique_tirage(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        media_type: str = "all",
+        period: str = "all",
+        liste: str | None = None,
+    ) -> None:
+        """Tire une œuvre encore à voir, ou dans une liste commune."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        list_id = int(liste) if liste and liste.isdigit() else None
+        if list_id:
+            record = await self.get_shared_list(guild, list_id)
+            if record is None:
+                await interaction.edit_original_response(content="**Tirage ·** Cette liste n'existe plus.")
+                return
+            hit = await self.draw_shared_list(
+                guild, list_id, media_type=media_type, period=period,
+            )
+            empty = f"**Tirage ·** « {record['title']} » n'a rien pour ce filtre."
+        else:
+            target = member or interaction.user
+            hit = await self.draw_watchlist(
+                guild,
+                user_id=target.id,
+                media_type=media_type,
+                period=period,
+            )
+            empty = (
+                "**Tirage ·** Ta liste à voir est vide."
+                if target.id == interaction.user.id
+                else f"**Tirage ·** La liste à voir de {target.display_name} est vide."
+            )
+        if hit is None:
+            await interaction.edit_original_response(content=empty)
+            return
+        view = MediaSessionView(
+            self,
+            guild,
+            [hit],
+            author_id=interaction.user.id,
+            ephemeral=True,
+        )
+        await view.start(interaction, deferred=True)
+
+    @critique_tirage.autocomplete("liste")
+    async def tirage_liste_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._shared_list_choices(interaction, current)
 
     @app_commands.command(name="config")
     @app_commands.guild_only()

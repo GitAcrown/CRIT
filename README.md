@@ -10,11 +10,11 @@ Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (
 
 ## Commandes
 
-- `/note` — catalogues externes : noter une œuvre ou l'ajouter à voir (autocomplete dès 2 lettres)
+- `/search` — catalogues externes : fiche, noter ou à voir (autocomplete dès 2 lettres)
 - `/carnet` — page d'un membre : préférées, journal, à voir et affinités (aussi via clic droit → Voir le carnet)
 - `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
-- `/listes` — listes communes : titre, description, droits d'édition, tirage
-- `/tirage` — tire une œuvre encore à voir (ta liste, le serveur) ou dans une liste commune
+- `/listes` — listes communes : titre, description, droits d'édition, tirage (autocomplete pour ouvrir une liste)
+- `/tirage` — tire une œuvre encore à voir (ta liste, celle d'un membre) ou dans une liste commune
 - `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
 
