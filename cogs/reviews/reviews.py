@@ -461,7 +461,6 @@ DATE_PREF_VALUES = ("empty", "today")
 class UserPrefs:
     default_date: str = "empty"
     default_list_edit: str = "owner"
-    default_spoiler: bool = False
     default_search_type: str = "all"
     announce_notes: bool = True
 
@@ -476,10 +475,8 @@ def note_experienced_default(prefs: UserPrefs, existing: dict[str, Any]) -> str:
     return today_experienced() if prefs.default_date == "today" else ""
 
 
-def note_spoiler_default(prefs: UserPrefs, existing: dict[str, Any]) -> bool:
-    if "spoiler" in existing:
-        return bool(existing.get("spoiler"))
-    return bool(prefs.default_spoiler)
+def note_spoiler_default(existing: dict[str, Any]) -> bool:
+    return bool(existing.get("spoiler")) if "spoiler" in existing else False
 
 
 def date_pref_label(value: str) -> str:
@@ -488,10 +485,6 @@ def date_pref_label(value: str) -> str:
 
 def search_pref_label(value: str) -> str:
     return "Tous les types" if value == "all" else type_label(value)
-
-
-def spoiler_pref_label(value: bool) -> str:
-    return "Masqué" if value else "Visible"
 
 
 def announce_pref_label(value: bool) -> str:
@@ -515,7 +508,6 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
     return UserPrefs(
         default_date=date_value if date_value in DATE_PREF_VALUES else "empty",
         default_list_edit=edit_value if edit_value in LIST_EDIT_MODES else "owner",
-        default_spoiler=bool(int(_row_field(row, "default_spoiler", 0) or 0)),
         default_search_type=search_value if search_value in TYPE_META or search_value == "all" else "all",
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
     )
@@ -1295,7 +1287,7 @@ class MyNoteEditButton(discord.ui.Button):
                 default_rating=existing.get("rating"),
                 default_comment=existing.get("comment") or "",
                 default_experienced=note_experienced_default(prefs, existing),
-                default_spoiler=note_spoiler_default(prefs, existing),
+                default_spoiler=note_spoiler_default(existing),
             )
         )
 
@@ -1636,7 +1628,7 @@ class RateButton(discord.ui.Button):
                 pending,
                 parent.pending_comment,
                 experienced_at=note_experienced_default(prefs, {}),
-                spoiler=prefs.default_spoiler,
+                spoiler=False,
             )
             return
         existing = existing or {}
@@ -1647,7 +1639,7 @@ class RateButton(discord.ui.Button):
                 default_rating=existing.get("rating", parent.pending_rating if interaction.user.id == parent.author_id else None),
                 default_comment=existing.get("comment") or (parent.pending_comment if interaction.user.id == parent.author_id else ""),
                 default_experienced=note_experienced_default(prefs, existing),
-                default_spoiler=note_spoiler_default(prefs, existing),
+                default_spoiler=note_spoiler_default(existing),
             )
         )
 
@@ -3562,7 +3554,7 @@ class PrefFieldSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         raw = self.values[0]
-        value: str | bool = raw == "1" if self._field in {"default_spoiler", "announce_notes"} else raw
+        value: str | bool = raw == "1" if self._field == "announce_notes" else raw
         self._hub.prefs = await self._hub.cog.set_user_prefs(
             self._hub.guild,
             self._hub.user_id,
@@ -3599,15 +3591,11 @@ class PreferencesView(ReviewsLayout):
             return False
         return True
 
-    def _summary(self) -> str:
-        prefs = self.prefs
-        return (
-            f"**Date vu / joué / lu** · {date_pref_label(prefs.default_date)}\n"
-            f"**Nouvelles listes** · {list_edit_label(prefs.default_list_edit)}\n"
-            f"**Spoiler** · {spoiler_pref_label(prefs.default_spoiler)}\n"
-            f"**Recherche** · {search_pref_label(prefs.default_search_type)}\n"
-            f"**Annonces** · {announce_pref_label(prefs.announce_notes)}"
-        )
+    def _section(self, title: str, hint: str, select: PrefFieldSelect) -> list[discord.ui.Item]:
+        return [
+            discord.ui.TextDisplay(f"**{title}**\n-# {hint}"),
+            discord.ui.ActionRow(select),
+        ]
 
     def _build(self) -> None:
         prefs = self.prefs
@@ -3615,17 +3603,16 @@ class PreferencesView(ReviewsLayout):
             f"## Préférences\n"
             f"-# Tes défauts sur **{self.guild.name}** — notes, recherches et nouvelles listes."
         )
-        self.set_layout(
-            [
-                section_with_thumbnail(header, self.user.display_avatar.url),
-                sep_wide(),
-                discord.ui.TextDisplay(self._summary()),
-            ],
-            discord.ui.ActionRow(
+        children: list[discord.ui.Item] = [
+            section_with_thumbnail(header, self.user.display_avatar.url),
+            sep_wide(),
+            *self._section(
+                "Date vu / joué / lu",
+                "Préremplit le formulaire Noter, ou laisse le champ vide.",
                 PrefFieldSelect(
                     self,
                     field="default_date",
-                    placeholder="Date vu / joué / lu",
+                    placeholder=date_pref_label(prefs.default_date),
                     options=[
                         discord.SelectOption(
                             label="Aujourd'hui",
@@ -3640,13 +3627,16 @@ class PreferencesView(ReviewsLayout):
                             default=prefs.default_date == "empty",
                         ),
                     ],
-                )
+                ),
             ),
-            discord.ui.ActionRow(
+            sep_wide(),
+            *self._section(
+                "Édition des nouvelles listes",
+                "Qui peut modifier une liste que tu viens de créer.",
                 PrefFieldSelect(
                     self,
                     field="default_list_edit",
-                    placeholder="Édition des nouvelles listes",
+                    placeholder=list_edit_label(prefs.default_list_edit),
                     options=[
                         discord.SelectOption(
                             label="Créateur seul",
@@ -3667,34 +3657,16 @@ class PreferencesView(ReviewsLayout):
                             default=prefs.default_list_edit == "public",
                         ),
                     ],
-                )
+                ),
             ),
-            discord.ui.ActionRow(
-                PrefFieldSelect(
-                    self,
-                    field="default_spoiler",
-                    placeholder="Spoiler par défaut",
-                    options=[
-                        discord.SelectOption(
-                            label="Visible",
-                            value="0",
-                            description="Case spoiler décochée pour une nouvelle note",
-                            default=not prefs.default_spoiler,
-                        ),
-                        discord.SelectOption(
-                            label="Masqué",
-                            value="1",
-                            description="Case spoiler cochée pour une nouvelle note",
-                            default=prefs.default_spoiler,
-                        ),
-                    ],
-                )
-            ),
-            discord.ui.ActionRow(
+            sep_wide(),
+            *self._section(
+                "Type de recherche",
+                "Utilisé par /search si tu ne précises pas de type.",
                 PrefFieldSelect(
                     self,
                     field="default_search_type",
-                    placeholder="Type de recherche",
+                    placeholder=search_pref_label(prefs.default_search_type),
                     options=[
                         discord.SelectOption(
                             label=choice.name,
@@ -3709,13 +3681,16 @@ class PreferencesView(ReviewsLayout):
                         )
                         for choice in TYPE_CHOICES
                     ],
-                )
+                ),
             ),
-            discord.ui.ActionRow(
+            sep_wide(),
+            *self._section(
+                "Annonces de tes notes",
+                "Si tes notes apparaissent dans le salon d'annonces.",
                 PrefFieldSelect(
                     self,
                     field="announce_notes",
-                    placeholder="Annonces de tes notes",
+                    placeholder=announce_pref_label(prefs.announce_notes),
                     options=[
                         discord.SelectOption(
                             label="Publier",
@@ -3730,9 +3705,11 @@ class PreferencesView(ReviewsLayout):
                             default=not prefs.announce_notes,
                         ),
                     ],
-                )
+                ),
             ),
-        )
+        ]
+        self.clear_items()
+        self.add_item(discord.ui.Container(*children))
 
     async def start(self, interaction: discord.Interaction) -> None:
         self._interaction = interaction
@@ -4025,7 +4002,7 @@ class HelpView(ReviewsLayout):
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (ta liste à voir, celle d'un membre, ou une liste commune)\n"
-            "`/preferences` — tes défauts : date, listes, spoiler, recherche, annonces\n"
+            "`/preferences` — tes défauts : date, listes, recherche, annonces\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -4038,7 +4015,7 @@ class HelpView(ReviewsLayout):
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
             "(lui seul, des membres, ou tout le serveur). "
             "`/config` peut poster les notes dans un salon différent selon le type. "
-            "Tes défauts (date, listes, spoiler…) se règlent dans `/preferences`.\n"
+            "Tes défauts (date, listes, recherche, annonces) se règlent dans `/preferences`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -4346,8 +4323,6 @@ class Reviews(commands.Cog):
         if "default_list_edit" in updates:
             value = updates["default_list_edit"]
             cleaned["default_list_edit"] = value if value in LIST_EDIT_MODES else current.default_list_edit
-        if "default_spoiler" in updates:
-            cleaned["default_spoiler"] = bool(updates["default_spoiler"])
         if "default_search_type" in updates:
             value = updates["default_search_type"]
             cleaned["default_search_type"] = (
@@ -4364,7 +4339,7 @@ class Reviews(commands.Cog):
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
-            int(prefs.default_spoiler),
+            0,
             prefs.default_search_type,
             int(prefs.announce_notes),
         )
@@ -5673,7 +5648,7 @@ class Reviews(commands.Cog):
     @app_commands.command(name="preferences")
     @app_commands.guild_only()
     async def critique_preferences(self, interaction: discord.Interaction) -> None:
-        """Tes défauts : date, listes, spoiler, recherche et annonces."""
+        """Tes défauts : date, listes, recherche et annonces."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
