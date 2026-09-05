@@ -33,8 +33,6 @@ from .dyn import (
     update_payload,
 )
 from .emojis import (
-    A_VOIR_OFF,
-    A_VOIR_ON,
     BOOK,
     EXPLICIT,
     GAME,
@@ -882,7 +880,7 @@ def render_published_fiche(
         body.append(discord.ui.ActionRow(
             FicheDynButton(wid, "critiques", label=f"Critiques ({count})"),
             FicheDynButton(wid, "noter", label="Ma note", style=discord.ButtonStyle.green),
-            FicheDynButton(wid, "voir", label="À voir"),
+            FicheDynButton(wid, "voir", label='Mes « À voir »'),
         ))
     view.add_item(discord.ui.Container(*body))
     return view
@@ -1649,7 +1647,7 @@ class WatchlistButton(discord.ui.Button):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            emoji=discord.PartialEmoji.from_str(A_VOIR_ON if on else A_VOIR_OFF),
+            label='Retirer « À voir »' if on else "À voir",
             style=discord.ButtonStyle.secondary if (on or rated) else discord.ButtonStyle.primary,
             disabled=rated,
         )
