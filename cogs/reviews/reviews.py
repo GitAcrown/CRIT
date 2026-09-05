@@ -2011,27 +2011,6 @@ class _ReviewPageButton(discord.ui.Button):
 # Sélections partagées (profil / explorateur)
 # ---------------------------------------------------------------------------
 
-class JournalOpenSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView", page_items: list[tuple[MediaHit, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(f"{format_stars_select(row['rating'])}  {hit.title}", 95),
-                value=str(index),
-                description=pretty.shorten_text(f"{type_label(hit.media_type)} · {hit.year or '—'} · {format_score(row['rating'])}", 95),
-                emoji=select_emoji(hit.media_type),
-            )
-            for index, (hit, row) in enumerate(page_items)
-        ]
-        super().__init__(placeholder="Ouvrir une fiche", options=options)
-        self._hub = parent
-        self._items = page_items
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        hit, _row = self._items[int(self.values[0])]
-        await interaction.response.defer()
-        await open_public_fiche(self._hub.cog, self._hub.guild, interaction, hit)
-
-
 class JournalTypeSelect(discord.ui.Select):
     def __init__(self, parent: "ProfileView"):
         options = [
@@ -3255,7 +3234,6 @@ class ProfileView(ReviewsLayout):
             if seen:
                 text += f"\n{seen}"
             body.append(section_with_thumbnail(text, hit.poster_url))
-        rows.append(discord.ui.ActionRow(JournalOpenSelect(self, page_items)))
         nav = self._page_nav("journal_page", max_page)
         if nav:
             rows.append(nav)
