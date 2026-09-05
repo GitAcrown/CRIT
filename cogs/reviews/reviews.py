@@ -3831,7 +3831,7 @@ class Reviews(commands.Cog):
         except Exception:
             pass
         self._http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
+            timeout=aiohttp.ClientTimeout(total=8, sock_connect=3, sock_read=6),
             headers={"User-Agent": "CRIT-BOT/1.0 (Discord reviews)"},
         )
         self.catalog = MediaCatalog(
@@ -4915,7 +4915,10 @@ class Reviews(commands.Cog):
         if media_type not in TYPE_META and media_type != "all":
             media_type = "all"
         try:
-            hits = await asyncio.wait_for(self.catalog.search(current, media_type), timeout=2.5)
+            hits = await asyncio.wait_for(
+                self.catalog.search(current, media_type, quick=True),
+                timeout=2.0,
+            )
         except Exception:
             return []
         choices: list[app_commands.Choice[str]] = []

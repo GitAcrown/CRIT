@@ -378,7 +378,12 @@ class TMDBClient:
             endpoint = f"{TMDB_BASE}/search/multi"
 
         try:
-            payload = await _json(self.session, endpoint, params=params, timeout=aiohttp.ClientTimeout(total=8))
+            payload = await _json(
+                self.session,
+                endpoint,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=4, sock_connect=2),
+            )
         except aiohttp.ClientResponseError as exc:
             logger.warning("Recherche TMDB échouée : HTTP %s (%s) %s", exc.status, endpoint, exc.message)
             return []
@@ -412,9 +417,7 @@ class TMDBClient:
             return (int(exact and year_match), int(exact or year_match), float(item.get("popularity") or 0))
 
         results.sort(key=rank, reverse=True)
-        hits = [self._from_search(item) for item in results[:limit]]
-        await self._attach_people(hits)
-        return hits
+        return [self._from_search(item) for item in results[:limit]]
 
     async def lookup(self, tmdb_id: str, media_type: str | None = None) -> list[MediaHit]:
         if not self.available:
@@ -467,46 +470,7 @@ class TMDBClient:
         for kind, key in (("movie", "movie_results"), ("tv", "tv_results")):
             for item in payload.get(key) or []:
                 hits.append(self._from_search({**item, "media_type": kind}))
-        await self._attach_people(hits)
         return hits
-
-    async def _attach_people(self, hits: list[MediaHit]) -> None:
-        """Remplit le sous-titre (réalisateur / créateur) pour les Selects."""
-
-        async def one(hit: MediaHit) -> None:
-            if not hit.source_id:
-                return
-            try:
-                if hit.media_type == "movie":
-                    payload = await _json(
-                        self.session,
-                        f"{TMDB_BASE}/movie/{hit.source_id}/credits",
-                        params={"api_key": self.api_key, "language": "fr-FR"},
-                        timeout=aiohttp.ClientTimeout(total=6),
-                    )
-                    directors = [
-                        c.get("name") for c in payload.get("crew") or []
-                        if c.get("job") == "Director" and c.get("name")
-                    ]
-                    if directors:
-                        hit.subtitle = directors[0]
-                        hit.extra["director"] = directors[0]
-                elif hit.media_type == "tv":
-                    payload = await _json(
-                        self.session,
-                        f"{TMDB_BASE}/tv/{hit.source_id}",
-                        params={"api_key": self.api_key, "language": "fr-FR"},
-                        timeout=aiohttp.ClientTimeout(total=6),
-                    )
-                    created = [c.get("name") for c in payload.get("created_by") or [] if c.get("name")]
-                    if created:
-                        hit.subtitle = created[0]
-                        hit.extra["created_by"] = created
-            except Exception:
-                return
-
-        if hits:
-            await asyncio.gather(*(one(hit) for hit in hits))
 
     async def enrich(self, hit: MediaHit) -> MediaHit:
         if not self.available:
@@ -590,7 +554,7 @@ class SteamClient:
                 self.session,
                 STEAM_SEARCH,
                 params={"term": query, "cc": "fr", "l": "french", "num": max(limit, 5)},
-                timeout=aiohttp.ClientTimeout(total=8),
+                timeout=aiohttp.ClientTimeout(total=4, sock_connect=2),
             )
         except Exception as exc:
             logger.warning("Recherche Steam échouée : %s", exc)
@@ -746,7 +710,7 @@ class SpotifyClient:
                 SPOTIFY_SEARCH_URL,
                 headers={"Authorization": f"Bearer {token}"},
                 params={"q": query, "type": spotify_type, "market": "FR", "limit": max(limit, 8)},
-                timeout=aiohttp.ClientTimeout(total=8),
+                timeout=aiohttp.ClientTimeout(total=4, sock_connect=2),
             )
         except aiohttp.ClientResponseError as exc:
             if exc.status == 401:
@@ -855,7 +819,7 @@ class OpenLibraryClient:
                 self.session,
                 OPENLIB_SEARCH,
                 params={"q": query, "limit": limit, "fields": "key,title,author_name,first_publish_year,cover_i,subject"},
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=6, sock_connect=2),
             )
         except Exception as exc:
             logger.warning("Recherche Open Library échouée : %s", exc)
@@ -949,7 +913,7 @@ class MediaCatalog:
             "Livres": True,
         }
 
-    async def search(self, query: str, media_type: str) -> list[MediaHit]:
+    async def search(self, query: str, media_type: str, *, quick: bool = False) -> list[MediaHit]:
         spec = parse_search_query(query)
         effective = spec.media_type or (None if media_type == "all" else media_type)
         if spec.lookup_id:
@@ -962,42 +926,48 @@ class MediaCatalog:
         wide = effective is None
         per = 4 if wide else 8
         clean, _year = parse_query_year(text)
-        tasks: list[Any] = []
+        # Autocomplete / tous types : Steam et Open Library sont trop lents
+        # (OL ~4 s) et bloquaient TMDB + Spotify déjà prêts.
+        skip_slow = quick and wide
+        tasks: list[tuple[str, Any, float]] = []
         # Film + série en parallèle : /search/multi ignore trop souvent les films
         # et, en cas d'échec silencieux, Spotify se retrouvait en tête.
         want_tmdb = source in (None, "tmdb") and (effective in (None, "movie", "tv"))
+        tmdb_budget = 2.5 if quick else 4.0
         if want_tmdb:
             if effective in ("movie", "tv"):
-                tasks.append(self.tmdb.search(text, effective, 8))
+                tasks.append(("tmdb", self.tmdb.search(text, effective, 8), tmdb_budget))
             else:
-                tasks.append(self.tmdb.search(text, "movie", 8))
-                tasks.append(self.tmdb.search(text, "tv", 6))
-        if source in (None, "steam") and effective in (None, "game"):
-            tasks.append(self.steam.search(clean, per))
+                tasks.append(("tmdb-movie", self.tmdb.search(text, "movie", 8), tmdb_budget))
+                tasks.append(("tmdb-tv", self.tmdb.search(text, "tv", 6), tmdb_budget))
+        if source in (None, "steam") and effective in (None, "game") and not skip_slow:
+            steam_budget = 4.0 if effective == "game" else 2.5
+            tasks.append(("steam", self.steam.search(clean, per), steam_budget))
         if source in (None, "spotify") and effective in (None, "album"):
-            tasks.append(self.spotify.search(clean, "album", per))
+            tasks.append(("spotify-album", self.spotify.search(clean, "album", per), 2.5 if quick else 3.5))
         if source in (None, "spotify") and effective in (None, "track"):
-            tasks.append(self.spotify.search(clean, "track", 3 if wide else 8))
-        if source in (None, "openlibrary") and effective in (None, "book"):
-            tasks.append(self.books.search(clean, per))
+            tasks.append(("spotify-track", self.spotify.search(clean, "track", 3 if wide else 8), 2.5 if quick else 3.5))
+        if source == "openlibrary" or effective == "book":
+            tasks.append(("books", self.books.search(clean, per), 6.0))
 
-        async def one_source(coro: Any) -> list[MediaHit]:
+        async def one_source(name: str, coro: Any, budget: float) -> list[MediaHit]:
             try:
-                hits = await coro
+                hits = await asyncio.wait_for(coro, timeout=budget)
+            except asyncio.TimeoutError:
+                logger.warning("Fournisseur %s trop lent (>%.1fs), ignoré", name, budget)
+                return []
             except asyncio.CancelledError:
-                # BaseException, pas Exception : le renvoyer dans gather
-                # faisait `for hit in result` planter /note.
-                logger.warning("Fournisseur média annulé")
+                logger.warning("Fournisseur %s annulé", name)
                 return []
             except Exception as exc:
-                logger.warning("Fournisseur média en échec : %s", exc)
+                logger.warning("Fournisseur %s en échec : %s", name, exc)
                 return []
             if not isinstance(hits, list):
-                logger.warning("Fournisseur média : résultat inattendu %r", type(hits).__name__)
+                logger.warning("Fournisseur %s : résultat inattendu %r", name, type(hits).__name__)
                 return []
             return hits
 
-        gathered = await asyncio.gather(*(one_source(coro) for coro in tasks)) if tasks else []
+        gathered = await asyncio.gather(*(one_source(name, coro, budget) for name, coro, budget in tasks)) if tasks else []
         current = asyncio.current_task()
         if current is not None and getattr(current, "cancelling", lambda: 0)():
             raise asyncio.CancelledError
