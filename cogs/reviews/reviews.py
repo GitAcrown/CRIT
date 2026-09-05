@@ -69,6 +69,21 @@ NO_PINGS = discord.AllowedMentions.none()
 
 
 MENU_TIMEOUT = 840.0
+EM_DASH = "\u2014"
+
+
+def format_tab_label(label: str, *, index: int, total: int) -> str:
+    """Onglets : emdash pour les distinguer des boutons d'action."""
+    if total <= 1 or index == 0:
+        return f"{label} {EM_DASH}"
+    if index == total - 1:
+        return f"{EM_DASH} {label}"
+    return f"{EM_DASH} {label} {EM_DASH}"
+
+
+def labeled_tabs(*labels: str) -> tuple[str, ...]:
+    total = len(labels)
+    return tuple(format_tab_label(label, index=i, total=total) for i, label in enumerate(labels))
 
 
 def _disable_interactive(item: discord.ui.Item) -> None:
@@ -2050,9 +2065,10 @@ class MediaSessionView(ReviewsLayout):
                         text += f"\n{seen}"
                     body.append(section_with_thumbnail(text, avatar))
 
+        fiche_tab, critiques_tab = labeled_tabs("Fiche", f"Critiques ({self.count})")
         rows.append(discord.ui.ActionRow(
-            TabButton(self, "fiche", "Fiche"),
-            TabButton(self, "critiques", f"Critiques ({self.count})"),
+            TabButton(self, "fiche", fiche_tab),
+            TabButton(self, "critiques", critiques_tab),
         ))
         if not self.published_wid:
             rate_label = "Noter"
@@ -3234,11 +3250,17 @@ class ProfileView(ReviewsLayout):
         return "\n".join(lines)
 
     def _tabs_row(self) -> discord.ui.ActionRow:
+        profil, journal, avoir, affinites = labeled_tabs(
+            "Profil",
+            f"Journal ({self.review_count})",
+            f"À voir ({len(self.watchlist_entries)})",
+            "Affinités",
+        )
         return discord.ui.ActionRow(
-            HubTabButton(self, "profil", "Profil"),
-            HubTabButton(self, "journal", f"Journal ({self.review_count})"),
-            HubTabButton(self, "avoire", f"À voir ({len(self.watchlist_entries)})"),
-            HubTabButton(self, "affinites", "Affinités"),
+            HubTabButton(self, "profil", profil),
+            HubTabButton(self, "journal", journal),
+            HubTabButton(self, "avoire", avoir),
+            HubTabButton(self, "affinites", affinites),
         )
 
     def _filtered_journal(self) -> list[tuple[MediaHit, Any]]:
@@ -3507,10 +3529,15 @@ class ServerHubView(ReviewsLayout):
         self._build()
 
     def _tabs_row(self) -> discord.ui.ActionRow:
+        recentes, catalogue, top = labeled_tabs(
+            "Récentes",
+            f"Catalogue ({len(self.catalog)})",
+            "Top",
+        )
         return discord.ui.ActionRow(
-            HubTabButton(self, "recentes", "Récentes"),
-            HubTabButton(self, "catalogue", f"Catalogue ({len(self.catalog)})"),
-            HubTabButton(self, "top", "Top"),
+            HubTabButton(self, "recentes", recentes),
+            HubTabButton(self, "catalogue", catalogue),
+            HubTabButton(self, "top", top),
         )
 
     def _page_nav(self, attr: str, max_page: int) -> discord.ui.ActionRow | None:
