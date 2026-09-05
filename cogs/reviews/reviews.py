@@ -91,6 +91,35 @@ def bind_view_message(
         view._message = message
 
 
+async def publish_layout_message(
+    interaction: discord.Interaction,
+    view: discord.ui.LayoutView,
+) -> discord.Message | None:
+    """Publie un layout dans le salon, hors webhook d'interaction."""
+    channel = interaction.channel
+    if channel is None:
+        return None
+    try:
+        return await channel.send(view=view, allowed_mentions=NO_PINGS)
+    except (AttributeError, discord.HTTPException) as exc:
+        logger.warning("Impossible de publier dans le salon : %s", exc)
+        return None
+
+
+async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
+    """Supprime le menu éphémère qui a déclenché le partage."""
+    try:
+        if interaction.message is not None:
+            await interaction.message.delete()
+            return
+    except discord.HTTPException:
+        pass
+    try:
+        await interaction.delete_original_response()
+    except discord.HTTPException:
+        pass
+
+
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
     """Met à jour le message qui porte les boutons, pas un autre webhook."""
     kwargs = {"view": view, "allowed_mentions": NO_PINGS}
@@ -939,8 +968,8 @@ async def send_published_fiche(
     hit: MediaHit,
     interaction: discord.Interaction,
     *,
-    followup: bool = True,
-) -> None:
+    close_ephemeral: bool = False,
+) -> discord.Message | None:
     if cog.catalog is not None:
         try:
             hit = await cog.catalog.enrich(hit)
@@ -959,12 +988,20 @@ async def send_published_fiche(
         "social": social,
     })
     view = render_published_fiche(hit, avg=avg, count=count, social=social, wid=wid, live=True)
-    if followup:
-        message = await interaction.followup.send(view=view, allowed_mentions=NO_PINGS)
-    else:
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
-        message = await interaction.original_response()
+    message = await publish_layout_message(interaction, view)
+    if message is None:
+        try:
+            await interaction.followup.send(
+                "**Erreur ·** Impossible de publier dans ce salon.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            pass
+        return None
     bind_record(wid, message.channel.id, message.id)
+    if close_ephemeral:
+        await discard_ephemeral_menu(interaction)
+    return message
 
 
 async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, hit: MediaHit) -> None:
@@ -1094,7 +1131,7 @@ async def open_public_fiche(
     interaction: discord.Interaction,
     hit: MediaHit,
 ) -> None:
-    await send_published_fiche(cog, guild, hit, interaction, followup=True)
+    await send_published_fiche(cog, guild, hit, interaction)
 
 
 async def open_session_followup(
@@ -1747,13 +1784,15 @@ class FicheShareButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        await send_published_fiche(
+        message = await send_published_fiche(
             self._hub.cog,
             self._hub.guild,
             self._hub.hit,
             interaction,
-            followup=True,
+            close_ephemeral=True,
         )
+        if message is not None:
+            self._hub.stop()
 
 
 class ProfileShareButton(discord.ui.Button):
@@ -1770,11 +1809,12 @@ class ProfileShareButton(discord.ui.Button):
         view = discord.ui.LayoutView(timeout=None)
         if body:
             view.add_item(discord.ui.Container(*body))
-        try:
-            await interaction.followup.send(view=view, allowed_mentions=NO_PINGS)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de partager le profil : %s", exc)
+        message = await publish_layout_message(interaction, view)
+        if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier ce profil.", ephemeral=True)
+            return
+        self._hub.stop()
+        await discard_ephemeral_menu(interaction)
 
 
 class HubTabButton(discord.ui.Button):
@@ -2030,11 +2070,18 @@ class MediaSessionView(ReviewsLayout):
         self._interaction = interaction
         await self.prepare()
         if deferred:
-            await interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
-        else:
-            await interaction.response.send_message(
-                view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
+            message = await interaction.followup.send(
+                view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS,
             )
+            bind_view_message(self, message)
+            try:
+                await interaction.delete_original_response()
+            except discord.HTTPException:
+                pass
+            return
+        await interaction.response.send_message(
+            view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
+        )
         await self.attach(interaction)
 
 
@@ -2781,11 +2828,12 @@ class SharedListShareButton(discord.ui.Button):
         view = discord.ui.LayoutView(timeout=None)
         if body:
             view.add_item(discord.ui.Container(*body))
-        try:
-            await interaction.followup.send(view=view, allowed_mentions=NO_PINGS)
-        except discord.HTTPException as exc:
-            logger.warning("Impossible de partager la liste : %s", exc)
+        message = await publish_layout_message(interaction, view)
+        if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier cette liste.", ephemeral=True)
+            return
+        self._hub.stop()
+        await discard_ephemeral_menu(interaction)
 
 
 class SharedListDeleteButton(discord.ui.Button):
