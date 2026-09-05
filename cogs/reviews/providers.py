@@ -981,13 +981,29 @@ class MediaCatalog:
         if source in (None, "openlibrary") and effective in (None, "book"):
             tasks.append(self.books.search(clean, per))
 
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        async def one_source(coro: Any) -> list[MediaHit]:
+            try:
+                hits = await coro
+            except asyncio.CancelledError:
+                # BaseException, pas Exception : le renvoyer dans gather
+                # faisait `for hit in result` planter /note.
+                logger.warning("Fournisseur média annulé")
+                return []
+            except Exception as exc:
+                logger.warning("Fournisseur média en échec : %s", exc)
+                return []
+            if not isinstance(hits, list):
+                logger.warning("Fournisseur média : résultat inattendu %r", type(hits).__name__)
+                return []
+            return hits
+
+        gathered = await asyncio.gather(*(one_source(coro) for coro in tasks)) if tasks else []
+        current = asyncio.current_task()
+        if current is not None and getattr(current, "cancelling", lambda: 0)():
+            raise asyncio.CancelledError
         merged: list[MediaHit] = []
         seen: set[tuple[str, str, str]] = set()
         for result in gathered:
-            if isinstance(result, Exception):
-                logger.warning("Fournisseur média en échec : %s", result)
-                continue
             for hit in result:
                 if not hit.source_id or hit.identity in seen:
                     continue

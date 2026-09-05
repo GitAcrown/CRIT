@@ -4774,7 +4774,16 @@ class Reviews(commands.Cog):
                 content="**Erreur ·** Clés Spotify manquantes (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` dans `.env`)."
             )
             return None
-        hits = await self.catalog.search(query.strip(), media_type)
+        try:
+            hits = await self.catalog.search(query.strip(), media_type)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Recherche /note échouée : %s", exc)
+            await interaction.edit_original_response(
+                content="**Erreur ·** La recherche a échoué. Réessaie dans un instant."
+            )
+            return None
         if not hits:
             await interaction.edit_original_response(
                 content=f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} »."
