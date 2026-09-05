@@ -69,16 +69,16 @@ NO_PINGS = discord.AllowedMentions.none()
 
 
 MENU_TIMEOUT = 840.0
-EM_DASH = "\u2014"
+MIDDOT = "\u00b7"
 
 
 def format_tab_label(label: str, *, index: int, total: int) -> str:
-    """Onglets : emdash pour les distinguer des boutons d'action."""
+    """Onglets : point médian pour les distinguer des boutons d'action."""
     if total <= 1 or index == 0:
-        return f"{label} {EM_DASH}"
+        return f"{label} {MIDDOT}"
     if index == total - 1:
-        return f"{EM_DASH} {label}"
-    return f"{EM_DASH} {label} {EM_DASH}"
+        return f"{MIDDOT} {label}"
+    return f"{MIDDOT} {label} {MIDDOT}"
 
 
 def labeled_tabs(*labels: str) -> tuple[str, ...]:
