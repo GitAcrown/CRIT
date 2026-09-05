@@ -119,6 +119,7 @@ MAX_LIST_ITEMS = 100
 LIST_TITLE_MAX = 80
 LIST_DESC_MAX = 200
 LIST_EDIT_MODES = ("owner", "members", "public")
+TEXT_DISPLAY_MAX = 4000
 
 TYPE_META: dict[str, tuple[str, str]] = {
     "movie": (MOVIE, "Film"),
@@ -467,6 +468,23 @@ def section_with_thumbnail(text: str, url: str | None) -> discord.ui.Item:
         return discord.ui.Section(body, accessory=discord.ui.Thumbnail(url))
     except Exception:
         return body
+
+
+def chunk_text_displays(lines: list[str], *, limit: int = TEXT_DISPLAY_MAX) -> list[discord.ui.TextDisplay]:
+    """Regroupe des lignes en TextDisplay sans dépasser la limite Discord."""
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        piece = line if len(line) <= limit else pretty.shorten_text(line, limit)
+        addition = f"{current}\n{piece}" if current else piece
+        if current and len(addition) > limit:
+            chunks.append(current)
+            current = piece
+        else:
+            current = addition
+    if current:
+        chunks.append(current)
+    return [discord.ui.TextDisplay(chunk) for chunk in chunks]
 
 
 def hit_from_row(row: Any) -> MediaHit:
@@ -2496,6 +2514,28 @@ class SharedListEditButton(discord.ui.Button):
         await interaction.response.send_modal(EditSharedListModal(self._hub))
 
 
+class SharedListShareButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(
+            label="Partager",
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(SHARE),
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        body = self._hub._share_layout()
+        view = discord.ui.LayoutView(timeout=None)
+        if body:
+            view.add_item(discord.ui.Container(*body))
+        try:
+            await interaction.followup.send(view=view, allowed_mentions=NO_PINGS)
+        except discord.HTTPException as exc:
+            logger.warning("Impossible de partager la liste : %s", exc)
+            await interaction.followup.send("**Erreur ·** Impossible de publier cette liste.", ephemeral=True)
+
+
 class SharedListDeleteButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
         super().__init__(label="Supprimer", style=discord.ButtonStyle.red)
@@ -2719,6 +2759,19 @@ class SharedListView(ReviewsLayout):
             lines.append("-# Aucun membre choisi pour l'instant.")
         return "\n".join(lines)
 
+    def _share_item_line(self, index: int, hit: MediaHit) -> str:
+        year = f" ({hit.year})" if hit.year else ""
+        return f"{index}. {type_emoji(hit.media_type)} **{hit.title}**{year}"
+
+    def _share_layout(self) -> list[discord.ui.Item]:
+        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
+        if not self.items:
+            body.append(discord.ui.TextDisplay("*Cette liste est vide.*"))
+            return body
+        lines = [self._share_item_line(index, hit) for index, (hit, _row) in enumerate(self.items, start=1)]
+        body.extend(chunk_text_displays(lines))
+        return body
+
     def _build(self) -> None:
         body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
@@ -2760,6 +2813,7 @@ class SharedListView(ReviewsLayout):
                 actions.append(SharedListDeleteButton(self))
         rows.append(discord.ui.ActionRow(*actions[:5]))
         self.set_layout(body, *rows)
+        self.add_item(discord.ui.ActionRow(SharedListShareButton(self)))
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         record = await self.cog.get_shared_list(self.guild, self.record["id"])
