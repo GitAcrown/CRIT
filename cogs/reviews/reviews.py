@@ -80,6 +80,20 @@ def _disable_interactive(item: discord.ui.Item) -> None:
             _disable_interactive(child)
 
 
+def _remember_session_view(
+    interaction: discord.Interaction,
+    view: discord.ui.LayoutView,
+    message_id: int | None,
+) -> None:
+    """Après un defer éphémère, l'id webhook peut différer de celui du clic."""
+    if view.is_finished() or not view.is_dispatchable():
+        return
+    store = interaction.client._connection.store_view
+    if message_id is not None:
+        store(view, message_id)
+    store(view, None)
+
+
 def bind_view_message(
     view: discord.ui.LayoutView,
     message: discord.Message | discord.WebhookMessage | None,
@@ -2070,14 +2084,9 @@ class MediaSessionView(ReviewsLayout):
         self._interaction = interaction
         await self.prepare()
         if deferred:
-            message = await interaction.followup.send(
-                view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS,
-            )
+            message = await interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
             bind_view_message(self, message)
-            try:
-                await interaction.delete_original_response()
-            except discord.HTTPException:
-                pass
+            _remember_session_view(interaction, self, getattr(message, "id", None))
             return
         await interaction.response.send_message(
             view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
