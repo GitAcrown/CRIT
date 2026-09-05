@@ -227,13 +227,22 @@ class FicheDynButton(
         wid: str,
         action: str,
         *,
-        label: str = "·",
+        label: str | None = None,
+        emoji: discord.PartialEmoji | str | None = None,
         style: discord.ButtonStyle = discord.ButtonStyle.secondary,
     ) -> None:
+        resolved_emoji = None
+        if emoji:
+            resolved_emoji = (
+                emoji
+                if isinstance(emoji, discord.PartialEmoji)
+                else discord.PartialEmoji.from_str(str(emoji))
+            )
         super().__init__(
             discord.ui.Button(
                 style=style,
-                label=(label or "·")[:80],
+                label=(label[:80] if label else None),
+                emoji=resolved_emoji,
                 custom_id=f"ack:rev:{wid}:{action}",
             )
         )
@@ -251,7 +260,8 @@ class FicheDynButton(
         return cls(
             match["wid"],
             match["act"],
-            label=item.label or "·",
+            label=item.label,
+            emoji=item.emoji,
             style=item.style,
         )
 

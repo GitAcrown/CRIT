@@ -34,6 +34,7 @@ from .dyn import (
 )
 from .emojis import (
     BOOK,
+    MORE,
     EXPLICIT,
     GAME,
     MOVIE,
@@ -879,8 +880,7 @@ def render_published_fiche(
     if live:
         body.append(discord.ui.ActionRow(
             FicheDynButton(wid, "critiques", label=f"Critiques ({count})"),
-            FicheDynButton(wid, "noter", label="Ma note", style=discord.ButtonStyle.green),
-            FicheDynButton(wid, "voir", label='Mes « À voir »'),
+            FicheDynButton(wid, "noter", emoji=MORE, style=discord.ButtonStyle.green),
         ))
     view.add_item(discord.ui.Container(*body))
     return view
@@ -966,6 +966,20 @@ async def send_ephemeral_menu(interaction: discord.Interaction, view: ReviewsLay
     await view.attach(interaction)
 
 
+async def open_personal_hit_menu(
+    interaction: discord.Interaction,
+    cog: "Reviews",
+    guild: discord.Guild,
+    hit: MediaHit,
+    *,
+    published_wid: str | None,
+) -> None:
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    menu = await MyNoteView.create(cog, guild, hit, interaction.user.id, published_wid=published_wid)
+    await send_ephemeral_menu(interaction, menu)
+
+
 async def handle_published_fiche_click(
     interaction: discord.Interaction,
     wid: str,
@@ -994,14 +1008,12 @@ async def handle_published_fiche_click(
         )
         return
     hit = hit_from_dict(raw)
-    if action == "voir":
-        await _public_watchlist_click(cog, guild, interaction, hit)
+    if action in {"noter", "voir"}:
+        await open_personal_hit_menu(interaction, cog, guild, hit, published_wid=wid)
         return
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True, thinking=True)
-    if action == "noter":
-        menu = await MyNoteView.create(cog, guild, hit, interaction.user.id, published_wid=wid)
-    elif action == "critiques":
+    if action == "critiques":
         menu = await PublicCritiquesView.create(cog, guild, hit, interaction.user.id)
     else:
         menu = await PublicFichePeekView.create(cog, guild, hit)
@@ -1038,39 +1050,8 @@ async def handle_announce_click(
     if action != "noter":
         await interaction.response.send_message("**Erreur ·** Action inconnue.", ephemeral=True)
         return
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True, thinking=True)
-    menu = await MyNoteView.create(cog, guild, hit_from_dict(raw), interaction.user.id, published_wid=None)
-    await send_ephemeral_menu(interaction, menu)
-
-
-async def _public_watchlist_click(
-    cog: "Reviews",
-    guild: discord.Guild,
-    interaction: discord.Interaction,
-    hit: MediaHit,
-) -> None:
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True, thinking=True)
-    media_id = await cog.lookup_media_id(guild, hit)
-    if media_id:
-        mine = await cog.get_review(guild, interaction.user.id, media_id)
-        if mine:
-            await interaction.followup.send(
-                "**Déjà noté ·** Cette œuvre n'est plus dans ta liste à voir.",
-                ephemeral=True,
-            )
-            return
-        if await cog.is_on_watchlist(guild, interaction.user.id, media_id):
-            await interaction.followup.send(
-                f"**À voir ·** {hit.title} est déjà dans ta liste.",
-                ephemeral=True,
-            )
-            return
-    await cog.add_watchlist(guild, interaction.user.id, hit)
-    await interaction.followup.send(
-        f"**À voir ·** {hit.title} a été ajouté à ta liste.",
-        ephemeral=True,
+    await open_personal_hit_menu(
+        interaction, cog, guild, hit_from_dict(raw), published_wid=None,
     )
 
 
@@ -1313,6 +1294,7 @@ class MyNoteView(ReviewsLayout):
         my_review: dict | None,
         published_wid: str | None,
         prefs: UserPrefs | None = None,
+        on_watchlist: bool = False,
     ):
         super().__init__()
         self.cog = cog
@@ -1322,6 +1304,7 @@ class MyNoteView(ReviewsLayout):
         self.my_review = my_review
         self.published_wid = published_wid
         self.prefs = prefs or UserPrefs()
+        self.on_watchlist = on_watchlist and not bool(my_review)
         self.from_published_modal = False
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
@@ -1339,10 +1322,22 @@ class MyNoteView(ReviewsLayout):
     ) -> "MyNoteView":
         media_id = await cog.lookup_media_id(guild, hit)
         mine = await cog.get_review(guild, author_id, media_id) if media_id else None
+        on_watchlist = (
+            bool(media_id)
+            and mine is None
+            and await cog.is_on_watchlist(guild, author_id, media_id)
+        )
         await cog.get_comment_max(guild)
         prefs = await cog.get_user_prefs(guild, author_id)
         return cls(
-            cog, guild, hit, author_id=author_id, my_review=mine, published_wid=published_wid, prefs=prefs,
+            cog,
+            guild,
+            hit,
+            author_id=author_id,
+            my_review=mine,
+            published_wid=published_wid,
+            prefs=prefs,
+            on_watchlist=on_watchlist,
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1384,6 +1379,7 @@ class MyNoteView(ReviewsLayout):
         actions: list[discord.ui.Item] = [MyNoteEditButton(self)]
         if mine:
             actions.append(MyNoteDeleteButton(self))
+        actions.append(WatchlistButton(self))
         self.set_layout([section_with_thumbnail(text, hit.poster_url)], discord.ui.ActionRow(*actions))
 
     async def save_review(
@@ -1405,6 +1401,7 @@ class MyNoteView(ReviewsLayout):
         )
         media_id = await self.cog.lookup_media_id(self.guild, self.hit)
         self.my_review = await self.cog.get_review(self.guild, self.author_id, media_id) if media_id else None
+        self.on_watchlist = False
         self._build()
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
@@ -1418,11 +1415,26 @@ class MyNoteView(ReviewsLayout):
     async def delete_review(self, interaction: discord.Interaction) -> None:
         await self.cog.delete_review(self.guild, self.author_id, self.hit)
         self.my_review = None
+        self.on_watchlist = False
         self._build()
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
         await apply_view(interaction, self)
         await interaction.followup.send("**Critique supprimée ·** Ta note a été retirée.", ephemeral=True)
+
+    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+        media_id = await self.cog.lookup_media_id(self.guild, self.hit)
+        if media_id:
+            self.my_review = await self.cog.get_review(self.guild, self.author_id, media_id)
+            self.on_watchlist = (not self.my_review) and await self.cog.is_on_watchlist(
+                self.guild, self.author_id, media_id
+            )
+        else:
+            self.my_review = None
+            self.on_watchlist = False
+        self._build()
+        if interaction is not None:
+            await apply_view(interaction, self)
 
 
 class PublicFichePeekView(ReviewsLayout):
