@@ -142,15 +142,12 @@ async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutVi
         await interaction.response.edit_message(**kwargs)
         message = interaction.message
     else:
-        edited = False
-        if interaction.message is not None:
-            try:
-                message = await interaction.message.edit(**kwargs)
-                edited = True
-            except discord.HTTPException:
-                edited = False
-        if not edited:
+        try:
             message = await interaction.edit_original_response(**kwargs)
+        except discord.HTTPException:
+            if interaction.message is None:
+                raise
+            message = await interaction.message.edit(**kwargs)
     bind_view_message(view, message or interaction.message)
 
 
@@ -172,6 +169,11 @@ class ReviewsLayout(discord.ui.LayoutView):
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
+                    "**Erreur ·** Le bouton a planté. Réessaie après un `&reload reviews`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
                     "**Erreur ·** Le bouton a planté. Réessaie après un `&reload reviews`.",
                     ephemeral=True,
                 )
@@ -200,6 +202,10 @@ class ReviewsLayout(discord.ui.LayoutView):
         try:
             if interaction is not None:
                 await apply_view(interaction, self)
+                mid = getattr(self.message, "id", None) or (
+                    interaction.message.id if interaction.message else None
+                )
+                _remember_session_view(interaction, self, mid)
                 return
             message = self.message or self._message
             if message is not None:
@@ -1672,21 +1678,20 @@ class MediaSelect(discord.ui.Select):
                     default=index == selected,
                 )
             )
-        super().__init__(placeholder="Choisir une œuvre", options=options, min_values=1, max_values=1)
+        super().__init__(
+            placeholder="Choisir une œuvre",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id=f"crit:sess:{id(parent)}:pick",
+        )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self._hub.selected = int(self.values[0])
         self._hub.review_page = 0
         self._hub.tab = "fiche"
-        await self._hub.reload_stats()
-        self._hub._build()
-        await apply_view(interaction, self._hub)
-        if self._hub.selected not in self._hub._enriched:
-            await self._hub.enrich_selected()
-            self._hub._enriched.add(self._hub.selected)
-            self._hub._build()
-            await self._hub.push()
+        await self._hub.show_selected(interaction)
 
 
 class TabButton(discord.ui.Button):
@@ -2076,6 +2081,16 @@ class MediaSessionView(ReviewsLayout):
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+        await self.reload_stats()
+        self._build()
+        await self.push(interaction)
+
+    async def show_selected(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        if self.selected not in self._enriched:
+            await self.enrich_selected()
+            self._enriched.add(self.selected)
         await self.reload_stats()
         self._build()
         await self.push(interaction)
