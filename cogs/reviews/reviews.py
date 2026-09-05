@@ -1613,9 +1613,17 @@ class DeleteReviewButton(discord.ui.Button):
         await interaction.followup.send("**Critique supprimée ·** Ta note a été retirée.", ephemeral=True)
 
 
-class PublishFicheButton(discord.ui.Button):
+def _share_button_kwargs() -> dict[str, Any]:
+    return {
+        "label": "Partager",
+        "style": discord.ButtonStyle.secondary,
+        "emoji": discord.PartialEmoji.from_str(SHARE),
+    }
+
+
+class FicheShareButton(discord.ui.Button):
     def __init__(self, parent: "MediaSessionView"):
-        super().__init__(label="Publier la fiche", style=discord.ButtonStyle.secondary)
+        super().__init__(**_share_button_kwargs())
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1631,11 +1639,7 @@ class PublishFicheButton(discord.ui.Button):
 
 class ProfileShareButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
-        super().__init__(
-            label="Partager",
-            style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(SHARE),
-        )
+        super().__init__(**_share_button_kwargs())
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1883,7 +1887,6 @@ class MediaSessionView(ReviewsLayout):
                 actions.append(DeleteReviewButton(self))
             if self.ephemeral:
                 actions.append(WatchlistButton(self))
-                actions.append(PublishFicheButton(self))
             rows.append(discord.ui.ActionRow(*actions[:5]))
         if self.tab == "critiques" and len(self.reviews) > REVIEWS_PAGE:
             nav_btns: list[discord.ui.Item] = []
@@ -1894,6 +1897,8 @@ class MediaSessionView(ReviewsLayout):
             if nav_btns:
                 rows.append(discord.ui.ActionRow(*nav_btns))
         self.set_layout(body, *rows)
+        if not self.published_wid:
+            self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         await self.reload_stats()
@@ -2667,11 +2672,7 @@ class SharedListEditButton(discord.ui.Button):
 
 class SharedListShareButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        super().__init__(
-            label="Partager",
-            style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(SHARE),
-        )
+        super().__init__(**_share_button_kwargs())
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
