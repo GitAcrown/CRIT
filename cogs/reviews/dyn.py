@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 import discord
 
+from .emojis import MORE
 from .providers import MediaHit
 
 logger = logging.getLogger("CRIT.Reviews.Dyn")
@@ -269,13 +270,13 @@ class AnnounceDynButton(
         wid: str,
         action: str = "noter",
         *,
-        label: str = "Voir ma note",
+        emoji: discord.PartialEmoji | str | None = None,
         style: discord.ButtonStyle = discord.ButtonStyle.secondary,
     ) -> None:
         super().__init__(
             discord.ui.Button(
                 style=style,
-                label=(label or "Voir ma note")[:80],
+                emoji=emoji or discord.PartialEmoji.from_str(MORE),
                 custom_id=f"ack:ann:{wid}:{action}",
             )
         )
@@ -293,7 +294,7 @@ class AnnounceDynButton(
         return cls(
             match["wid"],
             match["act"],
-            label=item.label or "Voir ma note",
+            emoji=item.emoji,
             style=item.style,
         )
 

@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import time
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -451,6 +452,73 @@ def list_edit_label(mode: str) -> str:
         "members": "Membres choisis",
         "public": "Tout le serveur",
     }.get(mode, "Créateur seul")
+
+
+DATE_PREF_VALUES = ("empty", "today")
+
+
+@dataclass(frozen=True)
+class UserPrefs:
+    default_date: str = "empty"
+    default_list_edit: str = "owner"
+    default_spoiler: bool = False
+    default_search_type: str = "all"
+    announce_notes: bool = True
+
+
+def today_experienced() -> str:
+    return date.today().isoformat()
+
+
+def note_experienced_default(prefs: UserPrefs, existing: dict[str, Any]) -> str:
+    if existing:
+        return str(existing.get("experienced_at") or "")
+    return today_experienced() if prefs.default_date == "today" else ""
+
+
+def note_spoiler_default(prefs: UserPrefs, existing: dict[str, Any]) -> bool:
+    if "spoiler" in existing:
+        return bool(existing.get("spoiler"))
+    return bool(prefs.default_spoiler)
+
+
+def date_pref_label(value: str) -> str:
+    return "Aujourd'hui" if value == "today" else "Vide"
+
+
+def search_pref_label(value: str) -> str:
+    return "Tous les types" if value == "all" else type_label(value)
+
+
+def spoiler_pref_label(value: bool) -> str:
+    return "Masqué" if value else "Visible"
+
+
+def announce_pref_label(value: bool) -> str:
+    return "Publier" if value else "Ne pas annoncer"
+
+
+def _row_field(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else value
+
+
+def prefs_from_row(row: Any | None) -> UserPrefs:
+    if row is None:
+        return UserPrefs()
+    date_value = str(_row_field(row, "default_date", "empty") or "empty")
+    edit_value = str(_row_field(row, "default_list_edit", "owner") or "owner")
+    search_value = str(_row_field(row, "default_search_type", "all") or "all")
+    return UserPrefs(
+        default_date=date_value if date_value in DATE_PREF_VALUES else "empty",
+        default_list_edit=edit_value if edit_value in LIST_EDIT_MODES else "owner",
+        default_spoiler=bool(int(_row_field(row, "default_spoiler", 0) or 0)),
+        default_search_type=search_value if search_value in TYPE_META or search_value == "all" else "all",
+        announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
+    )
 
 
 def parse_rating(raw: str) -> float | None:
@@ -1072,14 +1140,17 @@ def build_announce_view(
     seen = experienced_line(hit.media_type, experienced_at)
     if seen:
         film += f"\n{seen}"
-    container.add_item(discord.ui.TextDisplay(profile))
+    if live and wid:
+        container.add_item(
+            discord.ui.Section(discord.ui.TextDisplay(profile), accessory=AnnounceDynButton(wid))
+        )
+    else:
+        container.add_item(discord.ui.TextDisplay(profile))
     container.add_item(discord.ui.Separator())
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
     view.add_item(container)
-    if live and wid:
-        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid)))
     return view
 
 
@@ -1216,14 +1287,15 @@ class MyNoteEditButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         existing = self._hub.my_review or {}
+        prefs = getattr(self._hub, "prefs", None) or UserPrefs()
         await interaction.response.send_modal(
             RateModal(
                 self._hub,
                 max_comment=self._hub.cog.cached_comment_max(self._hub.guild),
                 default_rating=existing.get("rating"),
                 default_comment=existing.get("comment") or "",
-                default_experienced=existing.get("experienced_at") or "",
-                default_spoiler=bool(existing.get("spoiler")),
+                default_experienced=note_experienced_default(prefs, existing),
+                default_spoiler=note_spoiler_default(prefs, existing),
             )
         )
 
@@ -1250,6 +1322,7 @@ class MyNoteView(ReviewsLayout):
         author_id: int,
         my_review: dict | None,
         published_wid: str | None,
+        prefs: UserPrefs | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -1258,6 +1331,7 @@ class MyNoteView(ReviewsLayout):
         self.author_id = author_id
         self.my_review = my_review
         self.published_wid = published_wid
+        self.prefs = prefs or UserPrefs()
         self.from_published_modal = False
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
@@ -1276,7 +1350,10 @@ class MyNoteView(ReviewsLayout):
         media_id = await cog.lookup_media_id(guild, hit)
         mine = await cog.get_review(guild, author_id, media_id) if media_id else None
         await cog.get_comment_max(guild)
-        return cls(cog, guild, hit, author_id=author_id, my_review=mine, published_wid=published_wid)
+        prefs = await cog.get_user_prefs(guild, author_id)
+        return cls(
+            cog, guild, hit, author_id=author_id, my_review=mine, published_wid=published_wid, prefs=prefs,
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -1551,9 +1628,16 @@ class RateButton(discord.ui.Button):
         parent = self._hub
         existing = parent.my_review if interaction.user.id == parent.author_id else None
         pending = parent.pending_rating
+        prefs = parent.prefs or UserPrefs()
         if pending is not None and existing is None and interaction.user.id == parent.author_id:
             await interaction.response.defer()
-            await parent.save_review(interaction, pending, parent.pending_comment)
+            await parent.save_review(
+                interaction,
+                pending,
+                parent.pending_comment,
+                experienced_at=note_experienced_default(prefs, {}),
+                spoiler=prefs.default_spoiler,
+            )
             return
         existing = existing or {}
         await interaction.response.send_modal(
@@ -1562,8 +1646,8 @@ class RateButton(discord.ui.Button):
                 max_comment=parent.cog.cached_comment_max(parent.guild),
                 default_rating=existing.get("rating", parent.pending_rating if interaction.user.id == parent.author_id else None),
                 default_comment=existing.get("comment") or (parent.pending_comment if interaction.user.id == parent.author_id else ""),
-                default_experienced=existing.get("experienced_at") or "",
-                default_spoiler=bool(existing.get("spoiler")),
+                default_experienced=note_experienced_default(prefs, existing),
+                default_spoiler=note_spoiler_default(prefs, existing),
             )
         )
 
@@ -1724,6 +1808,7 @@ class MediaSessionView(ReviewsLayout):
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
         self.from_published_modal = False
+        self.prefs = UserPrefs()
         self._enriched: set[int] = set()
 
     @property
@@ -1742,6 +1827,7 @@ class MediaSessionView(ReviewsLayout):
 
     async def prepare(self) -> None:
         await self.cog.get_comment_max(self.guild)
+        self.prefs = await self.cog.get_user_prefs(self.guild, self.author_id)
         await self.enrich_selected()
         self._enriched.add(self.selected)
         await self.reload_stats()
@@ -3458,6 +3544,203 @@ class ServerHubView(ReviewsLayout):
 
 
 # ---------------------------------------------------------------------------
+# Préférences
+# ---------------------------------------------------------------------------
+
+class PrefFieldSelect(discord.ui.Select):
+    def __init__(
+        self,
+        parent: "PreferencesView",
+        *,
+        field: str,
+        placeholder: str,
+        options: list[discord.SelectOption],
+    ):
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+        self._hub = parent
+        self._field = field
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        raw = self.values[0]
+        value: str | bool = raw == "1" if self._field in {"default_spoiler", "announce_notes"} else raw
+        self._hub.prefs = await self._hub.cog.set_user_prefs(
+            self._hub.guild,
+            self._hub.user_id,
+            **{self._field: value},
+        )
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class PreferencesView(ReviewsLayout):
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        user: discord.abc.User,
+        prefs: UserPrefs,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.user = user
+        self.user_id = user.id
+        self.prefs = prefs
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ces préférences ne s'affichent que pour toi.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    def _summary(self) -> str:
+        prefs = self.prefs
+        return (
+            f"**Date vu / joué / lu** · {date_pref_label(prefs.default_date)}\n"
+            f"**Nouvelles listes** · {list_edit_label(prefs.default_list_edit)}\n"
+            f"**Spoiler** · {spoiler_pref_label(prefs.default_spoiler)}\n"
+            f"**Recherche** · {search_pref_label(prefs.default_search_type)}\n"
+            f"**Annonces** · {announce_pref_label(prefs.announce_notes)}"
+        )
+
+    def _build(self) -> None:
+        prefs = self.prefs
+        header = (
+            f"## Préférences\n"
+            f"-# Tes défauts sur **{self.guild.name}** — notes, recherches et nouvelles listes."
+        )
+        self.set_layout(
+            [
+                section_with_thumbnail(header, self.user.display_avatar.url),
+                sep_wide(),
+                discord.ui.TextDisplay(self._summary()),
+            ],
+            discord.ui.ActionRow(
+                PrefFieldSelect(
+                    self,
+                    field="default_date",
+                    placeholder="Date vu / joué / lu",
+                    options=[
+                        discord.SelectOption(
+                            label="Aujourd'hui",
+                            value="today",
+                            description="Préremplit le formulaire Noter avec la date du jour",
+                            default=prefs.default_date == "today",
+                        ),
+                        discord.SelectOption(
+                            label="Vide",
+                            value="empty",
+                            description="Laisse le champ date vide",
+                            default=prefs.default_date == "empty",
+                        ),
+                    ],
+                )
+            ),
+            discord.ui.ActionRow(
+                PrefFieldSelect(
+                    self,
+                    field="default_list_edit",
+                    placeholder="Édition des nouvelles listes",
+                    options=[
+                        discord.SelectOption(
+                            label="Créateur seul",
+                            value="owner",
+                            description="Toi seul peux modifier une liste que tu crées",
+                            default=prefs.default_list_edit == "owner",
+                        ),
+                        discord.SelectOption(
+                            label="Membres choisis",
+                            value="members",
+                            description="Tu pourras ajouter des éditeurs ensuite",
+                            default=prefs.default_list_edit == "members",
+                        ),
+                        discord.SelectOption(
+                            label="Tout le serveur",
+                            value="public",
+                            description="N'importe qui pourra modifier tes nouvelles listes",
+                            default=prefs.default_list_edit == "public",
+                        ),
+                    ],
+                )
+            ),
+            discord.ui.ActionRow(
+                PrefFieldSelect(
+                    self,
+                    field="default_spoiler",
+                    placeholder="Spoiler par défaut",
+                    options=[
+                        discord.SelectOption(
+                            label="Visible",
+                            value="0",
+                            description="Case spoiler décochée pour une nouvelle note",
+                            default=not prefs.default_spoiler,
+                        ),
+                        discord.SelectOption(
+                            label="Masqué",
+                            value="1",
+                            description="Case spoiler cochée pour une nouvelle note",
+                            default=prefs.default_spoiler,
+                        ),
+                    ],
+                )
+            ),
+            discord.ui.ActionRow(
+                PrefFieldSelect(
+                    self,
+                    field="default_search_type",
+                    placeholder="Type de recherche",
+                    options=[
+                        discord.SelectOption(
+                            label=choice.name,
+                            value=choice.value,
+                            emoji=select_emoji(choice.value) if choice.value != "all" else None,
+                            description=(
+                                "Si tu ne précises pas de type dans /search"
+                                if choice.value == "all"
+                                else pretty.shorten_text(f"Restreint /search à « {choice.name} »", 100)
+                            ),
+                            default=prefs.default_search_type == choice.value,
+                        )
+                        for choice in TYPE_CHOICES
+                    ],
+                )
+            ),
+            discord.ui.ActionRow(
+                PrefFieldSelect(
+                    self,
+                    field="announce_notes",
+                    placeholder="Annonces de tes notes",
+                    options=[
+                        discord.SelectOption(
+                            label="Publier",
+                            value="1",
+                            description="Tes notes apparaissent dans le salon d'annonces",
+                            default=prefs.announce_notes,
+                        ),
+                        discord.SelectOption(
+                            label="Ne pas annoncer",
+                            value="0",
+                            description="Tes notes restent dans ton carnet seulement",
+                            default=not prefs.announce_notes,
+                        ),
+                    ],
+                )
+            ),
+        )
+
+    async def start(self, interaction: discord.Interaction) -> None:
+        self._interaction = interaction
+        await interaction.response.send_message(view=self, ephemeral=True)
+        await self.attach(interaction)
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -3742,6 +4025,7 @@ class HelpView(ReviewsLayout):
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (ta liste à voir, celle d'un membre, ou une liste commune)\n"
+            "`/preferences` — tes défauts : date, listes, spoiler, recherche, annonces\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -3753,7 +4037,8 @@ class HelpView(ReviewsLayout):
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
             "(lui seul, des membres, ou tout le serveur). "
-            "`/config` peut poster les notes dans un salon différent selon le type.\n"
+            "`/config` peut poster les notes dans un salon différent selon le type. "
+            "Tes défauts (date, listes, spoiler…) se règlent dans `/preferences`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -3783,6 +4068,7 @@ class Reviews(commands.Cog):
         self.catalog: MediaCatalog | None = None  # type: ignore[assignment]
         self._schema_ready: set[int] = set()
         self._comment_max: dict[int, int] = {}
+        self._prefs: dict[tuple[int, int], UserPrefs] = {}
 
         settings = dataio.DictTableBuilder(
             "settings",
@@ -3878,6 +4164,16 @@ class Reviews(commands.Cog):
                 PRIMARY KEY (list_id, media_id)
             )"""
         )
+        preferences_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS preferences (
+                user_id INTEGER PRIMARY KEY,
+                default_date TEXT NOT NULL DEFAULT 'empty',
+                default_list_edit TEXT NOT NULL DEFAULT 'owner',
+                default_spoiler INTEGER NOT NULL DEFAULT 0,
+                default_search_type TEXT NOT NULL DEFAULT 'all',
+                announce_notes INTEGER NOT NULL DEFAULT 1
+            )"""
+        )
         self.data.link(
             discord.Guild,
             settings,
@@ -3889,6 +4185,7 @@ class Reviews(commands.Cog):
             shared_lists_table,
             shared_list_editors_table,
             shared_list_items_table,
+            preferences_table,
         )
 
     async def cog_load(self) -> None:
@@ -4026,6 +4323,67 @@ class Reviews(commands.Cog):
         self._comment_max[guild.id] = value
         return value
 
+    async def get_user_prefs(self, guild: discord.Guild, user_id: int) -> UserPrefs:
+        key = (guild.id, user_id)
+        cached = self._prefs.get(key)
+        if cached is not None:
+            return cached
+        await self._ensure_schema(guild)
+        row = await self.data.get(guild).fetchone(
+            "SELECT * FROM preferences WHERE user_id=?",
+            user_id,
+        )
+        prefs = prefs_from_row(row)
+        self._prefs[key] = prefs
+        return prefs
+
+    async def set_user_prefs(self, guild: discord.Guild, user_id: int, **updates: Any) -> UserPrefs:
+        current = await self.get_user_prefs(guild, user_id)
+        cleaned: dict[str, Any] = {}
+        if "default_date" in updates:
+            value = updates["default_date"]
+            cleaned["default_date"] = value if value in DATE_PREF_VALUES else current.default_date
+        if "default_list_edit" in updates:
+            value = updates["default_list_edit"]
+            cleaned["default_list_edit"] = value if value in LIST_EDIT_MODES else current.default_list_edit
+        if "default_spoiler" in updates:
+            cleaned["default_spoiler"] = bool(updates["default_spoiler"])
+        if "default_search_type" in updates:
+            value = updates["default_search_type"]
+            cleaned["default_search_type"] = (
+                value if value in TYPE_META or value == "all" else current.default_search_type
+            )
+        if "announce_notes" in updates:
+            cleaned["announce_notes"] = bool(updates["announce_notes"])
+        prefs = replace(current, **cleaned) if cleaned else current
+        await self._ensure_schema(guild)
+        await self.data.get(guild).execute(
+            """INSERT OR REPLACE INTO preferences
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            user_id,
+            prefs.default_date,
+            prefs.default_list_edit,
+            int(prefs.default_spoiler),
+            prefs.default_search_type,
+            int(prefs.announce_notes),
+        )
+        self._prefs[(guild.id, user_id)] = prefs
+        return prefs
+
+    async def _resolve_search_type(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        explicit: str | None,
+    ) -> str:
+        if explicit in TYPE_META or explicit == "all":
+            return explicit
+        prefs = await self.get_user_prefs(guild, user_id)
+        if prefs.default_search_type in TYPE_META or prefs.default_search_type == "all":
+            return prefs.default_search_type
+        return "all"
+
     async def counts(self, guild: discord.Guild) -> tuple[int, int]:
         db = self.data.get(guild)
         reviews = await db.fetchone("SELECT COUNT(*) AS n FROM reviews")
@@ -4119,6 +4477,27 @@ class Reviews(commands.Cog):
                 PRIMARY KEY (list_id, media_id)
             )"""
         )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS preferences (
+                user_id INTEGER PRIMARY KEY,
+                default_date TEXT NOT NULL DEFAULT 'empty',
+                default_list_edit TEXT NOT NULL DEFAULT 'owner',
+                default_spoiler INTEGER NOT NULL DEFAULT 0,
+                default_search_type TEXT NOT NULL DEFAULT 'all',
+                announce_notes INTEGER NOT NULL DEFAULT 1
+            )"""
+        )
+        pref_columns = await db.column_names("preferences")
+        pref_alters = {
+            "default_date": "TEXT NOT NULL DEFAULT 'empty'",
+            "default_list_edit": "TEXT NOT NULL DEFAULT 'owner'",
+            "default_spoiler": "INTEGER NOT NULL DEFAULT 0",
+            "default_search_type": "TEXT NOT NULL DEFAULT 'all'",
+            "announce_notes": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for name, spec in pref_alters.items():
+            if name not in pref_columns:
+                await db.execute(f"ALTER TABLE preferences ADD COLUMN {name} {spec}")
         scaled = await db.get_dict_value("settings", "RatingsOnTen")
         if scaled != "1":
             row = await db.fetchone("SELECT MAX(rating) AS m FROM reviews")
@@ -4306,14 +4685,17 @@ class Reviews(commands.Cog):
         self, guild: discord.Guild, user_id: int, title: str, description: str
     ) -> dict[str, Any]:
         await self._ensure_schema(guild)
+        prefs = await self.get_user_prefs(guild, user_id)
+        edit_mode = prefs.default_list_edit if prefs.default_list_edit in LIST_EDIT_MODES else "owner"
         now = int(time.time())
         db = self.data.get(guild)
         await db.execute(
             """INSERT INTO shared_lists (owner_id, title, description, edit_mode, created_at)
-               VALUES (?, ?, ?, 'owner', ?)""",
+               VALUES (?, ?, ?, ?, ?)""",
             user_id,
             title.strip()[:LIST_TITLE_MAX],
             description.strip()[:LIST_DESC_MAX],
+            edit_mode,
             now,
         )
         row = await db.fetchone("SELECT last_insert_rowid() AS id")
@@ -4864,6 +5246,9 @@ class Reviews(commands.Cog):
         experienced_at: str = "",
         spoiler: bool = False,
     ) -> None:
+        prefs = await self.get_user_prefs(guild, user.id)
+        if not prefs.announce_notes:
+            return
         channel = await self.get_announce_channel(guild, hit.media_type)
         if channel is None:
             return
@@ -4963,7 +5348,7 @@ class Reviews(commands.Cog):
     @app_commands.rename(query="recherche", media_type="type", rating="note", comment="commentaire")
     @app_commands.describe(
         query="Titre, année, ou préfixe (tmdb:Dune, tmdb:27205, URL TMDB)",
-        media_type="Restreindre la recherche à un type de média",
+        media_type="Restreindre la recherche à un type (sinon ton défaut /preferences)",
         rating="Note de 0 à 10 (entier, une étoile = 2 points)",
         comment="Court commentaire optionnel",
     )
@@ -4972,7 +5357,7 @@ class Reviews(commands.Cog):
         self,
         interaction: discord.Interaction,
         query: str,
-        media_type: str = "all",
+        media_type: str | None = None,
         rating: float | None = None,
         comment: str | None = None,
     ) -> None:
@@ -4983,7 +5368,8 @@ class Reviews(commands.Cog):
                 "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
             )
         await interaction.response.defer(ephemeral=True)
-        hits = await self._search_or_reply(interaction, query, media_type)
+        resolved_type = await self._resolve_search_type(guild, interaction.user.id, media_type)
+        hits = await self._search_or_reply(interaction, query, resolved_type)
         if not hits:
             return
         view = MediaSessionView(
@@ -5005,11 +5391,14 @@ class Reviews(commands.Cog):
         if skip_note_autocomplete(current) or self.catalog is None:
             return []
         ns = getattr(interaction, "namespace", None)
-        media_type = "all"
+        explicit = None
         if ns is not None:
-            media_type = getattr(ns, "media_type", None) or getattr(ns, "type", None) or "all"
-        if media_type not in TYPE_META and media_type != "all":
-            media_type = "all"
+            explicit = getattr(ns, "media_type", None) or getattr(ns, "type", None)
+        guild = interaction.guild
+        if isinstance(guild, discord.Guild):
+            media_type = await self._resolve_search_type(guild, interaction.user.id, explicit)
+        else:
+            media_type = explicit if explicit in TYPE_META or explicit == "all" else "all"
         try:
             hits = await asyncio.wait_for(
                 self.catalog.search(current, media_type, quick=True),
@@ -5280,6 +5669,23 @@ class Reviews(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         return await self._shared_list_choices(interaction, current)
+
+    @app_commands.command(name="preferences")
+    @app_commands.guild_only()
+    async def critique_preferences(self, interaction: discord.Interaction) -> None:
+        """Tes défauts : date, listes, spoiler, recherche et annonces."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        view = PreferencesView(
+            self,
+            guild,
+            user=interaction.user,
+            prefs=await self.get_user_prefs(guild, interaction.user.id),
+        )
+        await view.start(interaction)
 
     @app_commands.command(name="config")
     @app_commands.guild_only()
