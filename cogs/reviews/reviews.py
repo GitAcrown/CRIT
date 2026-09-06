@@ -493,7 +493,7 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
 
 
 GRAPH_BAR_WIDTH = 8
-GRAPH_FILL = "█"
+GRAPH_FILL = "━"
 
 
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
@@ -508,15 +508,16 @@ def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
     if not entries:
         return ""
     counts = rating_counts(entries)
-    peak = max(counts) or 1
+    peak = max(counts)
     avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
-    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**", "```"]
+    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**"]
     for score in range(RATING_MAX, -1, -1):
         n = counts[score]
-        filled = 0 if n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
+        if n <= 0 or peak <= 0:
+            continue
+        filled = max(1, round(GRAPH_BAR_WIDTH * n / peak))
         bar = GRAPH_FILL * min(GRAPH_BAR_WIDTH, filled)
-        lines.append(f"{score:>2} {bar} {n}" if bar else f"{score:>2} {n}")
-    lines.append("```")
+        lines.append(f"{score}  {bar}  **{n}**")
     return "\n".join(lines)
 
 
