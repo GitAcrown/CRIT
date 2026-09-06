@@ -472,12 +472,10 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     if not entries:
         return ""
     counts: dict[str, int] = {}
-    total = 0.0
     this_year = 0
     year_now = date.today().year
     for hit, row in entries:
         counts[hit.media_type] = counts.get(hit.media_type, 0) + 1
-        total += float(row["rating"])
         if entry_year(row) == year_now:
             this_year += 1
     parts: list[str] = []
@@ -485,8 +483,6 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
         n = counts.get(key, 0)
         if n:
             parts.append(f"{n} {singular if n == 1 else plural}")
-    avg = total / len(entries)
-    parts.append(f"moy. {avg:.1f}".replace(".", ","))
     if this_year:
         parts.append(f"{this_year} cette année")
     return "-# " + " · ".join(parts)
@@ -510,9 +506,8 @@ def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
         return ""
     counts = rating_counts(entries)
     peak = max(counts)
-    avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
     lines = [
-        f"### Répartition  ·  moyenne **{format_score(avg, average=True)}**",
+        "### Répartition",
     ]
     for score in range(RATING_MAX, -1, -1):
         n = counts[score]
