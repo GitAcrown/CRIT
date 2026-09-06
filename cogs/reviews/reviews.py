@@ -501,20 +501,20 @@ def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
 
 
 def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
-    """Histogramme : uniquement les notes utilisées, barre = le compte."""
+    """Histogramme 0–10 en bloc monospace, chiffres alignés."""
     if not entries:
         return ""
     counts = rating_counts(entries)
-    peak = max(counts)
+    peak = max(counts) or 1
     avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
-    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**"]
+    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**", "```"]
     for score in range(RATING_MAX, -1, -1):
         n = counts[score]
-        if n <= 0 or peak <= 0:
-            continue
-        filled = max(1, round(GRAPH_BAR_WIDTH * n / peak))
-        bar = GRAPH_FILL * min(GRAPH_BAR_WIDTH, filled)
-        lines.append(f"{format_stars_compact(score)}  {bar}  **{n}**")
+        filled = 0 if n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
+        filled = min(GRAPH_BAR_WIDTH, filled)
+        bar = GRAPH_FILL * filled + " " * (GRAPH_BAR_WIDTH - filled)
+        lines.append(f"{score:>2} {bar} {n:>3}")
+    lines.append("```")
     return "\n".join(lines)
 
 
@@ -3215,13 +3215,13 @@ class ProfileView(ReviewsLayout):
     def _profil_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
         avatar = self.member.display_avatar.url if hasattr(self.member, "display_avatar") else None
         body: list[discord.ui.Item] = [section_with_thumbnail(self._profile_header(), avatar)]
-        graph = format_rating_graph(self.journal_entries)
-        if graph:
-            body.append(sep_tight())
-            body.append(discord.ui.TextDisplay(graph))
         for index, (label, hit, rating) in enumerate(self._highlights):
             body.append(sep_wide() if index == 0 else sep_tight())
             body.append(self._highlight_block(label, hit, rating))
+        graph = format_rating_graph(self.journal_entries)
+        if graph:
+            body.append(sep_wide() if self._highlights else sep_tight())
+            body.append(discord.ui.TextDisplay(graph))
         rows: list[discord.ui.ActionRow] = []
         return body, rows
 
