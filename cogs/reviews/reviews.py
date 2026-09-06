@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import random
@@ -61,7 +60,6 @@ from .progress import (
     level_progress,
     title_for_level,
 )
-from .graph import GRAPH_FILENAME, render_rating_graph_png
 from .providers import MediaCatalog, MediaHit, parse_search_query
 from utils import dataio, fuzzy, pretty
 
@@ -158,9 +156,6 @@ async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
     """Met à jour le message qui porte les boutons, pas un autre webhook."""
     kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
-    extra = getattr(view, "message_attachments", None)
-    if callable(extra):
-        kwargs["attachments"] = extra()
     message: discord.Message | discord.WebhookMessage | None = None
     if not interaction.response.is_done():
         await interaction.response.edit_message(**kwargs)
@@ -495,6 +490,34 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     if this_year:
         parts.append(f"{this_year} cette année")
     return "-# " + " · ".join(parts)
+
+
+GRAPH_BAR_WIDTH = 8
+GRAPH_FILL = "█"
+
+
+def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
+    counts = [0] * (RATING_MAX + 1)
+    for _hit, row in entries:
+        points = int(round(max(0.0, min(float(RATING_MAX), float(row["rating"])))))
+        counts[points] += 1
+    return counts
+
+
+def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
+    if not entries:
+        return ""
+    counts = rating_counts(entries)
+    peak = max(counts) or 1
+    avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
+    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**", "```"]
+    for score in range(RATING_MAX, -1, -1):
+        n = counts[score]
+        filled = 0 if n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
+        bar = GRAPH_FILL * min(GRAPH_BAR_WIDTH, filled)
+        lines.append(f"{score:>2} {bar} {n}" if bar else f"{score:>2} {n}")
+    lines.append("```")
+    return "\n".join(lines)
 
 
 def pick_rating_highlights(
@@ -1876,8 +1899,7 @@ class ProfileShareButton(discord.ui.Button):
         view = discord.ui.LayoutView(timeout=None)
         if body:
             view.add_item(discord.ui.Container(*body))
-        files = self._hub.message_attachments()
-        message = await publish_layout_message(interaction, view, files=files or None)
+        message = await publish_layout_message(interaction, view)
         if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier ce profil.", ephemeral=True)
             return
@@ -3093,7 +3115,6 @@ class ProfileView(ReviewsLayout):
         self.journal_entries = journal_entries
         self.watchlist_entries = watchlist_entries
         self._highlights = pick_rating_highlights(journal_entries)
-        self._graph_bytes = render_rating_graph_png(journal_entries, average)
         self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
         self.viewer_id = viewer_id
         self.editable = viewer_id == member.id
@@ -3102,15 +3123,8 @@ class ProfileView(ReviewsLayout):
         self.watchlist_page = 0
         self.journal_type = "all"
         self.journal_sort = "recent"
-        self._graph_file: discord.File | None = None
         self._interaction: discord.Interaction | None = None
         self._build()
-
-    def message_attachments(self) -> list[discord.File]:
-        if self._graph_file is None:
-            return []
-        self._graph_file.fp.seek(0)
-        return [self._graph_file]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.viewer_id:
@@ -3206,17 +3220,10 @@ class ProfileView(ReviewsLayout):
         for index, (label, hit, rating) in enumerate(self._highlights):
             body.append(sep_wide() if index == 0 else sep_tight())
             body.append(self._highlight_block(label, hit, rating))
-        if self._graph_bytes:
-            self._graph_file = discord.File(io.BytesIO(self._graph_bytes), filename=GRAPH_FILENAME)
-            avg = self.average if self.average is not None else 0.0
-            notes = f"{self.review_count} note{'s' if self.review_count != 1 else ''}"
+        graph = format_rating_graph(self.journal_entries)
+        if graph:
             body.append(sep_wide() if self._highlights else sep_tight())
-            body.append(section_with_thumbnail(
-                f"**Répartition**\n"
-                f"moyenne **{format_score(avg, average=True)}**\n"
-                f"-# {notes} · 0 à 10",
-                f"attachment://{GRAPH_FILENAME}",
-            ))
+            body.append(discord.ui.TextDisplay(graph))
         rows: list[discord.ui.ActionRow] = []
         return body, rows
 
@@ -3323,7 +3330,6 @@ class ProfileView(ReviewsLayout):
         return body, rows
 
     def _build(self) -> None:
-        self._graph_file = None
         if self.tab == "journal":
             body, rows = self._journal_layout()
         elif self.tab == "avoire":
