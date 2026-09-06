@@ -488,8 +488,8 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-GRAPH_BAR_WIDTH = 12
-GRAPH_FILL = "#"
+GRAPH_BAR_WIDTH = 10
+GRAPH_FILL = "█"
 
 
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
@@ -513,7 +513,7 @@ def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
         filled = 0 if n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
         filled = min(GRAPH_BAR_WIDTH, filled)
         bar = GRAPH_FILL * filled
-        lines.append(f"{score:>2}  {n:>3}  {bar}")
+        lines.append(f"{score:>2} {bar} {n}" if bar else f"{score:>2} {n}")
     lines.append("```")
     return "\n".join(lines)
 
