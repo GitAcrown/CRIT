@@ -69,16 +69,16 @@ NO_PINGS = discord.AllowedMentions.none()
 
 
 MENU_TIMEOUT = 840.0
-MIDDOT = "\u00b7"
+EM_DASH = "\u2014"
 
 
 def format_tab_label(label: str, *, index: int, total: int) -> str:
-    """Onglets : point médian pour les distinguer des boutons d'action."""
+    """Onglets : emdash pour les distinguer des boutons d'action."""
     if total <= 1 or index == 0:
-        return f"{label} {MIDDOT}"
+        return f"{label} {EM_DASH}"
     if index == total - 1:
-        return f"{MIDDOT} {label}"
-    return f"{MIDDOT} {label} {MIDDOT}"
+        return f"{EM_DASH} {label}"
+    return f"{EM_DASH} {label} {EM_DASH}"
 
 
 def labeled_tabs(*labels: str) -> tuple[str, ...]:
@@ -1216,17 +1216,14 @@ def build_announce_view(
     seen = experienced_line(hit.media_type, experienced_at)
     if seen:
         film += f"\n{seen}"
-    if live and wid:
-        container.add_item(
-            discord.ui.Section(discord.ui.TextDisplay(profile), accessory=AnnounceDynButton(wid))
-        )
-    else:
-        container.add_item(discord.ui.TextDisplay(profile))
+    container.add_item(discord.ui.TextDisplay(profile))
     container.add_item(discord.ui.Separator())
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
     view.add_item(container)
+    if live and wid:
+        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, label="Actions")))
     return view
 
 

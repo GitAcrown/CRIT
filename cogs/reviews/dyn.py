@@ -280,12 +280,14 @@ class AnnounceDynButton(
         wid: str,
         action: str = "noter",
         *,
+        label: str | None = None,
         emoji: discord.PartialEmoji | str | None = None,
         style: discord.ButtonStyle = discord.ButtonStyle.secondary,
     ) -> None:
         super().__init__(
             discord.ui.Button(
                 style=style,
+                label=(label[:80] if label else None),
                 emoji=emoji or discord.PartialEmoji.from_str(MORE),
                 custom_id=f"ack:ann:{wid}:{action}",
             )
@@ -304,6 +306,7 @@ class AnnounceDynButton(
         return cls(
             match["wid"],
             match["act"],
+            label=item.label,
             emoji=item.emoji,
             style=item.style,
         )
