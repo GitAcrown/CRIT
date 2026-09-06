@@ -489,7 +489,7 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
 
 
 GRAPH_BAR_WIDTH = 12
-GRAPH_FILL = "="
+GRAPH_FILL = "▄"
 
 
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
