@@ -3209,12 +3209,13 @@ class ProfileView(ReviewsLayout):
         if self._graph_bytes:
             self._graph_file = discord.File(io.BytesIO(self._graph_bytes), filename=GRAPH_FILENAME)
             avg = self.average if self.average is not None else 0.0
+            notes = f"{self.review_count} note{'s' if self.review_count != 1 else ''}"
             body.append(sep_wide() if self._highlights else sep_tight())
-            body.append(discord.ui.TextDisplay(
-                f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**"
-            ))
-            body.append(discord.ui.MediaGallery(
-                discord.MediaGalleryItem(f"attachment://{GRAPH_FILENAME}"),
+            body.append(section_with_thumbnail(
+                f"**Répartition**\n"
+                f"moyenne **{format_score(avg, average=True)}**\n"
+                f"-# {notes} · 0 à 10",
+                f"attachment://{GRAPH_FILENAME}",
             ))
         rows: list[discord.ui.ActionRow] = []
         return body, rows

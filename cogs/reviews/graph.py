@@ -1,4 +1,4 @@
-"""Histogramme compact des notes (bandeau, style Letterboxd)."""
+"""Histogramme compact des notes, barres horizontales."""
 
 from __future__ import annotations
 
@@ -15,18 +15,17 @@ RATING_MAX = 10
 GRAPH_FILENAME = "repartition.png"
 
 _BG = (43, 45, 49)
-_TEXT = (219, 222, 225)
-_MUTED = (128, 132, 140)
-_TRACK = (64, 66, 72)
+_TEXT = (242, 243, 245)
+_MUTED = (148, 155, 164)
 _BAR = (196, 160, 80)
 
-_W = 860
-_H = 132
-_PAD_X = 12
-_PAD_TOP = 16
-_PAD_BOT = 18
-_LABEL_H = 14
-_GAP = 5
+_W = 280
+_ROW = 22
+_PAD = 12
+_SCORE_W = 28
+_GAP = 8
+_BAR_H = 13
+_COUNT_W = 32
 
 
 @lru_cache(maxsize=4)
@@ -59,36 +58,37 @@ def render_rating_graph_png(
         return None
     counts = rating_counts(entries)
     peak = max(counts) or 1
-    plot_h = _H - _PAD_TOP - _PAD_BOT - _LABEL_H
-    bar_w = max(8, (_W - 2 * _PAD_X - _GAP * RATING_MAX) // (RATING_MAX + 1))
+    height = _PAD * 2 + _ROW * (RATING_MAX + 1)
+    bar_left = _PAD + _SCORE_W + _GAP
+    bar_max = max(24, _W - bar_left - _PAD - _COUNT_W)
 
-    image = Image.new("RGB", (_W, _H), _BG)
+    image = Image.new("RGB", (_W, height), _BG)
     draw = ImageDraw.Draw(image)
-    font = _font(12)
-    small = _font(11)
-    base = _PAD_TOP + plot_h
+    font = _font(18)
 
-    for score in range(RATING_MAX + 1):
+    for score in range(RATING_MAX, -1, -1):
         n = counts[score]
-        x = _PAD_X + score * (bar_w + _GAP)
-        h = 3 if n <= 0 else max(6, int(round(plot_h * n / peak)))
-        y = base - h
-        draw.rectangle((x, y, x + bar_w - 1, base), fill=_BAR if n else _TRACK)
-        label = str(score)
-        box = draw.textbbox((0, 0), label, font=font)
-        lw = box[2] - box[0]
+        mid = _PAD + (RATING_MAX - score) * _ROW + _ROW // 2
         draw.text(
-            (x + (bar_w - lw) // 2, base + 2),
-            label,
+            (_PAD + _SCORE_W, mid),
+            str(score),
             font=font,
             fill=_TEXT if n else _MUTED,
+            anchor="rm",
         )
-        if n:
-            count = str(n)
-            cbox = draw.textbbox((0, 0), count, font=small)
-            cw = cbox[2] - cbox[0]
-            ch = cbox[3] - cbox[1]
-            draw.text((x + (bar_w - cw) // 2, y - ch - 2), count, font=small, fill=_TEXT)
+        if n <= 0:
+            continue
+        filled = max(_BAR_H, int(round(bar_max * n / peak)))
+        filled = min(bar_max, filled)
+        bar_top = mid - _BAR_H // 2
+        draw.rectangle((bar_left, bar_top, bar_left + filled, bar_top + _BAR_H), fill=_BAR)
+        draw.text(
+            (bar_left + filled + 6, mid),
+            str(n),
+            font=font,
+            fill=_TEXT,
+            anchor="lm",
+        )
 
     out = io.BytesIO()
     image.save(out, format="PNG")
