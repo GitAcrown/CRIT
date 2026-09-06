@@ -488,6 +488,38 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
+GRAPH_BAR_WIDTH = 8
+GRAPH_FILL = "━"
+GRAPH_EMPTY = "─"
+
+
+def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
+    counts = [0] * (RATING_MAX + 1)
+    for _hit, row in entries:
+        points = int(round(max(0.0, min(float(RATING_MAX), float(row["rating"])))))
+        counts[points] += 1
+    return counts
+
+
+def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
+    """Histogramme 0–10, même langage que le reste (étoile compacte, gras, -#)."""
+    if not entries:
+        return ""
+    counts = rating_counts(entries)
+    peak = max(counts)
+    low = next((score for score, n in enumerate(counts) if n), 0)
+    high = next((score for score in range(RATING_MAX, -1, -1) if counts[score]), RATING_MAX)
+    lines = ["**Répartition**"]
+    for score in range(high, low - 1, -1):
+        n = counts[score]
+        filled = 0 if peak <= 0 or n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
+        filled = min(GRAPH_BAR_WIDTH, filled)
+        bar = GRAPH_FILL * filled + GRAPH_EMPTY * (GRAPH_BAR_WIDTH - filled)
+        row = f"{format_stars_compact(score)}  {bar}  {f'**{n}**' if n else '0'}"
+        lines.append(row if n else f"-# {row}")
+    return "\n".join(lines)
+
+
 def skip_note_autocomplete(raw: str) -> bool:
     text = (raw or "").strip()
     if len(text) < 2:
@@ -3309,6 +3341,10 @@ class ProfileView(ReviewsLayout):
     def _profil_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
         avatar = self.member.display_avatar.url if hasattr(self.member, "display_avatar") else None
         body: list[discord.ui.Item] = [section_with_thumbnail(self._profile_header(), avatar)]
+        graph = format_rating_graph(self.journal_entries)
+        if graph:
+            body.append(sep_tight())
+            body.append(discord.ui.TextDisplay(graph))
         filled = [
             (label, self.favorites[slot - 1])
             for slot, label in FAVORITE_LABELS.items()
