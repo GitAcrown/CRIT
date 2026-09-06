@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import random
@@ -60,6 +61,7 @@ from .progress import (
     level_progress,
     title_for_level,
 )
+from .graph import GRAPH_FILENAME, render_rating_graph_png
 from .providers import MediaCatalog, MediaHit, parse_search_query
 from utils import dataio, fuzzy, pretty
 
@@ -123,13 +125,17 @@ def bind_view_message(
 async def publish_layout_message(
     interaction: discord.Interaction,
     view: discord.ui.LayoutView,
+    files: list[discord.File] | None = None,
 ) -> discord.Message | None:
     """Publie un layout dans le salon, hors webhook d'interaction."""
     channel = interaction.channel
     if channel is None:
         return None
     try:
-        return await channel.send(view=view, allowed_mentions=NO_PINGS)
+        kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
+        if files:
+            kwargs["files"] = files
+        return await channel.send(**kwargs)
     except (AttributeError, discord.HTTPException) as exc:
         logger.warning("Impossible de publier dans le salon : %s", exc)
         return None
@@ -151,7 +157,10 @@ async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
 
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
     """Met à jour le message qui porte les boutons, pas un autre webhook."""
-    kwargs = {"view": view, "allowed_mentions": NO_PINGS}
+    kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
+    extra = getattr(view, "message_attachments", None)
+    if callable(extra):
+        kwargs["attachments"] = extra()
     message: discord.Message | discord.WebhookMessage | None = None
     if not interaction.response.is_done():
         await interaction.response.edit_message(**kwargs)
@@ -488,34 +497,14 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-GRAPH_BAR_WIDTH = 10
-GRAPH_FILL = "█"
-
-
-def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
-    counts = [0] * (RATING_MAX + 1)
-    for _hit, row in entries:
-        points = int(round(max(0.0, min(float(RATING_MAX), float(row["rating"])))))
-        counts[points] += 1
-    return counts
-
-
-def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
-    """Histogramme 0–10 en bloc monospace, chiffres alignés."""
-    if not entries:
-        return ""
-    counts = rating_counts(entries)
-    peak = max(counts) or 1
-    avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
-    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**", "```"]
-    for score in range(RATING_MAX, -1, -1):
-        n = counts[score]
-        filled = 0 if n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
-        filled = min(GRAPH_BAR_WIDTH, filled)
-        bar = GRAPH_FILL * filled
-        lines.append(f"{score:>2} {bar} {n}" if bar else f"{score:>2} {n}")
-    lines.append("```")
-    return "\n".join(lines)
+def rating_graph_file(
+    entries: list[tuple[MediaHit, Any]],
+    average: float | None = None,
+) -> discord.File | None:
+    raw = render_rating_graph_png(entries, average)
+    if not raw:
+        return None
+    return discord.File(io.BytesIO(raw), filename=GRAPH_FILENAME)
 
 
 def pick_rating_highlights(
@@ -1897,7 +1886,8 @@ class ProfileShareButton(discord.ui.Button):
         view = discord.ui.LayoutView(timeout=None)
         if body:
             view.add_item(discord.ui.Container(*body))
-        message = await publish_layout_message(interaction, view)
+        files = self._hub.message_attachments()
+        message = await publish_layout_message(interaction, view, files=files or None)
         if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier ce profil.", ephemeral=True)
             return
@@ -3121,8 +3111,15 @@ class ProfileView(ReviewsLayout):
         self.watchlist_page = 0
         self.journal_type = "all"
         self.journal_sort = "recent"
+        self._graph_file: discord.File | None = None
         self._interaction: discord.Interaction | None = None
         self._build()
+
+    def message_attachments(self) -> list[discord.File]:
+        if self._graph_file is None:
+            return []
+        self._graph_file.fp.seek(0)
+        return [self._graph_file]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.viewer_id:
@@ -3218,10 +3215,12 @@ class ProfileView(ReviewsLayout):
         for index, (label, hit, rating) in enumerate(self._highlights):
             body.append(sep_wide() if index == 0 else sep_tight())
             body.append(self._highlight_block(label, hit, rating))
-        graph = format_rating_graph(self.journal_entries)
-        if graph:
+        self._graph_file = rating_graph_file(self.journal_entries, self.average)
+        if self._graph_file is not None:
             body.append(sep_wide() if self._highlights else sep_tight())
-            body.append(discord.ui.TextDisplay(graph))
+            body.append(discord.ui.MediaGallery(
+                discord.MediaGalleryItem(f"attachment://{GRAPH_FILENAME}"),
+            ))
         rows: list[discord.ui.ActionRow] = []
         return body, rows
 
@@ -3328,6 +3327,7 @@ class ProfileView(ReviewsLayout):
         return body, rows
 
     def _build(self) -> None:
+        self._graph_file = None
         if self.tab == "journal":
             body, rows = self._journal_layout()
         elif self.tab == "avoire":
@@ -5454,7 +5454,7 @@ class Reviews(commands.Cog):
             viewer_id=interaction.user.id,
         )
         view._interaction = interaction
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        await apply_view(interaction, view)
         await view.attach(interaction)
 
     @app_commands.command(name="carnet")
