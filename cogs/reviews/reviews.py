@@ -488,9 +488,8 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-GRAPH_BAR_WIDTH = 8
-GRAPH_FILL = "━"
-GRAPH_EMPTY = "─"
+GRAPH_BAR_WIDTH = 10
+GRAPH_FILL = "█"
 
 
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
@@ -502,22 +501,48 @@ def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
 
 
 def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
-    """Histogramme 0–10, même langage que le reste (étoile compacte, gras, -#)."""
+    """Histogramme : uniquement les notes utilisées, barre = le compte."""
     if not entries:
         return ""
     counts = rating_counts(entries)
     peak = max(counts)
-    low = next((score for score, n in enumerate(counts) if n), 0)
-    high = next((score for score in range(RATING_MAX, -1, -1) if counts[score]), RATING_MAX)
-    lines = ["**Répartition**"]
-    for score in range(high, low - 1, -1):
+    avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
+    lines = [f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**"]
+    for score in range(RATING_MAX, -1, -1):
         n = counts[score]
-        filled = 0 if peak <= 0 or n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
-        filled = min(GRAPH_BAR_WIDTH, filled)
-        bar = GRAPH_FILL * filled + GRAPH_EMPTY * (GRAPH_BAR_WIDTH - filled)
-        row = f"{format_stars_compact(score)}  {bar}  {f'**{n}**' if n else '0'}"
-        lines.append(row if n else f"-# {row}")
+        if n <= 0 or peak <= 0:
+            continue
+        filled = max(1, round(GRAPH_BAR_WIDTH * n / peak))
+        bar = GRAPH_FILL * min(GRAPH_BAR_WIDTH, filled)
+        lines.append(f"{format_stars_compact(score)}  {bar}  **{n}**")
     return "\n".join(lines)
+
+
+def pick_rating_highlights(
+    entries: list[tuple[MediaHit, Any]],
+) -> list[tuple[str, MediaHit, float]]:
+    """Une mieux notée et une pire, au hasard parmi les notes extrêmes."""
+    if not entries:
+        return []
+    scored = [(hit, float(row["rating"])) for hit, row in entries]
+    best_score = max(rating for _hit, rating in scored)
+    worst_score = min(rating for _hit, rating in scored)
+    best_hit, best_rating = random.choice(
+        [(hit, rating) for hit, rating in scored if rating == best_score]
+    )
+    picks = [("Mieux notée", best_hit, best_rating)]
+    if best_score == worst_score:
+        return picks
+    worst_pool = [
+        (hit, rating)
+        for hit, rating in scored
+        if rating == worst_score and hit.identity != best_hit.identity
+    ]
+    if not worst_pool:
+        return picks
+    worst_hit, worst_rating = random.choice(worst_pool)
+    picks.append(("Pire note", worst_hit, worst_rating))
+    return picks
 
 
 def skip_note_autocomplete(raw: str) -> bool:
@@ -2391,144 +2416,6 @@ class AffinityCompareView(ReviewsLayout):
         self.set_layout(body)
 
 
-class FavoriteSlotSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView"):
-        options = []
-        for slot, label in FAVORITE_LABELS.items():
-            description = "Pas encore choisi"
-            if parent._slot_filled(slot):
-                entry = parent.favorites[slot - 1]
-                if entry is not None:
-                    description = pretty.shorten_text(entry[0].title, 95) or "Choisie"
-            options.append(
-                discord.SelectOption(
-                    label=label,
-                    value=str(slot),
-                    description=description,
-                )
-            )
-        super().__init__(placeholder="Choisir une préférée…", options=options, min_values=1, max_values=1)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self._hub.member.id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le propriétaire du profil peut modifier ses préférées.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return
-        await interaction.response.send_modal(FavoriteSearchModal(self._hub, int(self.values[0])))
-
-
-class FavoriteSearchModal(discord.ui.Modal):
-    def __init__(self, profile: "ProfileView", slot: int):
-        super().__init__(title=pretty.shorten_text(f"Choisir · {FAVORITE_LABELS[slot]}", 45))
-        self._profile = profile
-        self._slot = slot
-        self.query_input = discord.ui.TextInput(
-            label="Titre de l'œuvre",
-            placeholder="Laisse vide pour retirer · Ex. Dune 2021",
-            required=False,
-            max_length=80,
-        )
-        self.add_item(self.query_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self._profile.member.id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le propriétaire du profil peut modifier ses préférées.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer()
-        query = str(self.query_input.value or "").strip()
-        if not query:
-            await self._profile.clear_favorite_slot(self._slot)
-            await interaction.followup.send(
-                f"**{FAVORITE_LABELS[self._slot]} ·** emplacement retiré.",
-                ephemeral=True,
-            )
-            return
-        catalog = self._profile.cog.catalog
-        if catalog is None:
-            await interaction.followup.send("**Erreur ·** Catalogue média indisponible.", ephemeral=True)
-            return
-        try:
-            hits = await catalog.search(query, "all")
-        except Exception:
-            logger.exception("Recherche de préférée impossible")
-            await interaction.followup.send("**Erreur ·** Recherche impossible pour le moment.", ephemeral=True)
-            return
-        if not hits:
-            await interaction.followup.send(
-                f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} ».",
-                ephemeral=True,
-            )
-            return
-        if len(hits) == 1:
-            await self._profile.apply_favorite(self._slot, hits[0])
-            await interaction.followup.send(
-                f"**{FAVORITE_LABELS[self._slot]} ·** {hits[0].title}",
-                ephemeral=True,
-            )
-            return
-        view = FavoritePickView(self._profile, self._slot, hits)
-        await interaction.followup.send(view=view, ephemeral=True)
-
-
-class FavoriteHitSelect(discord.ui.Select):
-    def __init__(self, parent: "FavoritePickView", hits: list[MediaHit]):
-        options = []
-        for index, hit in enumerate(hits[:25]):
-            options.append(
-                discord.SelectOption(
-                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
-                    value=str(index),
-                    description=select_hit_description(hit),
-                    emoji=select_emoji(hit.media_type),
-                )
-            )
-        super().__init__(placeholder="Choisir une œuvre", options=options, min_values=1, max_values=1)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        hit = self._hub.hits[int(self.values[0])]
-        await self._hub.profile.apply_favorite(self._hub.slot, hit)
-        done = discord.ui.LayoutView(timeout=30)
-        box = discord.ui.Container()
-        box.add_item(discord.ui.TextDisplay(
-            f"**{FAVORITE_LABELS[self._hub.slot]} ·** {hit.title}"
-        ))
-        done.add_item(box)
-        await interaction.edit_original_response(view=done)
-
-
-class FavoritePickView(ReviewsLayout):
-    def __init__(self, profile: "ProfileView", slot: int, hits: list[MediaHit]):
-        super().__init__()
-        self.profile = profile
-        self.slot = slot
-        self.hits = hits
-        self.set_layout(
-            [discord.ui.TextDisplay(
-                f"## {FAVORITE_LABELS[slot]}\n-# {len(hits)} résultat(s) — choisis l'œuvre à épingler"
-            )],
-            discord.ui.ActionRow(FavoriteHitSelect(self, hits)),
-        )
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.profile.member.id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le propriétaire du profil peut modifier ses préférées.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return False
-        return True
-
-
 # ---------------------------------------------------------------------------
 # Listes communes
 # ---------------------------------------------------------------------------
@@ -3207,7 +3094,6 @@ class ProfileView(ReviewsLayout):
         twin: Affinity | None,
         rival: Affinity | None,
         titles: dict[int, str],
-        favorites: list[tuple[MediaHit, float | None] | None],
         journal_entries: list[tuple[MediaHit, Any]],
         watchlist_entries: list[tuple[MediaHit, Any]],
         affinities: list[Affinity],
@@ -3224,9 +3110,9 @@ class ProfileView(ReviewsLayout):
         self.twin = twin
         self.rival = rival
         self.titles = titles
-        self.favorites = favorites
         self.journal_entries = journal_entries
         self.watchlist_entries = watchlist_entries
+        self._highlights = pick_rating_highlights(journal_entries)
         self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
         self.viewer_id = viewer_id
         self.editable = viewer_id == member.id
@@ -3314,19 +3200,7 @@ class ProfileView(ReviewsLayout):
         next_btn.disabled = page >= max_page
         return discord.ui.ActionRow(prev_btn, next_btn)
 
-    def _slot_filled(self, slot: int) -> bool:
-        return slot - 1 < len(self.favorites) and self.favorites[slot - 1] is not None
-
-    def _best_recent(self) -> tuple[MediaHit, float] | None:
-        if not self.journal_entries:
-            return None
-        hit, row = max(
-            self.journal_entries,
-            key=lambda item: (float(item[1]["rating"]), int(item[1]["updated_at"] or 0)),
-        )
-        return hit, float(row["rating"])
-
-    def _favorite_block(self, label: str, hit: MediaHit, rating: float | None) -> discord.ui.Item:
+    def _highlight_block(self, label: str, hit: MediaHit, rating: float | None) -> discord.ui.Item:
         year = f"  ·  {hit.year}" if hit.year else ""
         lines = [
             f"### {label}",
@@ -3345,28 +3219,10 @@ class ProfileView(ReviewsLayout):
         if graph:
             body.append(sep_tight())
             body.append(discord.ui.TextDisplay(graph))
-        filled = [
-            (label, self.favorites[slot - 1])
-            for slot, label in FAVORITE_LABELS.items()
-            if self._slot_filled(slot)
-        ]
-        shown: list[discord.ui.Item] = []
-        if filled:
-            for label, entry in filled:
-                assert entry is not None
-                hit, rating = entry
-                shown.append(self._favorite_block(label, hit, rating))
-        else:
-            fallback = self._best_recent()
-            if fallback is not None:
-                hit, rating = fallback
-                shown.append(self._favorite_block("Mieux notée", hit, rating))
-        for index, block in enumerate(shown):
+        for index, (label, hit, rating) in enumerate(self._highlights):
             body.append(sep_wide() if index == 0 else sep_tight())
-            body.append(block)
+            body.append(self._highlight_block(label, hit, rating))
         rows: list[discord.ui.ActionRow] = []
-        if self.editable:
-            rows.append(discord.ui.ActionRow(FavoriteSlotSelect(self)))
         return body, rows
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -3483,25 +3339,7 @@ class ProfileView(ReviewsLayout):
         self.set_layout(body, *rows, self._tabs_row())
         self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))
 
-    async def apply_favorite(self, slot: int, hit: MediaHit) -> None:
-        if not self.editable:
-            return
-        if self.cog.catalog is not None:
-            try:
-                hit = await self.cog.catalog.enrich(hit)
-            except Exception:
-                logger.exception("Enrichissement de préférée impossible")
-        await self.cog.set_favorite(self.guild, self.member.id, slot, hit)
-        await self.refresh()
-
-    async def clear_favorite_slot(self, slot: int) -> None:
-        if not self.editable:
-            return
-        await self.cog.clear_favorite(self.guild, self.member.id, slot)
-        await self.refresh()
-
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
-        self.favorites = await self.cog.get_favorites(self.guild, self.member.id)
         self.watchlist_entries = await self.cog.load_watchlist(self.guild, self.member.id)
         self._build()
         await self.push(interaction)
@@ -4170,7 +4008,7 @@ class HelpView(ReviewsLayout):
         commandes = (
             "### Commandes\n"
             "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou à voir\n"
-            "`/carnet` — page d'un membre : préférées, journal, à voir, affinités "
+            "`/carnet` — page d'un membre : profil, journal, à voir, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
@@ -5610,7 +5448,6 @@ class Reviews(commands.Cog):
             twin=twin,
             rival=rival,
             titles=await self.get_titles(guild, title_ids),
-            favorites=await self.get_favorites(guild, target.id),
             journal_entries=journal_entries,
             watchlist_entries=await self.load_watchlist(guild, target.id),
             affinities=affinities,
@@ -5629,7 +5466,7 @@ class Reviews(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member | None = None,
     ) -> None:
-        """Carnet d'un membre : préférées, journal, à voir et affinités."""
+        """Carnet d'un membre : profil, journal, à voir et affinités."""
         await self._open_carnet(interaction, member or interaction.user)
 
     @app_commands.guild_only()
