@@ -512,8 +512,7 @@ def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
     peak = max(counts)
     avg = sum(score * n for score, n in enumerate(counts)) / len(entries)
     lines = [
-        "### Répartition",
-        f"-# moyenne **{format_score(avg, average=True)}**",
+        f"### Répartition  ·  moyenne **{format_score(avg, average=True)}**",
     ]
     for score in range(RATING_MAX, -1, -1):
         n = counts[score]
