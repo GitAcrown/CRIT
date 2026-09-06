@@ -497,16 +497,6 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-def rating_graph_file(
-    entries: list[tuple[MediaHit, Any]],
-    average: float | None = None,
-) -> discord.File | None:
-    raw = render_rating_graph_png(entries, average)
-    if not raw:
-        return None
-    return discord.File(io.BytesIO(raw), filename=GRAPH_FILENAME)
-
-
 def pick_rating_highlights(
     entries: list[tuple[MediaHit, Any]],
 ) -> list[tuple[str, MediaHit, float]]:
@@ -3103,6 +3093,7 @@ class ProfileView(ReviewsLayout):
         self.journal_entries = journal_entries
         self.watchlist_entries = watchlist_entries
         self._highlights = pick_rating_highlights(journal_entries)
+        self._graph_bytes = render_rating_graph_png(journal_entries, average)
         self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
         self.viewer_id = viewer_id
         self.editable = viewer_id == member.id
@@ -3215,9 +3206,13 @@ class ProfileView(ReviewsLayout):
         for index, (label, hit, rating) in enumerate(self._highlights):
             body.append(sep_wide() if index == 0 else sep_tight())
             body.append(self._highlight_block(label, hit, rating))
-        self._graph_file = rating_graph_file(self.journal_entries, self.average)
-        if self._graph_file is not None:
+        if self._graph_bytes:
+            self._graph_file = discord.File(io.BytesIO(self._graph_bytes), filename=GRAPH_FILENAME)
+            avg = self.average if self.average is not None else 0.0
             body.append(sep_wide() if self._highlights else sep_tight())
+            body.append(discord.ui.TextDisplay(
+                f"**Répartition**  ·  moyenne **{format_score(avg, average=True)}**"
+            ))
             body.append(discord.ui.MediaGallery(
                 discord.MediaGalleryItem(f"attachment://{GRAPH_FILENAME}"),
             ))
