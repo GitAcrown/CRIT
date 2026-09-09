@@ -1061,7 +1061,7 @@ def render_published_fiche(
     if live:
         body.append(discord.ui.ActionRow(
             FicheDynButton(wid, "critiques", label=f"Critiques ({count})"),
-            FicheDynButton(wid, "noter", emoji=MORE, style=discord.ButtonStyle.green),
+            FicheDynButton(wid, "noter", label="Actions", emoji=MORE, style=discord.ButtonStyle.green),
         ))
     view.add_item(discord.ui.Container(*body))
     return view
@@ -2371,17 +2371,17 @@ class JournalTypeSelect(discord.ui.Select):
         await apply_view(interaction, self._hub)
 
 
-class JournalSortSelect(discord.ui.Select):
+class JournalSortButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
-        options = [
-            discord.SelectOption(label="Plus récentes", value="recent", default=parent.journal_sort == "recent"),
-            discord.SelectOption(label="Mieux notées", value="rating", default=parent.journal_sort == "rating"),
-        ]
-        super().__init__(placeholder="Trier", options=options, min_values=1, max_values=1)
+        by_rating = parent.journal_sort == "rating"
+        super().__init__(
+            label="Mieux notées" if by_rating else "Plus récentes",
+            style=discord.ButtonStyle.green if by_rating else discord.ButtonStyle.primary,
+        )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.journal_sort = self.values[0]
+        self._hub.journal_sort = "recent" if self._hub.journal_sort == "rating" else "rating"
         self._hub.journal_page = 0
         self._hub._build()
         await apply_view(interaction, self._hub)
@@ -2411,37 +2411,6 @@ class WatchlistOpenSelect(discord.ui.Select):
             )
             return
         await open_public_fiche(self._hub.cog, self._hub.guild, interaction, hit)
-
-
-class WatchlistRemoveSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView", page_items: list[tuple[MediaHit, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(hit.title, 95) or "Sans titre",
-                value=str(index),
-                description="Retirer le signet",
-                emoji=select_emoji(hit.media_type),
-            )
-            for index, (hit, _row) in enumerate(page_items)
-        ]
-        super().__init__(placeholder="Retirer un signet", options=options)
-        self._hub = parent
-        self._items = page_items
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self._hub.member.id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le propriétaire du carnet peut modifier cette liste.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return
-        await interaction.response.defer()
-        hit, _row = self._items[int(self.values[0])]
-        media_id = await self._hub.cog.lookup_media_id(self._hub.guild, hit)
-        if media_id:
-            await self._hub.cog.remove_watchlist(self._hub.guild, self._hub.member.id, media_id)
-        await self._hub.refresh(interaction)
 
 
 class CatalogOpenSelect(discord.ui.Select):
@@ -3404,12 +3373,19 @@ class ProfileView(ReviewsLayout):
             content.append(discord.ui.TextDisplay(graph))
         return content
 
+    def _journal_nav(self, max_page: int) -> discord.ui.ActionRow:
+        sort = JournalSortButton(self)
+        if max_page <= 0:
+            return discord.ui.ActionRow(sort)
+        prev_btn = HubPageButton(self, "journal_page", -1, "← Précédent", max_page)
+        next_btn = HubPageButton(self, "journal_page", 1, "Suivant →", max_page)
+        prev_btn.disabled = self.journal_page <= 0
+        next_btn.disabled = self.journal_page >= max_page
+        return discord.ui.ActionRow(prev_btn, sort, next_btn)
+
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
         entries = self._filtered_journal()
-        filters = [
-            discord.ui.ActionRow(JournalTypeSelect(self)),
-            discord.ui.ActionRow(JournalSortSelect(self)),
-        ]
+        filters = [discord.ui.ActionRow(JournalTypeSelect(self))]
         content: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
         if not self.journal_entries:
@@ -3417,6 +3393,7 @@ class ProfileView(ReviewsLayout):
             return content, filters, actions
         if not entries:
             content.append(discord.ui.TextDisplay("*Aucune œuvre pour ce filtre.*"))
+            actions.append(self._journal_nav(0))
             return content, filters, actions
         max_page = max(0, (len(entries) - 1) // JOURNAL_PAGE)
         self.journal_page = min(self.journal_page, max_page)
@@ -3440,9 +3417,7 @@ class ProfileView(ReviewsLayout):
             if seen:
                 text += f"\n{seen}"
             content.append(section_with_thumbnail(text, hit.poster_url))
-        nav = self._page_nav("journal_page", max_page)
-        if nav:
-            actions.append(nav)
+        actions.append(self._journal_nav(max_page))
         return content, filters, actions
 
     def _watchlist_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -3474,8 +3449,6 @@ class ProfileView(ReviewsLayout):
             text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)}{when}"
             content.append(section_with_thumbnail(text, hit.poster_url))
         actions.append(discord.ui.ActionRow(WatchlistOpenSelect(self, page_items)))
-        if self.editable:
-            actions.append(discord.ui.ActionRow(WatchlistRemoveSelect(self, page_items)))
         nav = self._page_nav("watchlist_page", max_page)
         if nav:
             actions.append(nav)
