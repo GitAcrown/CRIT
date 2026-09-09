@@ -36,6 +36,7 @@ from .dyn import (
 )
 from .emojis import (
     BOOK,
+    HOUSE,
     MORE,
     EXPLICIT,
     GAME,
@@ -2053,9 +2054,10 @@ class ProfileShareButton(discord.ui.Button):
 
 
 class HubTabButton(discord.ui.Button):
-    def __init__(self, parent: Any, tab: str, label: str):
+    def __init__(self, parent: Any, tab: str, label: str | None, *, emoji: str | None = None):
         super().__init__(
             label=label,
+            emoji=discord.PartialEmoji.from_str(emoji) if emoji else None,
             style=discord.ButtonStyle.primary if parent.tab == tab else discord.ButtonStyle.secondary,
         )
         self._hub = parent
@@ -2375,7 +2377,7 @@ class JournalSortButton(discord.ui.Button):
     def __init__(self, parent: "ProfileView"):
         by_rating = parent.journal_sort == "rating"
         super().__init__(
-            label="Mieux notées" if by_rating else "Plus récentes",
+            label="Tri : Mieux notées" if by_rating else "Tri : Plus récentes",
             style=discord.ButtonStyle.green if by_rating else discord.ButtonStyle.primary,
         )
         self._hub = parent
@@ -3296,14 +3298,13 @@ class ProfileView(ReviewsLayout):
         return discord.ui.TextDisplay(self._profile_header())
 
     def _tabs_row(self) -> discord.ui.ActionRow:
-        profil, journal, signets, affinites = labeled_tabs(
-            "Profil",
+        journal, signets, affinites = labeled_tabs(
             f"Journal ({self.review_count})",
             f"Signets ({len(self.watchlist_entries)})",
             "Affinités",
         )
         return discord.ui.ActionRow(
-            HubTabButton(self, "profil", profil),
+            HubTabButton(self, "profil", None, emoji=HOUSE),
             HubTabButton(self, "journal", journal),
             HubTabButton(self, "signets", signets),
             HubTabButton(self, "affinites", affinites),
