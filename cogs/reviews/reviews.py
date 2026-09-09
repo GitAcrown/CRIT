@@ -71,21 +71,8 @@ NO_PINGS = discord.AllowedMentions.none()
 
 
 MENU_TIMEOUT = 840.0
-EM_DASH = "\u2014"
-
-
-def format_tab_label(label: str, *, index: int, total: int) -> str:
-    """Onglets : emdash pour les distinguer des boutons d'action."""
-    if total <= 1 or index == 0:
-        return f"{label} {EM_DASH}"
-    if index == total - 1:
-        return f"{EM_DASH} {label}"
-    return f"{EM_DASH} {label} {EM_DASH}"
-
-
 def labeled_tabs(*labels: str) -> tuple[str, ...]:
-    total = len(labels)
-    return tuple(format_tab_label(label, index=i, total=total) for i, label in enumerate(labels))
+    return labels
 
 
 def _disable_interactive(item: discord.ui.Item) -> None:
@@ -1890,7 +1877,7 @@ class WatchlistButton(discord.ui.Button):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            label='Retirer « À voir »' if on else "À voir",
+            label="Retirer le signet" if on else "Signet",
             style=discord.ButtonStyle.secondary if (on or rated) else discord.ButtonStyle.primary,
             disabled=rated,
         )
@@ -1899,7 +1886,7 @@ class WatchlistButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:
         if self._hub.my_review:
             await interaction.response.send_message(
-                "**Déjà noté ·** Cette œuvre n'est plus dans ta liste à voir.",
+                "**Déjà noté ·** Cette œuvre n'est plus dans tes signets.",
                 ephemeral=True,
                 delete_after=8,
             )
@@ -2048,8 +2035,12 @@ class ProfileShareButton(discord.ui.Button):
         await interaction.response.defer()
         was_editable = self._hub.editable
         self._hub.editable = False
-        body, _rows = self._hub._profil_layout()
+        body: list[discord.ui.Item] = [self._hub._header_item(avatar=True)]
+        content = self._hub._profil_content()
         self._hub.editable = was_editable
+        if content:
+            body.append(sep_wide())
+            body.extend(content)
         view = discord.ui.LayoutView(timeout=None)
         if body:
             view.add_item(discord.ui.Container(*body))
@@ -2207,10 +2198,17 @@ class MediaSessionView(ReviewsLayout):
             updated=not created, experienced_at=experienced_at, spoiler=spoiler,
         )
 
+    def _tabs_row(self) -> discord.ui.ActionRow:
+        fiche_tab, critiques_tab = labeled_tabs("Fiche", f"Critiques ({self.count})")
+        return discord.ui.ActionRow(
+            TabButton(self, "fiche", fiche_tab),
+            TabButton(self, "critiques", critiques_tab),
+        )
+
     def _build(self) -> None:
         hit = self.hit
         body: list[discord.ui.Item] = []
-        rows: list[discord.ui.ActionRow] = []
+        actions: list[discord.ui.ActionRow] = []
 
         if len(self.hits) > 1:
             body.append(discord.ui.TextDisplay(f"### Résultats · {len(self.hits)} œuvre(s)"))
@@ -2224,7 +2222,10 @@ class MediaSessionView(ReviewsLayout):
                         "-# Aucun film ou série trouvé — précise le type si besoin."
                     ))
             body.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
-            body.append(discord.ui.Separator())
+            body.append(sep_tight())
+
+        body.append(self._tabs_row())
+        body.append(sep_tight())
 
         if self.tab == "fiche":
             body.extend(fiche_intro(hit))
@@ -2276,12 +2277,15 @@ class MediaSessionView(ReviewsLayout):
                     if seen:
                         text += f"\n{seen}"
                     body.append(section_with_thumbnail(text, avatar))
+            if len(self.reviews) > REVIEWS_PAGE:
+                nav_btns: list[discord.ui.Item] = []
+                if self.review_page > 0:
+                    nav_btns.append(_ReviewPageButton(self, -1, "← Précédent"))
+                if (self.review_page + 1) * REVIEWS_PAGE < len(self.reviews):
+                    nav_btns.append(_ReviewPageButton(self, 1, "Suivant →"))
+                if nav_btns:
+                    actions.append(discord.ui.ActionRow(*nav_btns))
 
-        fiche_tab, critiques_tab = labeled_tabs("Fiche", f"Critiques ({self.count})")
-        rows.append(discord.ui.ActionRow(
-            TabButton(self, "fiche", fiche_tab),
-            TabButton(self, "critiques", critiques_tab),
-        ))
         if not self.published_wid:
             rate_label = "Noter"
             if self.ephemeral and self.pending_rating is not None and self.my_review is None:
@@ -2290,21 +2294,13 @@ class MediaSessionView(ReviewsLayout):
                 rate_label = "Modifier ma note"
             rate_btn = RateButton(self)
             rate_btn.label = rate_label
-            actions: list[discord.ui.Item] = [rate_btn]
+            page_actions: list[discord.ui.Item] = [rate_btn]
             if self.ephemeral and self.my_review:
-                actions.append(DeleteReviewButton(self))
+                page_actions.append(DeleteReviewButton(self))
             if self.ephemeral:
-                actions.append(WatchlistButton(self))
-            rows.append(discord.ui.ActionRow(*actions[:5]))
-        if self.tab == "critiques" and len(self.reviews) > REVIEWS_PAGE:
-            nav_btns: list[discord.ui.Item] = []
-            if self.review_page > 0:
-                nav_btns.append(_ReviewPageButton(self, -1, "← Précédent"))
-            if (self.review_page + 1) * REVIEWS_PAGE < len(self.reviews):
-                nav_btns.append(_ReviewPageButton(self, 1, "Suivant →"))
-            if nav_btns:
-                rows.append(discord.ui.ActionRow(*nav_btns))
-        self.set_layout(body, *rows)
+                page_actions.append(WatchlistButton(self))
+            actions.append(discord.ui.ActionRow(*page_actions[:5]))
+        self.set_layout(body, *actions)
         if self.stream_bind:
             self.add_item(discord.ui.ActionRow(StreamBindButton(self)))
         elif not self.published_wid:
@@ -2423,12 +2419,12 @@ class WatchlistRemoveSelect(discord.ui.Select):
             discord.SelectOption(
                 label=pretty.shorten_text(hit.title, 95) or "Sans titre",
                 value=str(index),
-                description="Retirer de la liste",
+                description="Retirer le signet",
                 emoji=select_emoji(hit.media_type),
             )
             for index, (hit, _row) in enumerate(page_items)
         ]
-        super().__init__(placeholder="Retirer de la liste", options=options)
+        super().__init__(placeholder="Retirer un signet", options=options)
         self._hub = parent
         self._items = page_items
 
@@ -3324,19 +3320,42 @@ class ProfileView(ReviewsLayout):
         lines.append(format_grade(title))
         return "\n".join(lines)
 
+    def _header_item(self, *, avatar: bool) -> discord.ui.Item:
+        if avatar:
+            url = self.member.display_avatar.url if hasattr(self.member, "display_avatar") else None
+            return section_with_thumbnail(self._profile_header(), url)
+        return discord.ui.TextDisplay(self._profile_header())
+
     def _tabs_row(self) -> discord.ui.ActionRow:
-        profil, journal, avoir, affinites = labeled_tabs(
+        profil, journal, signets, affinites = labeled_tabs(
             "Profil",
             f"Journal ({self.review_count})",
-            f"À voir ({len(self.watchlist_entries)})",
+            f"Signets ({len(self.watchlist_entries)})",
             "Affinités",
         )
         return discord.ui.ActionRow(
             HubTabButton(self, "profil", profil),
             HubTabButton(self, "journal", journal),
-            HubTabButton(self, "avoire", avoir),
+            HubTabButton(self, "signets", signets),
             HubTabButton(self, "affinites", affinites),
         )
+
+    def _assemble(
+        self,
+        header: discord.ui.Item,
+        content: list[discord.ui.Item],
+        *,
+        filters: list[discord.ui.ActionRow] | None = None,
+        actions: list[discord.ui.ActionRow] | None = None,
+    ) -> None:
+        body: list[discord.ui.Item] = [header, sep_tight(), self._tabs_row()]
+        for row in filters or []:
+            body.append(sep_tight())
+            body.append(row)
+        if content:
+            body.append(sep_wide())
+            body.extend(content)
+        self.set_layout(body, *(actions or []))
 
     def _filtered_journal(self) -> list[tuple[MediaHit, Any]]:
         items = self.journal_entries
@@ -3372,32 +3391,33 @@ class ProfileView(ReviewsLayout):
             lines.append(f"{format_stars(rating)}  **{format_score(rating)}**")
         return section_with_thumbnail("\n".join(lines), hit.poster_url)
 
-    def _profil_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
-        avatar = self.member.display_avatar.url if hasattr(self.member, "display_avatar") else None
-        body: list[discord.ui.Item] = [section_with_thumbnail(self._profile_header(), avatar)]
+    def _profil_content(self) -> list[discord.ui.Item]:
+        content: list[discord.ui.Item] = []
         for index, (label, hit, rating) in enumerate(self._highlights):
-            body.append(sep_wide() if index == 0 else sep_tight())
-            body.append(self._highlight_block(label, hit, rating))
+            if index:
+                content.append(sep_tight())
+            content.append(self._highlight_block(label, hit, rating))
         graph = format_rating_graph(self.journal_entries)
         if graph:
-            body.append(sep_wide() if self._highlights else sep_tight())
-            body.append(discord.ui.TextDisplay(graph))
-        rows: list[discord.ui.ActionRow] = []
-        return body, rows
+            if content:
+                content.append(sep_wide())
+            content.append(discord.ui.TextDisplay(graph))
+        return content
 
-    def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
+    def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
         entries = self._filtered_journal()
-        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header()), sep_wide()]
-        rows: list[discord.ui.ActionRow] = [
+        filters = [
             discord.ui.ActionRow(JournalTypeSelect(self)),
             discord.ui.ActionRow(JournalSortSelect(self)),
         ]
+        content: list[discord.ui.Item] = []
+        actions: list[discord.ui.ActionRow] = []
         if not self.journal_entries:
-            body.append(discord.ui.TextDisplay("*Aucune œuvre notée pour l'instant.*"))
-            return body, rows
+            content.append(discord.ui.TextDisplay("*Aucune œuvre notée pour l'instant.*"))
+            return content, filters, actions
         if not entries:
-            body.append(discord.ui.TextDisplay("*Aucune œuvre pour ce filtre.*"))
-            return body, rows
+            content.append(discord.ui.TextDisplay("*Aucune œuvre pour ce filtre.*"))
+            return content, filters, actions
         max_page = max(0, (len(entries) - 1) // JOURNAL_PAGE)
         self.journal_page = min(self.journal_page, max_page)
         start = self.journal_page * JOURNAL_PAGE
@@ -3405,7 +3425,7 @@ class ProfileView(ReviewsLayout):
         hide = self.viewer_id != self.member.id
         for index, (hit, row) in enumerate(page_items):
             if index:
-                body.append(sep_tight())
+                content.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
             text = f"{format_stars(row['rating'])}  **{hit.title}**{year}\n-# {type_label(hit.media_type)}"
             shown = format_comment(
@@ -3419,30 +3439,30 @@ class ProfileView(ReviewsLayout):
             seen = experienced_line(hit.media_type, experienced_from_row(row))
             if seen:
                 text += f"\n{seen}"
-            body.append(section_with_thumbnail(text, hit.poster_url))
+            content.append(section_with_thumbnail(text, hit.poster_url))
         nav = self._page_nav("journal_page", max_page)
         if nav:
-            rows.append(nav)
-        return body, rows
+            actions.append(nav)
+        return content, filters, actions
 
     def _watchlist_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
-        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header()), sep_wide()]
-        rows: list[discord.ui.ActionRow] = []
+        content: list[discord.ui.Item] = []
+        actions: list[discord.ui.ActionRow] = []
         if not self.watchlist_entries:
             empty = (
-                "*Rien dans ta liste à voir.*"
+                "*Aucun signet pour l'instant.*"
                 if self.editable
-                else "*Cette liste à voir est vide.*"
+                else "*Pas de signet.*"
             )
-            body.append(discord.ui.TextDisplay(empty))
-            return body, rows
+            content.append(discord.ui.TextDisplay(empty))
+            return content, actions
         max_page = max(0, (len(self.watchlist_entries) - 1) // JOURNAL_PAGE)
         self.watchlist_page = min(self.watchlist_page, max_page)
         start = self.watchlist_page * JOURNAL_PAGE
         page_items = self.watchlist_entries[start:start + JOURNAL_PAGE]
         for index, (hit, row) in enumerate(page_items):
             if index:
-                body.append(sep_tight())
+                content.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
             added = 0
             try:
@@ -3452,24 +3472,24 @@ class ProfileView(ReviewsLayout):
                     added = int(row.get("added_at") or 0)
             when = f" · ajouté <t:{added}:R>" if added else ""
             text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)}{when}"
-            body.append(section_with_thumbnail(text, hit.poster_url))
-        rows.append(discord.ui.ActionRow(WatchlistOpenSelect(self, page_items)))
+            content.append(section_with_thumbnail(text, hit.poster_url))
+        actions.append(discord.ui.ActionRow(WatchlistOpenSelect(self, page_items)))
         if self.editable:
-            rows.append(discord.ui.ActionRow(WatchlistRemoveSelect(self, page_items)))
+            actions.append(discord.ui.ActionRow(WatchlistRemoveSelect(self, page_items)))
         nav = self._page_nav("watchlist_page", max_page)
         if nav:
-            rows.append(nav)
-        return body, rows
+            actions.append(nav)
+        return content, actions
 
     def _affinites_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
-        body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._profile_header()), sep_wide()]
-        rows: list[discord.ui.ActionRow] = []
+        content: list[discord.ui.Item] = []
+        actions: list[discord.ui.ActionRow] = []
         if not self.affinities:
-            body.append(discord.ui.TextDisplay(
+            content.append(discord.ui.TextDisplay(
                 f"*Pas encore assez d'œuvres en commun avec quelqu'un "
                 f"(minimum {MIN_AFFINITY_OVERLAP}).*"
             ))
-            return body, rows
+            return content, actions
         twins = self.affinities[:3]
         rival = min(self.affinities, key=lambda a: (a.percent, -a.overlap))
         lines = [
@@ -3483,20 +3503,22 @@ class ProfileView(ReviewsLayout):
             lines.append(f"**{RIVAL} Rival**")
             lines.append(self._person(rival.user_id))
             lines.append(f"-# {rival.percent:.0f} %")
-        body.append(discord.ui.TextDisplay("\n".join(lines)))
-        rows.append(discord.ui.ActionRow(AffinityCompareSelect(self)))
-        return body, rows
+        content.append(discord.ui.TextDisplay("\n".join(lines)))
+        actions.append(discord.ui.ActionRow(AffinityCompareSelect(self)))
+        return content, actions
 
     def _build(self) -> None:
         if self.tab == "journal":
-            body, rows = self._journal_layout()
-        elif self.tab == "avoire":
-            body, rows = self._watchlist_layout()
+            content, filters, actions = self._journal_layout()
+            self._assemble(self._header_item(avatar=False), content, filters=filters, actions=actions)
+        elif self.tab == "signets":
+            content, actions = self._watchlist_layout()
+            self._assemble(self._header_item(avatar=False), content, actions=actions)
         elif self.tab == "affinites":
-            body, rows = self._affinites_layout()
+            content, actions = self._affinites_layout()
+            self._assemble(self._header_item(avatar=False), content, actions=actions)
         else:
-            body, rows = self._profil_layout()
-        self.set_layout(body, *rows, self._tabs_row())
+            self._assemble(self._header_item(avatar=True), self._profil_content())
         self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
@@ -3591,9 +3613,10 @@ class ServerHubView(ReviewsLayout):
         extra_row: discord.ui.ActionRow | None = None,
     ) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
         body: list[discord.ui.Item] = [discord.ui.TextDisplay(f"## {title}\n-# {subtitle}")]
-        rows: list[discord.ui.ActionRow] = []
         if extra_row:
-            rows.append(extra_row)
+            body.append(sep_tight())
+            body.append(extra_row)
+        rows: list[discord.ui.ActionRow] = []
         if not items:
             body.append(discord.ui.TextDisplay("*Aucune œuvre ne correspond à cette recherche.*"))
             return body, rows
@@ -3677,7 +3700,7 @@ class ServerHubView(ReviewsLayout):
             )
         else:
             body, rows = self._recentes_layout()
-        self.set_layout(body, *rows, self._tabs_row())
+        self.set_layout([self._tabs_row(), sep_tight(), *body], *rows)
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         self._build()
@@ -4157,7 +4180,7 @@ class HelpView(ReviewsLayout):
             f"({format_stars(0)} 0 → {format_stars(10)} 10, entier), "
             "un commentaire optionnel, la date (vu, joué, écouté ou lu) "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
-            "4. **À voir** l'ajoute à ta liste — elle disparaît dès que tu notes.\n"
+            "4. **Signet** l'ajoute à tes signets — il disparaît dès que tu notes.\n"
             "5. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
             "\n"
@@ -4167,13 +4190,13 @@ class HelpView(ReviewsLayout):
         )
         commandes = (
             "### Commandes\n"
-            "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou à voir\n"
+            "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou signet\n"
             "`/stream` — lie le live en cours à une œuvre : la fiche est postée à la fin\n"
-            "`/carnet` — page d'un membre : profil, journal, à voir, affinités "
+            "`/carnet` — page d'un membre : profil, journal, signets, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
-            "`/tirage` — une œuvre au hasard (ta liste à voir, celle d'un membre, ou une liste commune)\n"
+            "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
             "`/preferences` — tes défauts : date, listes, recherche, annonces\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
@@ -5731,7 +5754,7 @@ class Reviews(commands.Cog):
         rating: float | None = None,
         comment: str | None = None,
     ) -> None:
-        """Recherche une œuvre : ouvrir la fiche, noter, ou ajouter à voir."""
+        """Recherche une œuvre : ouvrir la fiche, noter, ou ajouter un signet."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
@@ -5919,13 +5942,13 @@ class Reviews(commands.Cog):
     @app_commands.command(name="carnet")
     @app_commands.guild_only()
     @app_commands.rename(member="membre")
-    @app_commands.describe(member="Membre dont afficher le carnet, le journal et les affinités")
+    @app_commands.describe(member="Membre dont afficher le carnet, le journal, les signets et les affinités")
     async def critique_carnet(
         self,
         interaction: discord.Interaction,
         member: discord.Member | None = None,
     ) -> None:
-        """Carnet d'un membre : profil, journal, à voir et affinités."""
+        """Carnet d'un membre : profil, journal, signets et affinités."""
         await self._open_carnet(interaction, member or interaction.user)
 
     @app_commands.guild_only()
@@ -6052,7 +6075,7 @@ class Reviews(commands.Cog):
     @app_commands.guild_only()
     @app_commands.rename(member="membre", media_type="type", period="quand", liste="liste")
     @app_commands.describe(
-        member="Tirer dans la liste à voir de ce membre (par défaut : la tienne)",
+        member="Tirer dans les signets de ce membre (par défaut : les tiens)",
         media_type="Restreindre à un type",
         period="Quand l'œuvre a été ajoutée à la liste",
         liste="Tirer dans une liste commune (prioritaire sur le membre)",
@@ -6066,7 +6089,7 @@ class Reviews(commands.Cog):
         period: str = "all",
         liste: str | None = None,
     ) -> None:
-        """Tire une œuvre encore à voir, ou dans une liste commune."""
+        """Tire une œuvre au hasard dans tes signets, ou dans une liste commune."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
@@ -6092,9 +6115,9 @@ class Reviews(commands.Cog):
                 period=period,
             )
             empty = (
-                "**Tirage ·** Ta liste à voir est vide."
+                "**Tirage ·** Tu n'as aucun signet."
                 if target.id == interaction.user.id
-                else f"**Tirage ·** La liste à voir de {target.display_name} est vide."
+                else f"**Tirage ·** {target.display_name} n'a aucun signet."
             )
         if hit is None:
             await interaction.edit_original_response(content=empty)

@@ -6,16 +6,16 @@ Bot Discord (discord.py) dédié aux critiques d'œuvres : un carnet de notes ty
 
 ## Fonctionnalités
 
-Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (Steam), albums et morceaux (Spotify) ou livres (Open Library), avec commentaire optionnel (spoiler possible). Fiches d'œuvre, journal, liste à voir, listes communes, affinités de goût, profil + XP, top du serveur, et annonces des nouvelles notes. Les récompenses de profil se craftent dans `cogs/reviews/progress.py`.
+Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (Steam), albums et morceaux (Spotify) ou livres (Open Library), avec commentaire optionnel (spoiler possible). Fiches d'œuvre, journal, signets, listes communes, affinités de goût, profil + XP, top du serveur, et annonces des nouvelles notes. Les récompenses de profil se craftent dans `cogs/reviews/progress.py`.
 
 ## Commandes
 
-- `/search` — catalogues externes : fiche, noter ou à voir (autocomplete dès 2 lettres)
+- `/search` — catalogues externes : fiche, noter ou signet (autocomplete dès 2 lettres)
 - `/stream` — lie un live Discord (Go Live) à une œuvre ; la fiche est postée à la fin du stream
-- `/carnet` — page d'un membre : préférées, journal, à voir et affinités (aussi via clic droit → Voir le carnet)
+- `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet)
 - `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
 - `/listes` — listes communes : titre, description, droits d'édition, tirage (autocomplete pour ouvrir une liste)
-- `/tirage` — tire une œuvre encore à voir (ta liste, celle d'un membre) ou dans une liste commune
+- `/tirage` — tire une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)
 - `/preferences` — tes défauts : date vu/joué/lu, édition des nouvelles listes, types de recherche, annonces
 - `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
