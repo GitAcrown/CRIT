@@ -29,6 +29,7 @@ logger = logging.getLogger("CRIT.Reviews.Dyn")
 DB_PATH = Path(__file__).resolve().parent / "data" / "dyn_fiches.db"
 TTL = timedelta(minutes=10)
 ANNOUNCE_TTL = timedelta(hours=6)
+ANNOUNCE_EDIT_WINDOW = timedelta(hours=2)
 PURGE_AFTER = timedelta(hours=1)
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -170,6 +171,64 @@ def update_payload(wid: str, payload: dict[str, Any]) -> None:
             "UPDATE fiches SET payload = ? WHERE id = ?",
             (json.dumps(payload, ensure_ascii=False), wid),
         )
+
+
+def refresh_record(wid: str, *, ttl: timedelta | None = None) -> None:
+    with _db() as conn:
+        conn.execute(
+            "UPDATE fiches SET expires_at = ?, stripped = 0 WHERE id = ?",
+            ((_now() + (ttl or TTL)).isoformat(), wid),
+        )
+
+
+def _announce_hit_key(hit: MediaHit | dict[str, Any]) -> tuple[str, str, str]:
+    if isinstance(hit, MediaHit):
+        return (hit.source, str(hit.source_id), hit.media_type)
+    return (
+        str(hit.get("source") or ""),
+        str(hit.get("source_id") or ""),
+        str(hit.get("media_type") or ""),
+    )
+
+
+def find_recent_announce(
+    *,
+    guild_id: int,
+    user_id: int,
+    hit: MediaHit,
+    within: timedelta | None = None,
+) -> FicheRecord | None:
+    """Dernière annonce du même membre / même œuvre, encore dans la fenêtre d'édition."""
+    cut = int(_now().timestamp()) - int((within or ANNOUNCE_EDIT_WINDOW).total_seconds())
+    want = _announce_hit_key(hit)
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM fiches
+            WHERE message_id != 0
+              AND json_extract(payload, '$.kind') = 'announce'
+              AND json_extract(payload, '$.guild_id') = ?
+              AND json_extract(payload, '$.user_id') = ?
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+    best: FicheRecord | None = None
+    best_posted = -1
+    for row in rows:
+        rec = _row_to_rec(row)
+        raw = rec.payload.get("hit")
+        if not isinstance(raw, dict) or _announce_hit_key(raw) != want:
+            continue
+        try:
+            posted = int(rec.payload.get("posted_at") or 0)
+        except (TypeError, ValueError):
+            posted = 0
+        if posted < cut:
+            continue
+        if posted >= best_posted:
+            best = rec
+            best_posted = posted
+    return best
 
 
 def mark_stripped(wid: str) -> None:

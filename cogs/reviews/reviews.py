@@ -24,11 +24,13 @@ from .dyn import (
     FicheRecord,
     bind_record,
     create_record,
+    find_recent_announce,
     get_record,
     hit_from_dict,
     hit_to_dict,
     is_live,
     mark_stripped,
+    refresh_record,
     sweep_expired,
     update_payload,
 )
@@ -5238,6 +5240,19 @@ class Reviews(commands.Cog):
         titles = await self.get_titles(guild, [user.id])
         mention = _mention(guild, self.bot, user.id)
         grade = titles.get(user.id, title_for_level(1))
+        if updated:
+            previous = find_recent_announce(guild_id=guild.id, user_id=user.id, hit=hit)
+            if previous is not None and await self._edit_announce(
+                previous,
+                hit,
+                mention=mention,
+                title=grade,
+                rating=rating,
+                comment=comment,
+                experienced_at=experienced_at,
+                spoiler=spoiler,
+            ):
+                return
         posted_at = int(time.time())
         wid = create_record(
             {
@@ -5276,6 +5291,60 @@ class Reviews(commands.Cog):
             logger.error("Impossible d'annoncer une critique sur %s : %s", guild.name, exc)
             return
         bind_record(wid, message.channel.id, message.id)
+
+    async def _edit_announce(
+        self,
+        rec: FicheRecord,
+        hit: MediaHit,
+        *,
+        mention: str,
+        title: str,
+        rating: float,
+        comment: str,
+        experienced_at: str,
+        spoiler: bool,
+    ) -> bool:
+        if not rec.channel_id or not rec.message_id:
+            return False
+        try:
+            posted_at = int(rec.payload.get("posted_at") or time.time())
+        except (TypeError, ValueError):
+            posted_at = int(time.time())
+        was_update = bool(rec.payload.get("updated"))
+        rec.payload.update(
+            {
+                "hit": hit_to_dict(hit),
+                "mention": mention,
+                "title": title,
+                "rating": rating,
+                "comment": comment,
+                "experienced_at": experienced_at,
+                "spoiler": spoiler,
+            }
+        )
+        update_payload(rec.id, rec.payload)
+        refresh_record(rec.id, ttl=ANNOUNCE_TTL)
+        view = build_announce_view(
+            hit,
+            mention=mention,
+            title=title,
+            rating=rating,
+            comment=comment,
+            updated=was_update,
+            experienced_at=experienced_at,
+            spoiler=spoiler,
+            posted_at=posted_at,
+            wid=rec.id,
+            live=True,
+        )
+        try:
+            channel = self.bot.get_channel(rec.channel_id) or await self.bot.fetch_channel(rec.channel_id)
+            message = await channel.fetch_message(rec.message_id)
+            await message.edit(view=view, allowed_mentions=NO_PINGS)
+            return True
+        except Exception as exc:
+            logger.info("Maj annonce %s : %s", rec.id, exc)
+            return False
 
     async def _search_or_reply(
         self,
