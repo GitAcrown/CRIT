@@ -1990,60 +1990,20 @@ class StreamBindButton(discord.ui.Button):
             channel_id=channel_id,
             source=source,
         )
-        bound = StreamStatusView(
-            self._hub.cog,
-            guild,
-            interaction.user.id,
-            self._hub.hit,
-            channel_id,
-        )
+        hub = await StreamHubView.create(self._hub.cog, guild, interaction.user.id)
         self._hub.stop()
-        await apply_view(interaction, bound)
+        await apply_view(interaction, hub)
 
 
 class StreamUnlinkButton(discord.ui.Button):
-    def __init__(self, parent: "StreamStatusView | StreamHubView"):
+    def __init__(self, parent: "StreamHubView"):
         super().__init__(label="Retirer mon lien", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         await self._hub.cog.clear_stream_link(self._hub.guild, interaction.user.id)
-        hub = self._hub
-        if isinstance(hub, StreamHubView):
-            await hub.reload(interaction)
-            return
-        hub.set_layout(
-            [discord.ui.TextDisplay("**Stream ·** Lien retiré. La fiche ne sera pas postée.")]
-        )
-        hub.stop()
-        await apply_view(interaction, hub)
-
-
-class StreamStatusView(ReviewsLayout):
-    def __init__(
-        self,
-        cog: "Reviews",
-        guild: discord.Guild,
-        user_id: int,
-        hit: MediaHit,
-        channel_id: int,
-    ):
-        super().__init__()
-        self.cog = cog
-        self.guild = guild
-        self.user_id = user_id
-        year = f" ({hit.year})" if hit.year else ""
-        self.set_layout(
-            [
-                discord.ui.TextDisplay(
-                    f"### Stream lié\n"
-                    f"{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
-                    f"-# La fiche sera postée dans <#{channel_id}> à la fin du live."
-                )
-            ],
-            discord.ui.ActionRow(StreamUnlinkButton(self)),
-        )
+        await self._hub.reload(interaction)
 
 
 class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
@@ -2159,6 +2119,18 @@ class StreamHubView(ReviewsLayout):
         self.mine = mine
         self.live = live
         self._build()
+
+    @classmethod
+    async def create(cls, cog: "Reviews", guild: discord.Guild, viewer_id: int) -> "StreamHubView":
+        member = guild.get_member(viewer_id)
+        return cls(
+            cog,
+            guild,
+            viewer_id=viewer_id,
+            links=await cog.list_active_stream_links(guild),
+            mine=await cog.get_stream_link(guild, viewer_id),
+            live=member_stream_source(member) is not None if member else False,
+        )
 
     async def reload(self, interaction: discord.Interaction) -> None:
         self.links = await self.cog.list_active_stream_links(self.guild)
@@ -6019,15 +5991,7 @@ class Reviews(commands.Cog):
         raw = (query or "").strip()
         if not raw:
             await interaction.response.defer(ephemeral=True)
-            member = guild.get_member(interaction.user.id)
-            view = StreamHubView(
-                self,
-                guild,
-                viewer_id=interaction.user.id,
-                links=await self.list_active_stream_links(guild),
-                mine=await self.get_stream_link(guild, interaction.user.id),
-                live=member_stream_source(member) is not None if member else False,
-            )
+            view = await StreamHubView.create(self, guild, interaction.user.id)
             await present_ephemeral_layout(interaction, view)
             return
         member = guild.get_member(interaction.user.id) or interaction.user
