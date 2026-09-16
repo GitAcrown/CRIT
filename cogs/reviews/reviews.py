@@ -144,20 +144,22 @@ async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
 
 
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
-    """Met à jour le message qui porte les boutons, pas un autre webhook."""
+    """Met à jour le message cliqué, pas le defer d'origine."""
     kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
-    message: discord.Message | discord.WebhookMessage | None = None
+    target = interaction.message
     if not interaction.response.is_done():
         await interaction.response.edit_message(**kwargs)
-        message = interaction.message
-    else:
+        bind_view_message(view, target)
+        return
+    if target is not None:
         try:
-            message = await interaction.edit_original_response(**kwargs)
+            message = await target.edit(**kwargs)
+            bind_view_message(view, message)
+            return
         except discord.HTTPException:
-            if interaction.message is None:
-                raise
-            message = await interaction.message.edit(**kwargs)
-    bind_view_message(view, message or interaction.message)
+            pass
+    message = await interaction.edit_original_response(**kwargs)
+    bind_view_message(view, message)
 
 
 class ReviewsLayout(discord.ui.LayoutView):
@@ -1178,15 +1180,33 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         logger.info("Maj fiche publiée %s : %s", wid, exc)
 
 
+async def present_ephemeral_layout(
+    interaction: discord.Interaction,
+    view: ReviewsLayout,
+) -> None:
+    """Menu éphémère autonome : followup après un defer, jamais un edit du thinking."""
+    view._interaction = interaction
+    if not interaction.response.is_done():
+        await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+        await view.attach(interaction)
+        _remember_session_view(interaction, view, getattr(view.message, "id", None))
+        return
+    message = await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+    bind_view_message(view, message)
+    _remember_session_view(interaction, view, getattr(message, "id", None))
+    if interaction.type in (
+        discord.InteractionType.application_command,
+        discord.InteractionType.modal_submit,
+    ):
+        try:
+            await interaction.edit_original_response(content="\u200b")
+        except discord.HTTPException:
+            pass
+
+
 async def send_ephemeral_menu(interaction: discord.Interaction, view: ReviewsLayout) -> None:
     """Nouveau message éphémère — ne jamais éditer la fiche publique."""
-    view._interaction = interaction
-    if interaction.response.is_done():
-        message = await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
-        bind_view_message(view, message)
-        return
-    await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
-    await view.attach(interaction)
+    await present_ephemeral_layout(interaction, view)
 
 
 async def open_personal_hit_menu(
@@ -1297,11 +1317,7 @@ async def open_session_followup(
 ) -> None:
     view = MediaSessionView(cog, guild, [hit], author_id=author_id, ephemeral=True)
     await view.prepare()
-    view._interaction = interaction
-    message = await interaction.followup.send(
-        view=view, ephemeral=True, allowed_mentions=NO_PINGS,
-    )
-    bind_view_message(view, message)
+    await present_ephemeral_layout(interaction, view)
 
 
 # ---------------------------------------------------------------------------
@@ -1974,31 +1990,34 @@ class StreamBindButton(discord.ui.Button):
             channel_id=channel_id,
             source=source,
         )
-        self._hub.stop()
-        await discard_ephemeral_menu(interaction)
-        hit = self._hub.hit
-        year = f" ({hit.year})" if hit.year else ""
-        await interaction.followup.send(
-            f"**Stream lié ·** {type_emoji(hit.media_type)} **{hit.title}**{year}.\n"
-            "-# La fiche sera postée ici quand tu arrêtes le live.",
-            ephemeral=True,
+        bound = StreamStatusView(
+            self._hub.cog,
+            guild,
+            interaction.user.id,
+            self._hub.hit,
+            channel_id,
         )
+        self._hub.stop()
+        await apply_view(interaction, bound)
 
 
 class StreamUnlinkButton(discord.ui.Button):
-    def __init__(self, parent: "StreamStatusView"):
-        super().__init__(label="Retirer le lien", style=discord.ButtonStyle.secondary)
+    def __init__(self, parent: "StreamStatusView | StreamHubView"):
+        super().__init__(label="Retirer mon lien", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        await self._hub.cog.clear_stream_link(self._hub.guild, self._hub.user_id)
-        self._hub.stop()
-        await discard_ephemeral_menu(interaction)
-        await interaction.followup.send(
-            "**Stream ·** Lien retiré. La fiche ne sera pas postée.",
-            ephemeral=True,
+        await self._hub.cog.clear_stream_link(self._hub.guild, interaction.user.id)
+        hub = self._hub
+        if isinstance(hub, StreamHubView):
+            await hub.reload(interaction)
+            return
+        hub.set_layout(
+            [discord.ui.TextDisplay("**Stream ·** Lien retiré. La fiche ne sera pas postée.")]
         )
+        hub.stop()
+        await apply_view(interaction, hub)
 
 
 class StreamStatusView(ReviewsLayout):
@@ -2025,6 +2044,162 @@ class StreamStatusView(ReviewsLayout):
             ],
             discord.ui.ActionRow(StreamUnlinkButton(self)),
         )
+
+
+class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
+    def __init__(self, parent: "StreamHubView"):
+        super().__init__()
+        self._hub = parent
+        self.query_input = discord.ui.TextInput(
+            label="Titre de l'œuvre",
+            placeholder="Ex. Dune 2021, Hades, Blonde…",
+            min_length=2,
+            max_length=80,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        guild = self._hub.guild
+        member = guild.get_member(interaction.user.id)
+        if member_stream_source(member or interaction.user) is None:
+            await interaction.followup.send(
+                "**Stream ·** Tu n'es plus en live. Relance un Go Live, puis réessaie.",
+                ephemeral=True,
+            )
+            return
+        resolved_type = await self._hub.cog._resolve_search_type(guild, interaction.user.id, None)
+        hits = await self._hub.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
+        if not hits:
+            return
+        view = MediaSessionView(
+            self._hub.cog,
+            guild,
+            hits,
+            author_id=interaction.user.id,
+            ephemeral=True,
+            stream_bind=True,
+        )
+        await view.start(interaction, deferred=True)
+
+
+class StreamHubBindButton(discord.ui.Button):
+    def __init__(self, parent: "StreamHubView"):
+        super().__init__(label="Lier mon stream", style=discord.ButtonStyle.green)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        member = self._hub.guild.get_member(interaction.user.id)
+        if member_stream_source(member or interaction.user) is None:
+            await interaction.response.send_message(
+                "**Stream ·** Passe d'abord en live (Go Live), puis reclique.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(StreamSearchModal(self._hub))
+
+
+class StreamHubOpenSelect(discord.ui.Select):
+    def __init__(self, parent: "StreamHubView", links: list[dict[str, Any]]):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(link["hit"].title, 95) or "Sans titre",
+                value=str(index),
+                description=pretty.shorten_text(
+                    f"{type_label(link['hit'].media_type)} · {link['hit'].year or '—'}",
+                    95,
+                ),
+                emoji=select_emoji(link["hit"].media_type),
+            )
+            for index, link in enumerate(links[:25])
+        ]
+        super().__init__(placeholder="Ouvrir une fiche", options=options)
+        self._hub = parent
+        self._links = links
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        hit = self._links[int(self.values[0])]["hit"]
+        await interaction.response.defer()
+        await open_session_followup(
+            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
+        )
+
+
+class StreamHubOpenButton(discord.ui.Button):
+    def __init__(self, parent: "StreamHubView"):
+        super().__init__(label="Ouvrir la fiche", style=discord.ButtonStyle.primary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        hit = self._hub.links[0]["hit"]
+        await interaction.response.defer()
+        await open_session_followup(
+            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
+        )
+
+
+class StreamHubView(ReviewsLayout):
+    """Lives en cours sur le serveur : fiches liées + lier le sien."""
+
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        viewer_id: int,
+        links: list[dict[str, Any]],
+        mine: dict[str, Any] | None,
+        live: bool,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.viewer_id = viewer_id
+        self.links = links
+        self.mine = mine
+        self.live = live
+        self._build()
+
+    async def reload(self, interaction: discord.Interaction) -> None:
+        self.links = await self.cog.list_active_stream_links(self.guild)
+        self.mine = await self.cog.get_stream_link(self.guild, self.viewer_id)
+        member = self.guild.get_member(self.viewer_id)
+        self.live = member_stream_source(member) is not None if member else False
+        self._build()
+        await apply_view(interaction, self)
+
+    def _build(self) -> None:
+        body: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(
+                f"### Streams en cours\n-# {len(self.links)} live(s) lié(s) sur ce serveur"
+            )
+        ]
+        actions: list[discord.ui.ActionRow] = []
+        if not self.links:
+            body.append(discord.ui.TextDisplay(
+                "*Aucun live lié pour le moment. Passe en Go Live, puis **Lier mon stream**.*"
+            ))
+        else:
+            for link in self.links[:8]:
+                hit: MediaHit = link["hit"]
+                year = f" ({hit.year})" if hit.year else ""
+                mention = _mention(self.guild, self.cog.bot, link["user_id"])
+                text = (
+                    f"{mention}\n{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
+                    f"-# {type_label(hit.media_type)}"
+                    + (f"  ·  <#{link['channel_id']}>" if link.get("channel_id") else "")
+                )
+                body.append(sep_tight())
+                body.append(section_with_thumbnail(text, hit.poster_url))
+            if len(self.links) == 1:
+                actions.append(discord.ui.ActionRow(StreamHubOpenButton(self)))
+            else:
+                actions.append(discord.ui.ActionRow(StreamHubOpenSelect(self, self.links)))
+        row: list[discord.ui.Item] = [StreamHubBindButton(self)]
+        if self.mine:
+            row.append(StreamUnlinkButton(self))
+        actions.append(discord.ui.ActionRow(*row))
+        self.set_layout(body, *actions)
 
 
 class ProfileShareButton(discord.ui.Button):
@@ -2327,9 +2502,7 @@ class MediaSessionView(ReviewsLayout):
         self._interaction = interaction
         await self.prepare()
         if deferred:
-            message = await interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
-            bind_view_message(self, message)
-            _remember_session_view(interaction, self, getattr(message, "id", None))
+            await present_ephemeral_layout(interaction, self)
             return
         await interaction.response.send_message(
             view=self, ephemeral=self.ephemeral, allowed_mentions=NO_PINGS
@@ -2774,7 +2947,7 @@ class SharedListHitSelect(discord.ui.Select):
             f"**Liste ·** {error}" if error else f"**Ajouté ·** {hit.title}"
         ))
         done.add_item(box)
-        await interaction.edit_original_response(view=done)
+        await apply_view(interaction, done)
 
 
 class SharedListPickView(ReviewsLayout):
@@ -4165,7 +4338,7 @@ class HelpView(ReviewsLayout):
         commandes = (
             "### Commandes\n"
             "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou signet\n"
-            "`/stream` — lie le live en cours à une œuvre : la fiche est postée à la fin\n"
+            "`/stream` — lives en cours : voir la fiche liée, ou lier le tien\n"
             "`/carnet` — page d'un membre : profil, journal, signets, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
@@ -4184,8 +4357,8 @@ class HelpView(ReviewsLayout):
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
             "(lui seul, des membres, ou tout le serveur). "
             "`/config` peut poster les notes dans un salon différent selon le type. "
-            "`/stream` attend la fin du Go Live "
-            "pour poster la fiche dans le salon où tu as lié l'œuvre. "
+            "`/stream` affiche les œuvres liées aux Go Live en cours "
+            "(y compris ceux des autres) et permet d'y lier le tien. "
             "Tes défauts (date, listes, recherche, annonces) se règlent dans `/preferences`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
@@ -5572,6 +5745,42 @@ class Reviews(commands.Cog):
             "created_at": int(row["created_at"] or 0),
         }
 
+    async def list_stream_links(self, guild: discord.Guild) -> list[dict[str, Any]]:
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            """SELECT user_id, channel_id, hit_json, source, created_at
+               FROM stream_links ORDER BY created_at ASC"""
+        )
+        links: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                raw = json.loads(row["hit_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            links.append(
+                {
+                    "user_id": int(row["user_id"]),
+                    "channel_id": int(row["channel_id"]),
+                    "hit": raw,
+                    "source": str(row["source"] or ""),
+                    "created_at": int(row["created_at"] or 0),
+                }
+            )
+        return links
+
+    async def list_active_stream_links(self, guild: discord.Guild) -> list[dict[str, Any]]:
+        active: list[dict[str, Any]] = []
+        for link in await self.list_stream_links(guild):
+            member = guild.get_member(link["user_id"])
+            if member is None or member_stream_source(member) is None:
+                continue
+            item = dict(link)
+            item["hit"] = hit_from_dict(link["hit"])
+            active.append(item)
+        return active
+
     async def set_stream_link(
         self,
         guild: discord.Guild,
@@ -5791,7 +6000,7 @@ class Reviews(commands.Cog):
     @app_commands.guild_only()
     @app_commands.rename(query="recherche", media_type="type")
     @app_commands.describe(
-        query="Œuvre à lier au live (vide = voir le lien actuel)",
+        query="Œuvre à lier à ton live (vide = lives en cours)",
         media_type="Restreindre à un type (sinon tes types /preferences)",
     )
     @app_commands.choices(media_type=TYPE_CHOICES)
@@ -5801,41 +6010,28 @@ class Reviews(commands.Cog):
         query: str | None = None,
         media_type: str | None = None,
     ) -> None:
-        """Lie le live en cours à une œuvre : la fiche est postée à la fin du stream."""
+        """Voit les œuvres liées aux lives en cours, ou lie la tienne."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
                 "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
             )
-        member = guild.get_member(interaction.user.id) or interaction.user
-        source = member_stream_source(member)
-        existing = await self.get_stream_link(guild, interaction.user.id)
-        if not (query or "").strip():
-            if existing:
-                view = StreamStatusView(
-                    self,
-                    guild,
-                    interaction.user.id,
-                    hit_from_dict(existing["hit"]),
-                    existing["channel_id"],
-                )
-                await interaction.response.send_message(view=view, ephemeral=True)
-                return
-            if source is None:
-                await interaction.response.send_message(
-                    "**Stream ·** Passe d'abord en live (Go Live dans un salon vocal, "
-                    "ou un stream Twitch/YouTube sur ton statut), puis "
-                    "`/stream recherche:` avec le titre.",
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.send_message(
-                "**Stream ·** Tu es en live. Lie une œuvre avec "
-                "`/stream recherche:` — la fiche sera postée ici à la fin.",
-                ephemeral=True,
+        raw = (query or "").strip()
+        if not raw:
+            await interaction.response.defer(ephemeral=True)
+            member = guild.get_member(interaction.user.id)
+            view = StreamHubView(
+                self,
+                guild,
+                viewer_id=interaction.user.id,
+                links=await self.list_active_stream_links(guild),
+                mine=await self.get_stream_link(guild, interaction.user.id),
+                live=member_stream_source(member) is not None if member else False,
             )
+            await present_ephemeral_layout(interaction, view)
             return
-        if source is None:
+        member = guild.get_member(interaction.user.id) or interaction.user
+        if member_stream_source(member) is None:
             await interaction.response.send_message(
                 "**Stream ·** Tu n'es pas en live. Lance un Go Live, puis relance `/stream`.",
                 ephemeral=True,
@@ -5843,7 +6039,7 @@ class Reviews(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         resolved_type = await self._resolve_search_type(guild, interaction.user.id, media_type)
-        hits = await self._search_or_reply(interaction, query.strip(), resolved_type)
+        hits = await self._search_or_reply(interaction, raw, resolved_type)
         if not hits:
             return
         view = MediaSessionView(
@@ -5910,8 +6106,7 @@ class Reviews(commands.Cog):
             viewer_id=interaction.user.id,
         )
         view._interaction = interaction
-        await apply_view(interaction, view)
-        await view.attach(interaction)
+        await present_ephemeral_layout(interaction, view)
 
     @app_commands.command(name="carnet")
     @app_commands.guild_only()
@@ -5988,8 +6183,7 @@ class Reviews(commands.Cog):
             tab="catalogue" if filtered else "recentes",
         )
         view._interaction = interaction
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
-        await view.attach(interaction)
+        await present_ephemeral_layout(interaction, view)
 
     async def _shared_list_choices(
         self, interaction: discord.Interaction, current: str
@@ -6036,8 +6230,7 @@ class Reviews(commands.Cog):
         else:
             view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
         view._interaction = interaction
-        await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
-        await view.attach(interaction)
+        await present_ephemeral_layout(interaction, view)
 
     @critique_listes.autocomplete("liste")
     async def listes_liste_autocomplete(

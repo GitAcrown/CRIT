@@ -11,7 +11,7 @@ Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (
 ## Commandes
 
 - `/search` — catalogues externes : fiche, noter ou signet (autocomplete dès 2 lettres)
-- `/stream` — lie un live Discord (Go Live) à une œuvre ; la fiche est postée à la fin du stream
+- `/stream` — lives en cours (fiches liées) ; lie le tien pour poster la fiche à la fin
 - `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet)
 - `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
 - `/listes` — listes communes : titre, description, droits d'édition, tirage (autocomplete pour ouvrir une liste)
