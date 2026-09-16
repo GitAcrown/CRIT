@@ -2061,37 +2061,29 @@ class StreamHubBindButton(discord.ui.Button):
 
 class StreamHubOpenSelect(discord.ui.Select):
     def __init__(self, parent: "StreamHubView", links: list[dict[str, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(link["hit"].title, 95) or "Sans titre",
-                value=str(index),
-                description=pretty.shorten_text(
-                    f"{type_label(link['hit'].media_type)} · {link['hit'].year or '—'}",
-                    95,
-                ),
-                emoji=select_emoji(link["hit"].media_type),
+        options = []
+        for index, link in enumerate(links[:25]):
+            hit: MediaHit = link["hit"]
+            member = parent.guild.get_member(link["user_id"])
+            who = member.display_name if member else "Membre"
+            year = f" · {hit.year}" if hit.year else ""
+            options.append(
+                discord.SelectOption(
+                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                    value=str(index),
+                    description=pretty.shorten_text(
+                        f"{who} · {type_label(hit.media_type)}{year}",
+                        95,
+                    ),
+                    emoji=select_emoji(hit.media_type),
+                )
             )
-            for index, link in enumerate(links[:25])
-        ]
         super().__init__(placeholder="Ouvrir une fiche", options=options)
         self._hub = parent
         self._links = links
 
     async def callback(self, interaction: discord.Interaction) -> None:
         hit = self._links[int(self.values[0])]["hit"]
-        await interaction.response.defer()
-        await open_session_followup(
-            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
-        )
-
-
-class StreamHubOpenButton(discord.ui.Button):
-    def __init__(self, parent: "StreamHubView"):
-        super().__init__(label="Ouvrir la fiche", style=discord.ButtonStyle.primary)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        hit = self._hub.links[0]["hit"]
         await interaction.response.defer()
         await open_session_followup(
             self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
@@ -2163,14 +2155,14 @@ class StreamHubView(ReviewsLayout):
                 )
                 body.append(sep_tight())
                 body.append(section_with_thumbnail(text, hit.poster_url))
-            if len(self.links) == 1:
-                actions.append(discord.ui.ActionRow(StreamHubOpenButton(self)))
-            else:
-                actions.append(discord.ui.ActionRow(StreamHubOpenSelect(self, self.links)))
-        row: list[discord.ui.Item] = [StreamHubBindButton(self)]
+            actions.append(discord.ui.ActionRow(StreamHubOpenSelect(self, self.links)))
+        row: list[discord.ui.Item] = []
         if self.mine:
             row.append(StreamUnlinkButton(self))
-        actions.append(discord.ui.ActionRow(*row))
+        else:
+            row.append(StreamHubBindButton(self))
+        if row:
+            actions.append(discord.ui.ActionRow(*row))
         self.set_layout(body, *actions)
 
 
