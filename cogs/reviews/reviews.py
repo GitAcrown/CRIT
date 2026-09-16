@@ -2066,6 +2066,7 @@ class StreamBindButton(discord.ui.Button):
             self._hub.hit,
             channel_id=channel_id,
             source=source,
+            post_channel_id=int(interaction.channel_id or 0),
         )
         hub = await StreamHubView.create(self._hub.cog, guild, interaction.user.id)
         self._hub.stop()
@@ -4610,7 +4611,8 @@ class Reviews(commands.Cog):
                 channel_id INTEGER NOT NULL,
                 hit_json TEXT NOT NULL,
                 source TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                post_channel_id INTEGER NOT NULL DEFAULT 0
             )"""
         )
         self.data.link(
@@ -4971,7 +4973,8 @@ class Reviews(commands.Cog):
                 channel_id INTEGER NOT NULL,
                 hit_json TEXT NOT NULL,
                 source TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                post_channel_id INTEGER NOT NULL DEFAULT 0
             )"""
         )
         pref_columns = await db.column_names("preferences")
@@ -4986,6 +4989,11 @@ class Reviews(commands.Cog):
         for name, spec in pref_alters.items():
             if name not in pref_columns:
                 await db.execute(f"ALTER TABLE preferences ADD COLUMN {name} {spec}")
+        stream_columns = await db.column_names("stream_links")
+        if "post_channel_id" not in stream_columns:
+            await db.execute(
+                "ALTER TABLE stream_links ADD COLUMN post_channel_id INTEGER NOT NULL DEFAULT 0"
+            )
         scaled = await db.get_dict_value("settings", "RatingsOnTen")
         if scaled != "1":
             row = await db.fetchone("SELECT MAX(rating) AS m FROM reviews")
@@ -5851,12 +5859,12 @@ class Reviews(commands.Cog):
 
     def _cancel_stream_end(self, guild_id: int, user_id: int) -> None:
         task = self._stream_end_tasks.pop((guild_id, user_id), None)
-        if task is not None:
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
 
     def _cancel_stream_remind(self, guild_id: int, user_id: int) -> None:
         task = self._stream_remind_tasks.pop((guild_id, user_id), None)
-        if task is not None:
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
 
     async def _on_stream_started(self, member: discord.Member, _source: str) -> None:
@@ -5941,7 +5949,8 @@ class Reviews(commands.Cog):
     async def get_stream_link(self, guild: discord.Guild, user_id: int) -> dict[str, Any] | None:
         await self._ensure_schema(guild)
         row = await self.data.get(guild).fetchone(
-            "SELECT channel_id, hit_json, source, created_at FROM stream_links WHERE user_id=?",
+            """SELECT channel_id, hit_json, source, created_at, post_channel_id
+               FROM stream_links WHERE user_id=?""",
             user_id,
         )
         if row is None:
@@ -5957,12 +5966,13 @@ class Reviews(commands.Cog):
             "hit": raw,
             "source": str(row["source"] or ""),
             "created_at": int(row["created_at"] or 0),
+            "post_channel_id": int(_row_field(row, "post_channel_id", 0) or 0),
         }
 
     async def list_stream_links(self, guild: discord.Guild) -> list[dict[str, Any]]:
         await self._ensure_schema(guild)
         rows = await self.data.get(guild).fetchall(
-            """SELECT user_id, channel_id, hit_json, source, created_at
+            """SELECT user_id, channel_id, hit_json, source, created_at, post_channel_id
                FROM stream_links ORDER BY created_at ASC"""
         )
         links: list[dict[str, Any]] = []
@@ -5980,6 +5990,7 @@ class Reviews(commands.Cog):
                     "hit": raw,
                     "source": str(row["source"] or ""),
                     "created_at": int(row["created_at"] or 0),
+                    "post_channel_id": int(_row_field(row, "post_channel_id", 0) or 0),
                 }
             )
         return links
@@ -6020,6 +6031,7 @@ class Reviews(commands.Cog):
         *,
         channel_id: int,
         source: str,
+        post_channel_id: int = 0,
     ) -> None:
         await self._ensure_schema(guild)
         self._cancel_stream_end(guild.id, user_id)
@@ -6027,13 +6039,14 @@ class Reviews(commands.Cog):
         self._stream_session_reminded.add((guild.id, user_id))
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO stream_links
-               (user_id, channel_id, hit_json, source, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               (user_id, channel_id, hit_json, source, created_at, post_channel_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             user_id,
             channel_id,
             json.dumps(hit_to_dict(hit), ensure_ascii=False),
             source,
             int(time.time()),
+            int(post_channel_id or 0),
         )
 
     async def _update_stream_channel(self, guild: discord.Guild, user_id: int, channel_id: int) -> None:
@@ -6046,9 +6059,16 @@ class Reviews(commands.Cog):
             user_id,
         )
 
-    async def clear_stream_link(self, guild: discord.Guild, user_id: int) -> None:
+    async def clear_stream_link(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        *,
+        cancel_end: bool = True,
+    ) -> None:
         await self._ensure_schema(guild)
-        self._cancel_stream_end(guild.id, user_id)
+        if cancel_end:
+            self._cancel_stream_end(guild.id, user_id)
         await self.data.get(guild).execute(
             "DELETE FROM stream_links WHERE user_id=?",
             user_id,
@@ -6071,7 +6091,7 @@ class Reviews(commands.Cog):
             if guild is None:
                 return
             member = guild.get_member(user_id)
-            if member is not None and member_stream_source(member) is not None:
+            if member is not None and member_stream_source(member) == ended:
                 return
             self._stream_session_reminded.discard((guild_id, user_id))
             link = await self.get_stream_link(guild, user_id)
@@ -6085,42 +6105,75 @@ class Reviews(commands.Cog):
             if self._stream_end_tasks.get(key) is asyncio.current_task():
                 self._stream_end_tasks.pop(key, None)
 
+    async def _fetch_messageable(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+    ) -> discord.abc.Messageable | None:
+        channel = resolve_post_channel(guild, channel_id)
+        if channel is not None:
+            return channel
+        if not channel_id:
+            return None
+        try:
+            fetched = await self.bot.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+        if fetched is not None and hasattr(fetched, "send"):
+            return fetched  # type: ignore[return-value]
+        return None
+
+    async def _stream_end_destinations(
+        self,
+        guild: discord.Guild,
+        hit: MediaHit,
+        link: dict[str, Any],
+        member: discord.Member | None,
+    ) -> list[discord.abc.Messageable]:
+        seen: set[int] = set()
+        dests: list[discord.abc.Messageable] = []
+
+        def add(channel: discord.abc.Messageable | None) -> None:
+            channel_id = getattr(channel, "id", None)
+            if channel is None or not channel_id or int(channel_id) in seen:
+                return
+            seen.add(int(channel_id))
+            dests.append(channel)
+
+        add(await self._fetch_messageable(guild, int(link.get("post_channel_id") or 0)))
+        add(await self.get_announce_channel(guild, hit.media_type))
+        voice_id = member_voice_channel_id(member) if member else None
+        add(await self._fetch_messageable(guild, voice_id or int(link.get("channel_id") or 0)))
+        return dests
+
     async def finish_stream_link(self, guild: discord.Guild, user_id: int) -> None:
         self._stream_session_reminded.discard((guild.id, user_id))
         self._cancel_stream_remind(guild.id, user_id)
         link = await self.get_stream_link(guild, user_id)
         if link is None:
             return
-        await self.clear_stream_link(guild, user_id)
         created_at = int(link.get("created_at") or 0)
-        if created_at and int(time.time()) - created_at > STREAM_LINK_MAX_AGE:
+        too_old = bool(created_at and int(time.time()) - created_at > STREAM_LINK_MAX_AGE)
+        await self.clear_stream_link(guild, user_id, cancel_end=False)
+        if too_old:
             return
+        hit = hit_from_dict(link["hit"])
         member = guild.get_member(user_id)
-        channel_id = member_voice_channel_id(member) if member else None
-        if not channel_id:
-            channel_id = int(link.get("channel_id") or 0)
-        channel = resolve_post_channel(guild, channel_id)
-        if channel is None:
-            try:
-                fetched = await self.bot.fetch_channel(channel_id)
-            except discord.HTTPException:
-                fetched = None
-            if fetched is not None and hasattr(fetched, "send"):
-                channel = fetched
-        if channel is None:
-            logger.info("Salon d'annonce stream introuvable (%s)", channel_id)
+        dests = await self._stream_end_destinations(guild, hit, link, member)
+        if not dests:
+            logger.info("Fiche de fin de stream : aucun salon pour poster (%s)", user_id)
             return
         mention = _mention(guild, self.bot, user_id)
-        try:
-            await post_published_fiche(
-                self,
-                guild,
-                hit_from_dict(link["hit"]),
-                channel,
-                banner=f"{mention} · stream terminé",
-            )
-        except Exception:
-            logger.exception("Publication fiche stream impossible")
+        banner = f"{mention} · stream terminé"
+        for channel in dests:
+            try:
+                message = await post_published_fiche(self, guild, hit, channel, banner=banner)
+            except Exception:
+                logger.exception("Publication fiche stream impossible")
+                continue
+            if message is not None:
+                return
+        logger.info("Fiche de fin de stream : envoi impossible dans %s salon(s)", len(dests))
 
     async def _search_or_reply(
         self,
