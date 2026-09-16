@@ -578,6 +578,7 @@ class UserPrefs:
     default_list_edit: str = "owner"
     default_search_type: str = "all"
     announce_notes: bool = True
+    stream_remind: bool = False
 
 
 def today_experienced() -> str:
@@ -639,6 +640,10 @@ def announce_pref_label(value: bool) -> str:
     return "Publier" if value else "Ne pas annoncer"
 
 
+def stream_remind_pref_label(value: bool) -> str:
+    return "Rappel : activé" if value else "Rappel : désactivé"
+
+
 def _row_field(row: Any, key: str, default: Any = None) -> Any:
     try:
         value = row[key]
@@ -658,6 +663,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         default_list_edit=edit_value if edit_value in LIST_EDIT_MODES else "owner",
         default_search_type=search_value,
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
+        stream_remind=bool(int(_row_field(row, "stream_remind", 0) or 0)),
     )
 
 
@@ -720,7 +726,14 @@ def member_stream_source(member: discord.Member | discord.abc.User) -> str | Non
     return None
 
 
-STREAM_END_GRACE = 2.0
+def member_voice_channel_id(member: discord.Member | discord.abc.User) -> int | None:
+    voice = getattr(member, "voice", None)
+    channel = getattr(voice, "channel", None) if voice is not None else None
+    return int(channel.id) if channel is not None else None
+
+
+STREAM_START_GRACE = 5.0
+STREAM_END_GRACE = 60.0
 STREAM_LINK_MAX_AGE = 12 * 3600
 
 
@@ -2040,10 +2053,10 @@ class StreamBindButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        channel_id = interaction.channel_id
+        channel_id = member_voice_channel_id(member or interaction.user)
         if not channel_id:
             await interaction.followup.send(
-                "**Erreur ·** Impossible de savoir où poster la fiche.",
+                "**Stream ·** Rejoins le salon vocal où tu stream, puis relie.",
                 ephemeral=True,
             )
             return
@@ -2071,9 +2084,10 @@ class StreamUnlinkButton(discord.ui.Button):
 
 
 class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
-    def __init__(self, parent: "StreamHubView"):
+    def __init__(self, cog: "Reviews", guild: discord.Guild):
         super().__init__()
-        self._hub = parent
+        self.cog = cog
+        self.guild = guild
         self.query_input = discord.ui.TextInput(
             label="Titre de l'œuvre",
             placeholder="Ex. Dune 2021, Hades, Blonde…",
@@ -2084,7 +2098,7 @@ class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        guild = self._hub.guild
+        guild = self.guild
         member = guild.get_member(interaction.user.id)
         if member_stream_source(member or interaction.user) is None:
             await interaction.followup.send(
@@ -2092,12 +2106,12 @@ class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
                 ephemeral=True,
             )
             return
-        resolved_type = await self._hub.cog._resolve_search_type(guild, interaction.user.id, None)
-        hits = await self._hub.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
+        resolved_type = await self.cog._resolve_search_type(guild, interaction.user.id, None)
+        hits = await self.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
         if not hits:
             return
         view = MediaSessionView(
-            self._hub.cog,
+            self.cog,
             guild,
             hits,
             author_id=interaction.user.id,
@@ -2120,7 +2134,7 @@ class StreamHubBindButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(StreamSearchModal(self._hub))
+        await interaction.response.send_modal(StreamSearchModal(self._hub.cog, self._hub.guild))
 
 
 class StreamHubOpenSelect(discord.ui.Select):
@@ -2228,6 +2242,41 @@ class StreamHubView(ReviewsLayout):
         if row:
             actions.append(discord.ui.ActionRow(*row))
         self.set_layout(body, *actions)
+
+
+class StreamRemindView(ReviewsLayout):
+    """Rappel privé (ou salon vocal) pour lier le live en cours."""
+
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        viewer_id: int,
+        channel_id: int | None,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.viewer_id = viewer_id
+        salon = f" sur <#{channel_id}>" if channel_id else ""
+        body: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(
+                f"{STREAMING} **Stream en cours{salon}**\n"
+                "-# Lie une œuvre pour l'afficher sur ta fiche."
+            )
+        ]
+        self.set_layout(body, discord.ui.ActionRow(StreamHubBindButton(self)))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.viewer_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ce rappel est pour le streamer.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
 
 
 class ProfileShareButton(discord.ui.Button):
@@ -3954,6 +4003,25 @@ class PrefSearchTypeSelect(discord.ui.Select):
         await apply_view(interaction, self._hub)
 
 
+class PrefStreamRemindButton(discord.ui.Button):
+    def __init__(self, parent: "PreferencesView"):
+        on = parent.prefs.stream_remind
+        super().__init__(
+            label=stream_remind_pref_label(on),
+            style=discord.ButtonStyle.green if on else discord.ButtonStyle.secondary,
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.prefs = await self._hub.cog.set_user_prefs(
+            self._hub.guild,
+            self._hub.user_id,
+            stream_remind=not self._hub.prefs.stream_remind,
+        )
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
 class PreferencesView(ReviewsLayout):
     def __init__(
         self,
@@ -3991,7 +4059,7 @@ class PreferencesView(ReviewsLayout):
         prefs = self.prefs
         header = (
             f"## Préférences\n"
-            f"-# Tes défauts sur **{self.guild.name}** — notes, recherches et nouvelles listes."
+            f"-# Tes défauts sur **{self.guild.name}** — notes, recherches, listes et stream."
         )
         children: list[discord.ui.Item] = [
             section_with_thumbnail(header, self.user.display_avatar.url),
@@ -4079,6 +4147,12 @@ class PreferencesView(ReviewsLayout):
                     ],
                 ),
             ),
+            sep_wide(),
+            discord.ui.TextDisplay(
+                "**Rappel de stream**\n"
+                "-# MP quand tu lances un Go Live, pour lier une œuvre. Désactivé par défaut."
+            ),
+            discord.ui.ActionRow(PrefStreamRemindButton(self)),
         ]
         self.clear_items()
         self.add_item(discord.ui.Container(*children))
@@ -4375,7 +4449,7 @@ class HelpView(ReviewsLayout):
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
-            "`/preferences` — tes défauts : date, listes, recherche, annonces\n"
+            "`/preferences` — tes défauts : date, listes, recherche, annonces, rappel stream\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -4390,7 +4464,7 @@ class HelpView(ReviewsLayout):
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres) et permet d'y lier le tien. "
-            "Tes défauts (date, listes, recherche, annonces) se règlent dans `/preferences`.\n"
+            "Tes défauts (date, listes, recherche, annonces, rappel stream) se règlent dans `/preferences`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -4422,6 +4496,8 @@ class Reviews(commands.Cog):
         self._comment_max: dict[int, int] = {}
         self._prefs: dict[tuple[int, int], UserPrefs] = {}
         self._stream_end_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+        self._stream_remind_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+        self._stream_session_reminded: set[tuple[int, int]] = set()
 
         settings = dataio.DictTableBuilder(
             "settings",
@@ -4524,7 +4600,8 @@ class Reviews(commands.Cog):
                 default_list_edit TEXT NOT NULL DEFAULT 'owner',
                 default_spoiler INTEGER NOT NULL DEFAULT 0,
                 default_search_type TEXT NOT NULL DEFAULT 'all',
-                announce_notes INTEGER NOT NULL DEFAULT 1
+                announce_notes INTEGER NOT NULL DEFAULT 1,
+                stream_remind INTEGER NOT NULL DEFAULT 0
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -4590,6 +4667,10 @@ class Reviews(commands.Cog):
         for task in list(self._stream_end_tasks.values()):
             task.cancel()
         self._stream_end_tasks.clear()
+        for task in list(self._stream_remind_tasks.values()):
+            task.cancel()
+        self._stream_remind_tasks.clear()
+        self._stream_session_reminded.clear()
         self.bot.remove_dynamic_items(FicheDynButton, AnnounceDynButton)
         self.bot.tree.remove_command("Voir le carnet", type=discord.AppCommandType.user)
         if self._http is not None:
@@ -4619,15 +4700,28 @@ class Reviews(commands.Cog):
             return
         was_live = bool(before.self_stream)
         still_live = bool(after.self_stream and after.channel)
+        if still_live and after.channel is not None:
+            moved = before.channel is None or before.channel.id != after.channel.id
+            if moved:
+                await self._update_stream_channel(member.guild, member.id, after.channel.id)
+            if not was_live:
+                await self._on_stream_started(member, "voice")
+            return
         if was_live and not still_live:
-            await self._schedule_stream_end(member.guild, member.id, "voice")
+            await self._on_stream_stopped(member, "voice")
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
         if after.bot or after.guild is None:
             return
-        if has_streaming_activity(before) and not has_streaming_activity(after):
-            await self._schedule_stream_end(after.guild, after.id, "activity")
+        was_activity = has_streaming_activity(before)
+        still_activity = has_streaming_activity(after)
+        if still_activity and not was_activity:
+            if member_stream_source(after) == "activity":
+                await self._on_stream_started(after, "activity")
+            return
+        if was_activity and not still_activity and member_stream_source(after) is None:
+            await self._on_stream_stopped(after, "activity")
 
     # ------------------------------------------------------------------
     # Paramètres
@@ -4737,18 +4831,21 @@ class Reviews(commands.Cog):
             cleaned["default_search_type"] = normalize_search_pref(updates["default_search_type"])
         if "announce_notes" in updates:
             cleaned["announce_notes"] = bool(updates["announce_notes"])
+        if "stream_remind" in updates:
+            cleaned["stream_remind"] = bool(updates["stream_remind"])
         prefs = replace(current, **cleaned) if cleaned else current
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
             0,
             prefs.default_search_type,
             int(prefs.announce_notes),
+            int(prefs.stream_remind),
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
@@ -4864,7 +4961,8 @@ class Reviews(commands.Cog):
                 default_list_edit TEXT NOT NULL DEFAULT 'owner',
                 default_spoiler INTEGER NOT NULL DEFAULT 0,
                 default_search_type TEXT NOT NULL DEFAULT 'all',
-                announce_notes INTEGER NOT NULL DEFAULT 1
+                announce_notes INTEGER NOT NULL DEFAULT 1,
+                stream_remind INTEGER NOT NULL DEFAULT 0
             )"""
         )
         await db.execute(
@@ -4883,6 +4981,7 @@ class Reviews(commands.Cog):
             "default_spoiler": "INTEGER NOT NULL DEFAULT 0",
             "default_search_type": "TEXT NOT NULL DEFAULT 'all'",
             "announce_notes": "INTEGER NOT NULL DEFAULT 1",
+            "stream_remind": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
@@ -5755,6 +5854,90 @@ class Reviews(commands.Cog):
         if task is not None:
             task.cancel()
 
+    def _cancel_stream_remind(self, guild_id: int, user_id: int) -> None:
+        task = self._stream_remind_tasks.pop((guild_id, user_id), None)
+        if task is not None:
+            task.cancel()
+
+    async def _on_stream_started(self, member: discord.Member, _source: str) -> None:
+        guild = member.guild
+        self._cancel_stream_end(guild.id, member.id)
+        channel_id = member_voice_channel_id(member)
+        if channel_id:
+            await self._update_stream_channel(guild, member.id, channel_id)
+        await self._schedule_stream_remind(guild, member.id)
+
+    async def _on_stream_stopped(self, member: discord.Member, ended: str) -> None:
+        guild = member.guild
+        self._cancel_stream_remind(guild.id, member.id)
+        await self._schedule_stream_end(guild, member.id, ended)
+
+    async def _schedule_stream_remind(self, guild: discord.Guild, user_id: int) -> None:
+        key = (guild.id, user_id)
+        if key in self._stream_session_reminded:
+            return
+        if await self.get_stream_link(guild, user_id):
+            self._stream_session_reminded.add(key)
+            return
+        prefs = await self.get_user_prefs(guild, user_id)
+        if not prefs.stream_remind:
+            return
+        self._cancel_stream_remind(guild.id, user_id)
+        task = asyncio.create_task(self._confirm_stream_remind(guild.id, user_id))
+        self._stream_remind_tasks[key] = task
+
+    async def _confirm_stream_remind(self, guild_id: int, user_id: int) -> None:
+        try:
+            await asyncio.sleep(STREAM_START_GRACE)
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                return
+            member = guild.get_member(user_id)
+            if member is None or member_stream_source(member) is None:
+                return
+            if await self.get_stream_link(guild, user_id):
+                self._stream_session_reminded.add((guild_id, user_id))
+                return
+            prefs = await self.get_user_prefs(guild, user_id)
+            if not prefs.stream_remind:
+                return
+            if await self._send_stream_remind(guild, member):
+                self._stream_session_reminded.add((guild_id, user_id))
+        except asyncio.CancelledError:
+            return
+        finally:
+            key = (guild_id, user_id)
+            if self._stream_remind_tasks.get(key) is asyncio.current_task():
+                self._stream_remind_tasks.pop(key, None)
+
+    async def _send_stream_remind(self, guild: discord.Guild, member: discord.Member) -> bool:
+        channel_id = member_voice_channel_id(member)
+        view = StreamRemindView(self, guild, viewer_id=member.id, channel_id=channel_id)
+        try:
+            message = await member.send(view=view, allowed_mentions=NO_PINGS)
+            bind_view_message(view, message)
+            return True
+        except discord.HTTPException:
+            pass
+        dest = resolve_post_channel(guild, channel_id)
+        if dest is None and channel_id:
+            try:
+                fetched = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                fetched = None
+            if fetched is not None and hasattr(fetched, "send"):
+                dest = fetched
+        if dest is None:
+            return False
+        view = StreamRemindView(self, guild, viewer_id=member.id, channel_id=channel_id)
+        try:
+            message = await dest.send(view=view, allowed_mentions=NO_PINGS, delete_after=300)
+            bind_view_message(view, message)
+            return True
+        except discord.HTTPException as exc:
+            logger.info("Rappel stream impossible : %s", exc)
+            return False
+
     async def get_stream_link(self, guild: discord.Guild, user_id: int) -> dict[str, Any] | None:
         await self._ensure_schema(guild)
         row = await self.data.get(guild).fetchone(
@@ -5809,6 +5992,9 @@ class Reviews(commands.Cog):
                 continue
             item = dict(link)
             item["hit"] = hit_from_dict(link["hit"])
+            live_channel = member_voice_channel_id(member)
+            if live_channel:
+                item["channel_id"] = live_channel
             active.append(item)
         return active
 
@@ -5837,6 +6023,8 @@ class Reviews(commands.Cog):
     ) -> None:
         await self._ensure_schema(guild)
         self._cancel_stream_end(guild.id, user_id)
+        self._cancel_stream_remind(guild.id, user_id)
+        self._stream_session_reminded.add((guild.id, user_id))
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO stream_links
                (user_id, channel_id, hit_json, source, created_at)
@@ -5846,6 +6034,16 @@ class Reviews(commands.Cog):
             json.dumps(hit_to_dict(hit), ensure_ascii=False),
             source,
             int(time.time()),
+        )
+
+    async def _update_stream_channel(self, guild: discord.Guild, user_id: int, channel_id: int) -> None:
+        link = await self.get_stream_link(guild, user_id)
+        if link is None or int(link.get("channel_id") or 0) == channel_id:
+            return
+        await self.data.get(guild).execute(
+            "UPDATE stream_links SET channel_id=? WHERE user_id=?",
+            channel_id,
+            user_id,
         )
 
     async def clear_stream_link(self, guild: discord.Guild, user_id: int) -> None:
@@ -5858,7 +6056,9 @@ class Reviews(commands.Cog):
 
     async def _schedule_stream_end(self, guild: discord.Guild, user_id: int, ended: str) -> None:
         link = await self.get_stream_link(guild, user_id)
-        if link is None or link["source"] != ended:
+        if link is not None and link["source"] != ended:
+            return
+        if link is None and (guild.id, user_id) not in self._stream_session_reminded:
             return
         self._cancel_stream_end(guild.id, user_id)
         task = asyncio.create_task(self._confirm_stream_end(guild.id, user_id, ended))
@@ -5871,15 +6071,23 @@ class Reviews(commands.Cog):
             if guild is None:
                 return
             member = guild.get_member(user_id)
-            if member is not None and member_stream_source(member) == ended:
+            if member is not None and member_stream_source(member) is not None:
+                return
+            self._stream_session_reminded.discard((guild_id, user_id))
+            link = await self.get_stream_link(guild, user_id)
+            if link is None or link["source"] != ended:
                 return
             await self.finish_stream_link(guild, user_id)
         except asyncio.CancelledError:
             return
         finally:
-            self._stream_end_tasks.pop((guild_id, user_id), None)
+            key = (guild_id, user_id)
+            if self._stream_end_tasks.get(key) is asyncio.current_task():
+                self._stream_end_tasks.pop(key, None)
 
     async def finish_stream_link(self, guild: discord.Guild, user_id: int) -> None:
+        self._stream_session_reminded.discard((guild.id, user_id))
+        self._cancel_stream_remind(guild.id, user_id)
         link = await self.get_stream_link(guild, user_id)
         if link is None:
             return
@@ -5887,16 +6095,20 @@ class Reviews(commands.Cog):
         created_at = int(link.get("created_at") or 0)
         if created_at and int(time.time()) - created_at > STREAM_LINK_MAX_AGE:
             return
-        channel = resolve_post_channel(guild, link["channel_id"])
+        member = guild.get_member(user_id)
+        channel_id = member_voice_channel_id(member) if member else None
+        if not channel_id:
+            channel_id = int(link.get("channel_id") or 0)
+        channel = resolve_post_channel(guild, channel_id)
         if channel is None:
             try:
-                fetched = await self.bot.fetch_channel(link["channel_id"])
+                fetched = await self.bot.fetch_channel(channel_id)
             except discord.HTTPException:
                 fetched = None
             if fetched is not None and hasattr(fetched, "send"):
                 channel = fetched
         if channel is None:
-            logger.info("Salon d'annonce stream introuvable (%s)", link["channel_id"])
+            logger.info("Salon d'annonce stream introuvable (%s)", channel_id)
             return
         mention = _mention(guild, self.bot, user_id)
         try:
@@ -6344,7 +6556,7 @@ class Reviews(commands.Cog):
     @app_commands.command(name="preferences")
     @app_commands.guild_only()
     async def critique_preferences(self, interaction: discord.Interaction) -> None:
-        """Tes défauts : date, listes, recherche et annonces."""
+        """Tes défauts : date, listes, recherche, annonces et rappel stream."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
