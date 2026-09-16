@@ -48,6 +48,7 @@ from .emojis import (
     STAR,
     STAR_EMPTY,
     STAR_HALF,
+    STREAMING,
     TWIN,
     TV,
     XP,
@@ -1022,6 +1023,26 @@ def append_fiche_sections(
         body.append(discord.ui.TextDisplay("\n".join(tail)))
 
 
+def hit_identity(hit: MediaHit | dict[str, Any]) -> tuple[str, str, str]:
+    if isinstance(hit, MediaHit):
+        return (hit.source, str(hit.source_id), hit.media_type)
+    return (
+        str(hit.get("source") or ""),
+        str(hit.get("source_id") or ""),
+        str(hit.get("media_type") or ""),
+    )
+
+
+def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
+    if not channel_ids:
+        return []
+    salons = " · ".join(f"<#{cid}>" for cid in channel_ids)
+    return [
+        discord.ui.TextDisplay(f"{STREAMING} Actuellement en stream sur {salons}"),
+        sep_tight(),
+    ]
+
+
 def fiche_intro(hit: MediaHit) -> list[discord.ui.Item]:
     items: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {_meta_line(hit)}"),
@@ -1049,9 +1070,11 @@ def render_published_fiche(
     wid: str,
     live: bool,
     banner: str = "",
+    stream_channels: list[int] | None = None,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
+    body.extend(stream_live_items(stream_channels or []))
     if banner:
         body.append(discord.ui.TextDisplay(banner))
         body.append(sep_tight())
@@ -1100,6 +1123,7 @@ async def prepare_published_fiche(
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
+    stream_channels = await cog.stream_channels_for_hit(guild, hit)
     wid = create_record({
         "kind": "fiche",
         "guild_id": guild.id,
@@ -1109,7 +1133,14 @@ async def prepare_published_fiche(
         "social": social,
     })
     view = render_published_fiche(
-        hit, avg=avg, count=count, social=social, wid=wid, live=True, banner=banner,
+        hit,
+        avg=avg,
+        count=count,
+        social=social,
+        wid=wid,
+        live=True,
+        banner=banner,
+        stream_channels=stream_channels,
     )
     return view, wid
 
@@ -1169,7 +1200,16 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
     social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
     rec.payload.update({"hit": hit_to_dict(hit), "avg": avg, "count": count, "social": social})
     update_payload(wid, rec.payload)
-    view = render_published_fiche(hit, avg=avg, count=count, social=social, wid=wid, live=True)
+    stream_channels = await cog.stream_channels_for_hit(guild, hit)
+    view = render_published_fiche(
+        hit,
+        avg=avg,
+        count=count,
+        social=social,
+        wid=wid,
+        live=True,
+        stream_channels=stream_channels,
+    )
     if not rec.channel_id or not rec.message_id:
         return
     try:
@@ -1676,10 +1716,19 @@ class MyNoteView(ReviewsLayout):
 class PublicFichePeekView(ReviewsLayout):
     """Menu éphémère lecture seule — ouvert depuis le bouton Fiche public."""
 
-    def __init__(self, hit: MediaHit, *, avg: float | None, count: int, social: str):
+    def __init__(
+        self,
+        hit: MediaHit,
+        *,
+        avg: float | None,
+        count: int,
+        social: str,
+        stream_channels: list[int] | None = None,
+    ):
         super().__init__()
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
+        body.extend(stream_live_items(stream_channels or []))
         body.extend(fiche_intro(hit))
         append_fiche_sections(body, hit, avg=avg, count=count, my_review=None, social_line=social)
         footer = _footer_line(hit)
@@ -1694,7 +1743,8 @@ class PublicFichePeekView(ReviewsLayout):
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
         social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
-        return cls(hit, avg=avg, count=count, social=social)
+        stream_channels = await cog.stream_channels_for_hit(guild, hit)
+        return cls(hit, avg=avg, count=count, social=social, stream_channels=stream_channels)
 
 
 class PublicCritiquesPageButton(discord.ui.Button):
@@ -1722,6 +1772,7 @@ class PublicCritiquesView(ReviewsLayout):
         reviews: list[Any],
         avg: float | None,
         count: int,
+        stream_channels: list[int] | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -1731,6 +1782,7 @@ class PublicCritiquesView(ReviewsLayout):
         self.reviews = reviews
         self.avg = avg
         self.count = count
+        self.stream_channels = stream_channels or []
         self.page = 0
         self._interaction: discord.Interaction | None = None
         self._build()
@@ -1746,7 +1798,17 @@ class PublicCritiquesView(ReviewsLayout):
         media_id = await cog.lookup_media_id(guild, hit)
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
-        return cls(cog, guild, hit, author_id=author_id, reviews=reviews, avg=avg, count=count)
+        stream_channels = await cog.stream_channels_for_hit(guild, hit)
+        return cls(
+            cog,
+            guild,
+            hit,
+            author_id=author_id,
+            reviews=reviews,
+            avg=avg,
+            count=count,
+            stream_channels=stream_channels,
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -1760,7 +1822,9 @@ class PublicCritiquesView(ReviewsLayout):
 
     def _build(self) -> None:
         hit = self.hit
-        body: list[discord.ui.Item] = list(fiche_intro(hit)[:2])
+        body: list[discord.ui.Item] = []
+        body.extend(stream_live_items(self.stream_channels))
+        body.extend(fiche_intro(hit)[:2])
         rows: list[discord.ui.ActionRow] = []
         total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
         if self.reviews:
@@ -2257,6 +2321,7 @@ class MediaSessionView(ReviewsLayout):
         self.on_watchlist = False
         self.reviews: list[Any] = []
         self.social_line = ""
+        self.stream_channels: list[int] = []
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
@@ -2308,6 +2373,7 @@ class MediaSessionView(ReviewsLayout):
             self.reviews,
             viewer_id=self.author_id if self.ephemeral else None,
         )
+        self.stream_channels = await self.cog.stream_channels_for_hit(self.guild, self.hit)
 
     async def save_review(
         self,
@@ -2367,6 +2433,7 @@ class MediaSessionView(ReviewsLayout):
 
         body.append(self._tabs_row())
         body.append(sep_tight())
+        body.extend(stream_live_items(self.stream_channels))
 
         if self.tab == "fiche":
             body.extend(fiche_intro(hit))
@@ -5744,6 +5811,20 @@ class Reviews(commands.Cog):
             item["hit"] = hit_from_dict(link["hit"])
             active.append(item)
         return active
+
+    async def stream_channels_for_hit(self, guild: discord.Guild, hit: MediaHit) -> list[int]:
+        key = hit_identity(hit)
+        seen: set[int] = set()
+        channels: list[int] = []
+        for link in await self.list_active_stream_links(guild):
+            if hit_identity(link["hit"]) != key:
+                continue
+            channel_id = int(link.get("channel_id") or 0)
+            if not channel_id or channel_id in seen:
+                continue
+            seen.add(channel_id)
+            channels.append(channel_id)
+        return channels
 
     async def set_stream_link(
         self,
