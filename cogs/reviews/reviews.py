@@ -4319,13 +4319,13 @@ class PreferencesView(ReviewsLayout):
             sep_wide(),
             discord.ui.Section(
                 "**Rappel de stream**\n"
-                "-# MP quand tu lances un Go Live, pour lier une œuvre. Désactivé par défaut.",
+                "-# MP quand tu lances un Go Live, pour lier une œuvre.",
                 accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
             ),
             sep_wide(),
             discord.ui.Section(
                 "**Statut du salon vocal**\n"
-                "-# Met le nom de l'œuvre en statut du vocal (ex. Hokum (2026)), et le retire à la fin. Activé par défaut.",
+                "-# Ajoute/retire automatiquement le nom de l'œuvre en statut du vocal (ex. \"Dune (2021)\").",
                 accessory=PrefOnOffButton(self, "stream_voice_status", prefs.stream_voice_status),
             ),
         ]
