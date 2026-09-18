@@ -1052,7 +1052,11 @@ def append_fiche_sections(
     tail: list[str] = []
     overview = pretty.shorten_text(hit.overview, 380) if hit.overview else ""
     if overview:
-        tail.append(overview)
+        quoted = "\n".join(
+            f"> *{line}*" if line.strip() else ">"
+            for line in overview.splitlines()
+        )
+        tail.append(quoted)
     elif not official and not count:
         tail.append("-# Aucune description disponible.")
 
@@ -1970,8 +1974,8 @@ class PublicCritiquesView(ReviewsLayout):
             body.append(section_with_thumbnail(text, avatar))
         max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
         if max_page > 0:
-            prev_btn = PublicCritiquesPageButton(self, -1, "← Précédent")
-            next_btn = PublicCritiquesPageButton(self, 1, "Suivant →")
+            prev_btn = PublicCritiquesPageButton(self, -1, "←")
+            next_btn = PublicCritiquesPageButton(self, 1, "→")
             prev_btn.disabled = self.page <= 0
             next_btn.disabled = self.page >= max_page
             rows.append(discord.ui.ActionRow(prev_btn, next_btn))
@@ -2754,9 +2758,9 @@ class MediaSessionView(ReviewsLayout):
             if len(self.reviews) > REVIEWS_PAGE:
                 nav_btns: list[discord.ui.Item] = []
                 if self.review_page > 0:
-                    nav_btns.append(_ReviewPageButton(self, -1, "← Précédent"))
+                    nav_btns.append(_ReviewPageButton(self, -1, "←"))
                 if (self.review_page + 1) * REVIEWS_PAGE < len(self.reviews):
-                    nav_btns.append(_ReviewPageButton(self, 1, "Suivant →"))
+                    nav_btns.append(_ReviewPageButton(self, 1, "→"))
                 if nav_btns:
                     actions.append(discord.ui.ActionRow(*nav_btns))
 
@@ -3320,93 +3324,93 @@ class SharedListBackButton(discord.ui.Button):
         await apply_view(interaction, hub)
 
 
-class SharedListAddButton(discord.ui.Button):
+class SharedListDoneButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Ajouter", style=discord.ButtonStyle.green)
+        super().__init__(label="Terminé", style=discord.ButtonStyle.primary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not self._hub.can_edit(interaction.user.id):
-            await interaction.response.send_message(
-                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
-                ephemeral=True,
-                delete_after=10,
-            )
+        self._hub.menu = "browse"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class SharedListActionsSelect(discord.ui.Select):
+    def __init__(self, parent: "SharedListView"):
+        can_edit = parent.can_edit(parent.viewer_id)
+        owner = parent.is_owner(parent.viewer_id)
+        options: list[discord.SelectOption] = []
+        if can_edit:
+            options.append(discord.SelectOption(
+                label="Ajouter une œuvre",
+                value="add",
+                description="Chercher un titre à mettre dans la liste",
+            ))
+        options.append(discord.SelectOption(
+            label="Partager",
+            value="share",
+            description="Publier la liste dans ce salon",
+        ))
+        if owner:
+            options.append(discord.SelectOption(
+                label="Modifier",
+                value="edit",
+                description="Titre, description et droits",
+            ))
+        if can_edit and parent.items:
+            options.append(discord.SelectOption(
+                label="Retirer une œuvre",
+                value="remove",
+                description="Choisir une œuvre de cette page",
+            ))
+        if owner:
+            options.append(discord.SelectOption(
+                label="Supprimer la liste",
+                value="delete",
+                description="La liste disparaît du serveur",
+            ))
+        super().__init__(placeholder="Actions", options=options)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        action = self.values[0]
+        if action == "add":
+            if not self._hub.can_edit(interaction.user.id):
+                await interaction.response.send_message(
+                    "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                    ephemeral=True,
+                    delete_after=10,
+                )
+                return
+            await interaction.response.send_modal(SharedListAddModal(self._hub))
             return
-        await interaction.response.send_modal(SharedListAddModal(self._hub))
-
-
-class SharedListDrawButton(discord.ui.Button):
-    def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Tirage", style=discord.ButtonStyle.primary, disabled=not parent.items)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        hit = await self._hub.cog.draw_shared_list(self._hub.guild, self._hub.record["id"])
-        if hit is None:
-            await interaction.followup.send("**Tirage ·** Cette liste est vide.", ephemeral=True)
-            return
-        await open_session_followup(
-            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
-        )
-
-
-class SharedListEditButton(discord.ui.Button):
-    def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Modifier", style=discord.ButtonStyle.secondary)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not self._hub.is_owner(interaction.user.id):
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le créateur peut modifier cette liste.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return
-        await interaction.response.send_modal(EditSharedListModal(self._hub))
-
-
-class SharedListShareButton(discord.ui.Button):
-    def __init__(self, parent: "SharedListView"):
-        super().__init__(**_share_button_kwargs())
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        body = self._hub._share_layout()
-        view = discord.ui.LayoutView(timeout=None)
-        if body:
-            view.add_item(discord.ui.Container(*body))
-        message = await publish_layout_message(interaction, view)
-        if message is None:
-            await interaction.followup.send("**Erreur ·** Impossible de publier cette liste.", ephemeral=True)
-            return
-        self._hub.stop()
-        await discard_ephemeral_menu(interaction)
-
-
-class SharedListDeleteButton(discord.ui.Button):
-    def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Supprimer", style=discord.ButtonStyle.red)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not self._hub.is_owner(interaction.user.id):
-            await interaction.response.send_message(
-                "**Action impossible ·** Seul le créateur peut supprimer cette liste.",
-                ephemeral=True,
-                delete_after=10,
-            )
+        if action == "edit":
+            if not self._hub.is_owner(interaction.user.id):
+                await interaction.response.send_message(
+                    "**Action impossible ·** Seul le créateur peut modifier cette liste.",
+                    ephemeral=True,
+                    delete_after=10,
+                )
+                return
+            await interaction.response.send_modal(EditSharedListModal(self._hub))
             return
         await interaction.response.defer()
-        await self._hub.cog.delete_shared_list(self._hub.guild, self._hub.record["id"])
-        hub = await ListsHubView.create(
-            self._hub.cog, self._hub.guild, viewer_id=self._hub.viewer_id,
-        )
-        hub._interaction = interaction
-        await apply_view(interaction, hub)
+        if action == "remove":
+            if not self._hub.can_edit(interaction.user.id):
+                await interaction.followup.send(
+                    "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                    ephemeral=True,
+                )
+                return
+            self._hub.menu = "remove"
+            self._hub._build()
+            await apply_view(interaction, self._hub)
+            return
+        if action == "share":
+            await self._hub.share_list(interaction)
+            return
+        if action == "delete":
+            await self._hub.delete_list(interaction)
 
 
 class SharedListRemoveSelect(discord.ui.Select):
@@ -3472,15 +3476,6 @@ class ListsHubView(ReviewsLayout):
             return False
         return True
 
-    def _page_nav(self, max_page: int) -> discord.ui.ActionRow | None:
-        if max_page <= 0:
-            return None
-        prev_btn = HubPageButton(self, "page", -1, "← Précédent", max_page)
-        next_btn = HubPageButton(self, "page", 1, "Suivant →", max_page)
-        prev_btn.disabled = self.page <= 0
-        next_btn.disabled = self.page >= max_page
-        return discord.ui.ActionRow(prev_btn, next_btn)
-
     def _build(self) -> None:
         body: list[discord.ui.Item] = [
             discord.ui.TextDisplay(
@@ -3512,10 +3507,14 @@ class ListsHubView(ReviewsLayout):
             )
             body.append(discord.ui.TextDisplay(text))
         rows.append(discord.ui.ActionRow(ListsHubOpenSelect(self, page_items)))
-        rows.append(discord.ui.ActionRow(CreateSharedListButton(self)))
-        nav = self._page_nav(max_page)
-        if nav:
-            rows.append(nav)
+        controls: list[discord.ui.Item] = [CreateSharedListButton(self)]
+        if max_page > 0:
+            prev_btn = HubPageButton(self, "page", -1, "←", max_page)
+            next_btn = HubPageButton(self, "page", 1, "→", max_page)
+            prev_btn.disabled = self.page <= 0
+            next_btn.disabled = self.page >= max_page
+            controls.extend([prev_btn, next_btn])
+        rows.append(discord.ui.ActionRow(*controls))
         self.set_layout(body, *rows)
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
@@ -3543,6 +3542,7 @@ class SharedListView(ReviewsLayout):
         self.editor_ids = editor_ids
         self.viewer_id = viewer_id
         self.item_page = 0
+        self.menu = "browse"
         self._interaction: discord.Interaction | None = None
         self._build()
 
@@ -3578,14 +3578,17 @@ class SharedListView(ReviewsLayout):
             return False
         return True
 
-    def _page_nav(self, max_page: int) -> discord.ui.ActionRow | None:
-        if max_page <= 0:
-            return None
-        prev_btn = HubPageButton(self, "item_page", -1, "← Précédent", max_page)
-        next_btn = HubPageButton(self, "item_page", 1, "Suivant →", max_page)
-        prev_btn.disabled = self.item_page <= 0
-        next_btn.disabled = self.item_page >= max_page
-        return discord.ui.ActionRow(prev_btn, next_btn)
+    def _nav_row(self, max_page: int) -> discord.ui.ActionRow:
+        buttons: list[discord.ui.Item] = [SharedListBackButton(self)]
+        if self.menu == "remove":
+            buttons.append(SharedListDoneButton(self))
+        if max_page > 0:
+            prev_btn = HubPageButton(self, "item_page", -1, "←", max_page)
+            next_btn = HubPageButton(self, "item_page", 1, "→", max_page)
+            prev_btn.disabled = self.item_page <= 0
+            next_btn.disabled = self.item_page >= max_page
+            buttons.extend([prev_btn, next_btn])
+        return discord.ui.ActionRow(*buttons)
 
     def _header(self) -> str:
         desc = pretty.shorten_text(self.record["description"], 220) if self.record["description"] else "*Pas de description.*"
@@ -3618,8 +3621,12 @@ class SharedListView(ReviewsLayout):
         return body
 
     def _build(self) -> None:
+        if self.menu == "remove" and (not self.can_edit(self.viewer_id) or not self.items):
+            self.menu = "browse"
         body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
+        max_page = 0
+        page_items: list[tuple[MediaHit, Any]] = []
         if not self.items:
             body.append(discord.ui.TextDisplay("*Cette liste est vide.*"))
         else:
@@ -3644,21 +3651,36 @@ class SharedListView(ReviewsLayout):
                 when = f" · <t:{added_at}:R>" if added_at else ""
                 text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)} · ajouté par {who}{when}"
                 body.append(section_with_thumbnail(text, hit.poster_url))
-            if self.can_edit(self.viewer_id):
-                rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
-            nav = self._page_nav(max_page)
-            if nav:
-                rows.append(nav)
-        actions: list[discord.ui.Item] = [SharedListBackButton(self), SharedListDrawButton(self)]
-        if self.can_edit(self.viewer_id):
-            actions.insert(1, SharedListAddButton(self))
-        if self.is_owner(self.viewer_id):
-            actions.append(SharedListEditButton(self))
-            if len(actions) < 5:
-                actions.append(SharedListDeleteButton(self))
-        rows.append(discord.ui.ActionRow(*actions[:5]))
+        if self.menu == "remove" and page_items:
+            rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
+        else:
+            rows.append(discord.ui.ActionRow(SharedListActionsSelect(self)))
+        rows.append(self._nav_row(max_page))
         self.set_layout(body, *rows)
-        self.add_item(discord.ui.ActionRow(SharedListShareButton(self)))
+
+    async def share_list(self, interaction: discord.Interaction) -> None:
+        body = self._share_layout()
+        view = discord.ui.LayoutView(timeout=None)
+        if body:
+            view.add_item(discord.ui.Container(*body))
+        message = await publish_layout_message(interaction, view)
+        if message is None:
+            await interaction.followup.send("**Erreur ·** Impossible de publier cette liste.", ephemeral=True)
+            return
+        self.stop()
+        await discard_ephemeral_menu(interaction)
+
+    async def delete_list(self, interaction: discord.Interaction) -> None:
+        if not self.is_owner(interaction.user.id):
+            await interaction.followup.send(
+                "**Action impossible ·** Seul le créateur peut supprimer cette liste.",
+                ephemeral=True,
+            )
+            return
+        await self.cog.delete_shared_list(self.guild, self.record["id"])
+        hub = await ListsHubView.create(self.cog, self.guild, viewer_id=self.viewer_id)
+        hub._interaction = interaction
+        await apply_view(interaction, hub)
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         record = await self.cog.get_shared_list(self.guild, self.record["id"])
@@ -3811,8 +3833,8 @@ class ProfileView(ReviewsLayout):
         if max_page <= 0:
             return None
         page = getattr(self, attr)
-        prev_btn = HubPageButton(self, attr, -1, "← Précédent", max_page)
-        next_btn = HubPageButton(self, attr, 1, "Suivant →", max_page)
+        prev_btn = HubPageButton(self, attr, -1, "←", max_page)
+        next_btn = HubPageButton(self, attr, 1, "→", max_page)
         prev_btn.disabled = page <= 0
         next_btn.disabled = page >= max_page
         return discord.ui.ActionRow(prev_btn, next_btn)
@@ -3846,8 +3868,8 @@ class ProfileView(ReviewsLayout):
         sort = JournalSortButton(self)
         if max_page <= 0:
             return discord.ui.ActionRow(sort)
-        prev_btn = HubPageButton(self, "journal_page", -1, "← Précédent", max_page)
-        next_btn = HubPageButton(self, "journal_page", 1, "Suivant →", max_page)
+        prev_btn = HubPageButton(self, "journal_page", -1, "←", max_page)
+        next_btn = HubPageButton(self, "journal_page", 1, "→", max_page)
         prev_btn.disabled = self.journal_page <= 0
         next_btn.disabled = self.journal_page >= max_page
         return discord.ui.ActionRow(prev_btn, sort, next_btn)
@@ -4039,8 +4061,8 @@ class ServerHubView(ReviewsLayout):
         if max_page <= 0:
             return None
         page = getattr(self, attr)
-        prev_btn = HubPageButton(self, attr, -1, "← Précédent", max_page)
-        next_btn = HubPageButton(self, attr, 1, "Suivant →", max_page)
+        prev_btn = HubPageButton(self, attr, -1, "←", max_page)
+        next_btn = HubPageButton(self, attr, 1, "→", max_page)
         prev_btn.disabled = page <= 0
         next_btn.disabled = page >= max_page
         return discord.ui.ActionRow(prev_btn, next_btn)
