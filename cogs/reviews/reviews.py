@@ -1254,6 +1254,37 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         logger.info("Maj fiche publiée %s : %s", wid, exc)
 
 
+async def replace_ephemeral_layout(
+    interaction: discord.Interaction,
+    view: ReviewsLayout,
+) -> None:
+    """Remplace le menu déjà affiché, sans empiler un second message."""
+    view._interaction = interaction
+    if not interaction.response.is_done():
+        if interaction.message is not None:
+            await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
+            bind_view_message(view, interaction.message)
+        else:
+            await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+            await view.attach(interaction)
+        _remember_session_view(interaction, view, getattr(view.message, "id", None))
+        return
+    if interaction.message is not None:
+        try:
+            await apply_view(interaction, view)
+            mid = getattr(view.message, "id", None) or interaction.message.id
+            _remember_session_view(interaction, view, mid)
+            return
+        except discord.HTTPException:
+            pass
+    try:
+        message = await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
+        bind_view_message(view, message)
+        _remember_session_view(interaction, view, getattr(message, "id", None))
+    except discord.HTTPException:
+        await present_ephemeral_layout(interaction, view)
+
+
 async def present_ephemeral_layout(
     interaction: discord.Interaction,
     view: ReviewsLayout,
@@ -2201,7 +2232,7 @@ class StreamBindView(ReviewsLayout):
         self._interaction = interaction
         await self.prepare()
         if deferred:
-            await present_ephemeral_layout(interaction, self)
+            await replace_ephemeral_layout(interaction, self)
             return
         await interaction.response.send_message(view=self, ephemeral=True, allowed_mentions=NO_PINGS)
         await self.attach(interaction)
@@ -2248,7 +2279,7 @@ class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
         self.add_item(self.query_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         guild = self.guild
         member = guild.get_member(interaction.user.id)
         if member_stream_source(member or interaction.user) is None:
@@ -6602,7 +6633,7 @@ class Reviews(commands.Cog):
         if not raw:
             await interaction.response.defer(ephemeral=True)
             view = await StreamHubView.create(self, guild, interaction.user.id)
-            await present_ephemeral_layout(interaction, view)
+            await replace_ephemeral_layout(interaction, view)
             return
         member = guild.get_member(interaction.user.id) or interaction.user
         if member_stream_source(member) is None:
