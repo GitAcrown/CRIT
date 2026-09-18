@@ -234,9 +234,8 @@ class ReviewsLayout(discord.ui.LayoutView):
         for row in rows:
             if row is None:
                 continue
-            if children:
-                children.append(sep_tight())
             children.append(row)
+        children = with_control_separators(children)
         if children:
             self.add_item(discord.ui.Container(*children))
 
@@ -764,6 +763,33 @@ def sep_wide() -> discord.ui.Separator:
     return discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
 
 
+def _is_separator(item: discord.ui.Item) -> bool:
+    return isinstance(item, discord.ui.Separator)
+
+
+def _is_control_row(item: discord.ui.Item) -> bool:
+    return isinstance(item, discord.ui.ActionRow)
+
+
+def with_control_separators(items: list[discord.ui.Item]) -> list[discord.ui.Item]:
+    """Un trait entre le contenu et les boutons/selects, jamais entre deux rangées de contrôles."""
+    out: list[discord.ui.Item] = []
+    last_control: bool | None = None
+    for item in items:
+        if _is_separator(item):
+            if out and _is_separator(out[-1]):
+                continue
+            out.append(item)
+            last_control = None
+            continue
+        is_control = _is_control_row(item)
+        if out and last_control is not None and last_control != is_control and not _is_separator(out[-1]):
+            out.append(sep_tight())
+        out.append(item)
+        last_control = is_control
+    return out
+
+
 def critiques_summary_line(
     hit: MediaHit,
     *,
@@ -988,6 +1014,7 @@ def append_fiche_sections(
     count: int,
     my_review: dict | None,
     social_line: str = "",
+    guild_name: str = "",
 ) -> None:
     head: list[str] = []
     official = _official_line(hit)
@@ -995,8 +1022,9 @@ def append_fiche_sections(
         head.append(official)
     if count:
         stars = format_stars(avg or 0)
+        label = pretty.shorten_text((guild_name or "Serveur").strip() or "Serveur", 40)
         head.append(
-            f"**Serveur** · {stars}  **{format_score(avg or 0, average=True)}**  ·  "
+            f"**{label}** · {stars}  **{format_score(avg or 0, average=True)}**  ·  "
             f"{count} critique{'s' if count > 1 else ''}"
         )
     else:
@@ -1030,7 +1058,6 @@ def append_fiche_sections(
 
     body.append(section_with_thumbnail("\n".join(head), hit.poster_url))
     if tail:
-        body.append(discord.ui.Separator())
         body.append(discord.ui.TextDisplay("\n".join(tail)))
 
 
@@ -1069,15 +1096,16 @@ def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
     ]
 
 
-def fiche_intro(hit: MediaHit) -> list[discord.ui.Item]:
+def fiche_intro(hit: MediaHit, *, backdrop: bool = True) -> list[discord.ui.Item]:
     items: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {_meta_line(hit)}"),
-        sep_tight(),
     ]
-    backdrop = hit.extra.get("backdrop_url")
-    if backdrop:
+    if not backdrop:
+        return items
+    backdrop_url = hit.extra.get("backdrop_url")
+    if backdrop_url:
         try:
-            items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(backdrop)))
+            items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(backdrop_url)))
         except Exception:
             pass
     return items
@@ -1097,6 +1125,7 @@ def render_published_fiche(
     live: bool,
     banner: str = "",
     stream_channels: list[int] | None = None,
+    guild_name: str = "",
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
@@ -1105,17 +1134,18 @@ def render_published_fiche(
         body.append(discord.ui.TextDisplay(banner))
         body.append(sep_tight())
     body.extend(fiche_intro(hit))
-    append_fiche_sections(body, hit, avg=avg, count=count, my_review=None, social_line=social)
+    append_fiche_sections(
+        body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+    )
     footer = _footer_line(hit)
     if footer:
-        body.append(discord.ui.Separator())
         body.append(discord.ui.TextDisplay(f"-# {footer}"))
     if live:
         body.append(discord.ui.ActionRow(
             FicheDynButton(wid, "critiques", label=f"Critiques ({count})"),
             FicheDynButton(wid, "noter", label="Actions", emoji=MORE, style=discord.ButtonStyle.green),
         ))
-    view.add_item(discord.ui.Container(*body))
+    view.add_item(discord.ui.Container(*with_control_separators(body)))
     return view
 
 
@@ -1130,6 +1160,7 @@ def render_published_record(rec: FicheRecord, *, live: bool) -> discord.ui.Layou
         social=str(rec.payload.get("social") or ""),
         wid=rec.id,
         live=live,
+        guild_name=str(rec.payload.get("guild_name") or ""),
     )
 
 
@@ -1153,6 +1184,7 @@ async def prepare_published_fiche(
     wid = create_record({
         "kind": "fiche",
         "guild_id": guild.id,
+        "guild_name": guild.name,
         "hit": hit_to_dict(hit),
         "avg": avg,
         "count": count,
@@ -1167,6 +1199,7 @@ async def prepare_published_fiche(
         live=True,
         banner=banner,
         stream_channels=stream_channels,
+        guild_name=guild.name,
     )
     return view, wid
 
@@ -1224,7 +1257,13 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
-    rec.payload.update({"hit": hit_to_dict(hit), "avg": avg, "count": count, "social": social})
+    rec.payload.update({
+        "hit": hit_to_dict(hit),
+        "avg": avg,
+        "count": count,
+        "social": social,
+        "guild_name": guild.name,
+    })
     update_payload(wid, rec.payload)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
     view = render_published_fiche(
@@ -1235,6 +1274,7 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         wid=wid,
         live=True,
         stream_channels=stream_channels,
+        guild_name=guild.name,
     )
     if not rec.channel_id or not rec.message_id:
         return
@@ -1452,9 +1492,10 @@ def build_announce_view(
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.Separator())
     container.add_item(discord.ui.TextDisplay(f"-# {_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
-    view.add_item(container)
     if live and wid:
-        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, label="Actions")))
+        container.add_item(sep_tight())
+        container.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, label="Actions")))
+    view.add_item(container)
     return view
 
 
@@ -1781,16 +1822,18 @@ class PublicFichePeekView(ReviewsLayout):
         count: int,
         social: str,
         stream_channels: list[int] | None = None,
+        guild_name: str = "",
     ):
         super().__init__()
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
         body.extend(stream_live_items(stream_channels or []))
         body.extend(fiche_intro(hit))
-        append_fiche_sections(body, hit, avg=avg, count=count, my_review=None, social_line=social)
+        append_fiche_sections(
+            body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+        )
         footer = _footer_line(hit)
         if footer:
-            body.append(discord.ui.Separator())
             body.append(discord.ui.TextDisplay(f"-# {footer}"))
         self.set_layout(body)
 
@@ -1801,7 +1844,14 @@ class PublicFichePeekView(ReviewsLayout):
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
         social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
         stream_channels = await cog.stream_channels_for_hit(guild, hit)
-        return cls(hit, avg=avg, count=count, social=social, stream_channels=stream_channels)
+        return cls(
+            hit,
+            avg=avg,
+            count=count,
+            social=social,
+            stream_channels=stream_channels,
+            guild_name=guild.name,
+        )
 
 
 class PublicCritiquesPageButton(discord.ui.Button):
@@ -1881,7 +1931,7 @@ class PublicCritiquesView(ReviewsLayout):
         hit = self.hit
         body: list[discord.ui.Item] = []
         body.extend(stream_live_items(self.stream_channels))
-        body.extend(fiche_intro(hit)[:2])
+        body.extend(fiche_intro(hit, backdrop=False))
         rows: list[discord.ui.ActionRow] = []
         total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
         if self.reviews:
@@ -2237,7 +2287,6 @@ class StreamBindView(ReviewsLayout):
         if len(self.hits) > 1:
             body.append(discord.ui.TextDisplay(f"-# {len(self.hits)} résultat(s)"))
             body.append(discord.ui.ActionRow(StreamHitSelect(self, self.hits, self.selected)))
-            body.append(sep_tight())
         body.extend(stream_mini_items(hit))
         if self.linked_to_selected():
             action = StreamMiniUnlinkButton(self)
@@ -2648,10 +2697,8 @@ class MediaSessionView(ReviewsLayout):
                         "-# Aucun film ou série trouvé — précise le type si besoin."
                     ))
             body.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
-            body.append(sep_tight())
 
         body.append(self._tabs_row())
-        body.append(sep_tight())
         body.extend(stream_live_items(self.stream_channels))
 
         if self.tab == "fiche":
@@ -2663,13 +2710,13 @@ class MediaSessionView(ReviewsLayout):
                 count=self.count,
                 my_review=self.my_review if self.ephemeral and not self.published_wid else None,
                 social_line=self.social_line,
+                guild_name=self.guild.name,
             )
             footer = _footer_line(hit)
             if footer:
-                body.append(discord.ui.Separator())
                 body.append(discord.ui.TextDisplay(f"-# {footer}"))
         else:
-            body.extend(fiche_intro(hit)[:2])
+            body.extend(fiche_intro(hit, backdrop=False))
             total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
             if self.reviews:
                 max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
