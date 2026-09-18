@@ -579,6 +579,7 @@ class UserPrefs:
     default_search_type: str = "all"
     announce_notes: bool = True
     stream_remind: bool = False
+    stream_voice_status: bool = True
 
 
 def today_experienced() -> str:
@@ -644,6 +645,10 @@ def stream_remind_pref_label(value: bool) -> str:
     return "Rappel : activé" if value else "Rappel : désactivé"
 
 
+def stream_voice_status_pref_label(value: bool) -> str:
+    return "Statut vocal : activé" if value else "Statut vocal : désactivé"
+
+
 def _row_field(row: Any, key: str, default: Any = None) -> Any:
     try:
         value = row[key]
@@ -664,6 +669,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         default_search_type=search_value,
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
         stream_remind=bool(int(_row_field(row, "stream_remind", 0) or 0)),
+        stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
     )
 
 
@@ -1044,6 +1050,21 @@ def hit_identity(hit: MediaHit | dict[str, Any]) -> tuple[str, str, str]:
         str(hit.get("source_id") or ""),
         str(hit.get("media_type") or ""),
     )
+
+
+def stream_status_text(hit: MediaHit) -> str:
+    title = (hit.title or "Sans titre").strip()
+    label = f"{title} ({hit.year})" if hit.year else title
+    return pretty.shorten_text(label, 100)
+
+
+def stream_mini_items(hit: MediaHit) -> list[discord.ui.Item]:
+    year = f" ({hit.year})" if hit.year else ""
+    text = (
+        f"{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
+        f"-# {_meta_line(hit)}"
+    )
+    return [section_with_thumbnail(text, hit.poster_url)]
 
 
 def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
@@ -2037,8 +2058,34 @@ class FicheShareButton(discord.ui.Button):
             self._hub.stop()
 
 
-class StreamBindButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+class StreamHitSelect(discord.ui.Select):
+    def __init__(self, parent: "StreamBindView", hits: list[MediaHit], selected: int):
+        options = []
+        for index, hit in enumerate(hits[:25]):
+            options.append(
+                discord.SelectOption(
+                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                    value=str(index),
+                    description=select_hit_description(hit),
+                    emoji=select_emoji(hit.media_type),
+                    default=index == selected,
+                )
+            )
+        super().__init__(
+            placeholder="Choisir une œuvre",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.selected = int(self.values[0])
+        await self._hub.show_selected(interaction)
+
+
+class StreamMiniBindButton(discord.ui.Button):
+    def __init__(self, parent: "StreamBindView"):
         super().__init__(label="Lier au stream", style=discord.ButtonStyle.green)
         self._hub = parent
 
@@ -2071,6 +2118,109 @@ class StreamBindButton(discord.ui.Button):
         hub = await StreamHubView.create(self._hub.cog, guild, interaction.user.id)
         self._hub.stop()
         await apply_view(interaction, hub)
+
+
+class StreamMiniUnlinkButton(discord.ui.Button):
+    def __init__(self, parent: "StreamBindView"):
+        super().__init__(label="Retirer le lien", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._hub.cog.clear_stream_link(self._hub.guild, interaction.user.id)
+        self._hub.mine = await self._hub.cog.get_stream_link(self._hub.guild, self._hub.author_id)
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class StreamBindView(ReviewsLayout):
+    """Recherche épurée pour lier (ou délier) un live."""
+
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        hits: list[MediaHit],
+        *,
+        author_id: int,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.hits = hits
+        self.author_id = author_id
+        self.selected = 0
+        self.mine: dict[str, Any] | None = None
+        self._enriched: set[int] = set()
+        self._interaction: discord.Interaction | None = None
+        self._message: discord.WebhookMessage | discord.Message | None = None
+
+    @property
+    def hit(self) -> MediaHit:
+        return self.hits[self.selected]
+
+    def linked_to_selected(self) -> bool:
+        if self.mine is None:
+            return False
+        return hit_identity(self.mine["hit"]) == hit_identity(self.hit)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul l'auteur de la commande peut utiliser ce menu.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    async def prepare(self) -> None:
+        self.mine = await self.cog.get_stream_link(self.guild, self.author_id)
+        await self.enrich_selected()
+        self._enriched.add(self.selected)
+        self._build()
+
+    async def enrich_selected(self) -> None:
+        if self.cog.catalog is None:
+            return
+        try:
+            self.hits[self.selected] = await self.cog.catalog.enrich(self.hit)
+        except Exception:
+            logger.exception("Enrichissement de mini-fiche stream impossible")
+
+    async def show_selected(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        if self.selected not in self._enriched:
+            await self.enrich_selected()
+            self._enriched.add(self.selected)
+        self._build()
+        await self.push(interaction)
+
+    async def start(self, interaction: discord.Interaction, *, deferred: bool = False) -> None:
+        self._interaction = interaction
+        await self.prepare()
+        if deferred:
+            await present_ephemeral_layout(interaction, self)
+            return
+        await interaction.response.send_message(view=self, ephemeral=True, allowed_mentions=NO_PINGS)
+        await self.attach(interaction)
+
+    def _build(self) -> None:
+        hit = self.hit
+        body: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("### Lier au stream\n-# Choisis l'œuvre à afficher sur ton live")
+        ]
+        if len(self.hits) > 1:
+            body.append(discord.ui.TextDisplay(f"-# {len(self.hits)} résultat(s)"))
+            body.append(discord.ui.ActionRow(StreamHitSelect(self, self.hits, self.selected)))
+            body.append(sep_tight())
+        body.extend(stream_mini_items(hit))
+        if self.linked_to_selected():
+            action = StreamMiniUnlinkButton(self)
+        else:
+            action = StreamMiniBindButton(self)
+        self.set_layout(body, discord.ui.ActionRow(action))
 
 
 class StreamUnlinkButton(discord.ui.Button):
@@ -2111,13 +2261,11 @@ class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
         hits = await self.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
         if not hits:
             return
-        view = MediaSessionView(
+        view = StreamBindView(
             self.cog,
             guild,
             hits,
             author_id=interaction.user.id,
-            ephemeral=True,
-            stream_bind=True,
         )
         await view.start(interaction, deferred=True)
 
@@ -2351,7 +2499,6 @@ class MediaSessionView(ReviewsLayout):
         pending_rating: float | None = None,
         pending_comment: str = "",
         selected: int = 0,
-        stream_bind: bool = False,
     ):
         super().__init__()
         self.cog = cog
@@ -2362,7 +2509,6 @@ class MediaSessionView(ReviewsLayout):
         self.pending_rating = pending_rating
         self.pending_comment = pending_comment
         self.selected = selected
-        self.stream_bind = stream_bind
         self.tab = "fiche"
         self.review_page = 0
         self.avg: float | None = None
@@ -2559,9 +2705,7 @@ class MediaSessionView(ReviewsLayout):
                 page_actions.append(WatchlistButton(self))
             actions.append(discord.ui.ActionRow(*page_actions[:5]))
         self.set_layout(body, *actions)
-        if self.stream_bind:
-            self.add_item(discord.ui.ActionRow(StreamBindButton(self)))
-        elif not self.published_wid:
+        if not self.published_wid:
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
@@ -4023,6 +4167,25 @@ class PrefStreamRemindButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
+class PrefStreamVoiceStatusButton(discord.ui.Button):
+    def __init__(self, parent: "PreferencesView"):
+        on = parent.prefs.stream_voice_status
+        super().__init__(
+            label=stream_voice_status_pref_label(on),
+            style=discord.ButtonStyle.green if on else discord.ButtonStyle.secondary,
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.prefs = await self._hub.cog.set_user_prefs(
+            self._hub.guild,
+            self._hub.user_id,
+            stream_voice_status=not self._hub.prefs.stream_voice_status,
+        )
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
 class PreferencesView(ReviewsLayout):
     def __init__(
         self,
@@ -4154,6 +4317,12 @@ class PreferencesView(ReviewsLayout):
                 "-# MP quand tu lances un Go Live, pour lier une œuvre. Désactivé par défaut."
             ),
             discord.ui.ActionRow(PrefStreamRemindButton(self)),
+            sep_wide(),
+            discord.ui.TextDisplay(
+                "**Statut du salon vocal**\n"
+                "-# Met le nom de l'œuvre en statut du vocal (ex. Hokum (2026)), et le retire à la fin. Activé par défaut."
+            ),
+            discord.ui.ActionRow(PrefStreamVoiceStatusButton(self)),
         ]
         self.clear_items()
         self.add_item(discord.ui.Container(*children))
@@ -4450,7 +4619,7 @@ class HelpView(ReviewsLayout):
             "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
-            "`/preferences` — tes défauts : date, listes, recherche, annonces, rappel stream\n"
+            "`/preferences` — tes défauts : date, listes, recherche, annonces, stream\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -4465,7 +4634,7 @@ class HelpView(ReviewsLayout):
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres) et permet d'y lier le tien. "
-            "Tes défauts (date, listes, recherche, annonces, rappel stream) se règlent dans `/preferences`.\n"
+            "Tes défauts (date, listes, recherche, annonces, rappel et statut vocal) se règlent dans `/preferences`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -4602,7 +4771,8 @@ class Reviews(commands.Cog):
                 default_spoiler INTEGER NOT NULL DEFAULT 0,
                 default_search_type TEXT NOT NULL DEFAULT 'all',
                 announce_notes INTEGER NOT NULL DEFAULT 1,
-                stream_remind INTEGER NOT NULL DEFAULT 0
+                stream_remind INTEGER NOT NULL DEFAULT 0,
+                stream_voice_status INTEGER NOT NULL DEFAULT 1
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -4612,7 +4782,8 @@ class Reviews(commands.Cog):
                 hit_json TEXT NOT NULL,
                 source TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                post_channel_id INTEGER NOT NULL DEFAULT 0
+                post_channel_id INTEGER NOT NULL DEFAULT 0,
+                voice_status INTEGER NOT NULL DEFAULT 0
             )"""
         )
         self.data.link(
@@ -4835,12 +5006,14 @@ class Reviews(commands.Cog):
             cleaned["announce_notes"] = bool(updates["announce_notes"])
         if "stream_remind" in updates:
             cleaned["stream_remind"] = bool(updates["stream_remind"])
+        if "stream_voice_status" in updates:
+            cleaned["stream_voice_status"] = bool(updates["stream_voice_status"])
         prefs = replace(current, **cleaned) if cleaned else current
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
@@ -4848,6 +5021,7 @@ class Reviews(commands.Cog):
             prefs.default_search_type,
             int(prefs.announce_notes),
             int(prefs.stream_remind),
+            int(prefs.stream_voice_status),
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
@@ -4964,7 +5138,8 @@ class Reviews(commands.Cog):
                 default_spoiler INTEGER NOT NULL DEFAULT 0,
                 default_search_type TEXT NOT NULL DEFAULT 'all',
                 announce_notes INTEGER NOT NULL DEFAULT 1,
-                stream_remind INTEGER NOT NULL DEFAULT 0
+                stream_remind INTEGER NOT NULL DEFAULT 0,
+                stream_voice_status INTEGER NOT NULL DEFAULT 1
             )"""
         )
         await db.execute(
@@ -4974,7 +5149,8 @@ class Reviews(commands.Cog):
                 hit_json TEXT NOT NULL,
                 source TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                post_channel_id INTEGER NOT NULL DEFAULT 0
+                post_channel_id INTEGER NOT NULL DEFAULT 0,
+                voice_status INTEGER NOT NULL DEFAULT 0
             )"""
         )
         pref_columns = await db.column_names("preferences")
@@ -4985,6 +5161,7 @@ class Reviews(commands.Cog):
             "default_search_type": "TEXT NOT NULL DEFAULT 'all'",
             "announce_notes": "INTEGER NOT NULL DEFAULT 1",
             "stream_remind": "INTEGER NOT NULL DEFAULT 0",
+            "stream_voice_status": "INTEGER NOT NULL DEFAULT 1",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
@@ -4993,6 +5170,10 @@ class Reviews(commands.Cog):
         if "post_channel_id" not in stream_columns:
             await db.execute(
                 "ALTER TABLE stream_links ADD COLUMN post_channel_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "voice_status" not in stream_columns:
+            await db.execute(
+                "ALTER TABLE stream_links ADD COLUMN voice_status INTEGER NOT NULL DEFAULT 0"
             )
         scaled = await db.get_dict_value("settings", "RatingsOnTen")
         if scaled != "1":
@@ -5949,7 +6130,7 @@ class Reviews(commands.Cog):
     async def get_stream_link(self, guild: discord.Guild, user_id: int) -> dict[str, Any] | None:
         await self._ensure_schema(guild)
         row = await self.data.get(guild).fetchone(
-            """SELECT channel_id, hit_json, source, created_at, post_channel_id
+            """SELECT channel_id, hit_json, source, created_at, post_channel_id, voice_status
                FROM stream_links WHERE user_id=?""",
             user_id,
         )
@@ -5967,12 +6148,13 @@ class Reviews(commands.Cog):
             "source": str(row["source"] or ""),
             "created_at": int(row["created_at"] or 0),
             "post_channel_id": int(_row_field(row, "post_channel_id", 0) or 0),
+            "voice_status": int(_row_field(row, "voice_status", 0) or 0),
         }
 
     async def list_stream_links(self, guild: discord.Guild) -> list[dict[str, Any]]:
         await self._ensure_schema(guild)
         rows = await self.data.get(guild).fetchall(
-            """SELECT user_id, channel_id, hit_json, source, created_at, post_channel_id
+            """SELECT user_id, channel_id, hit_json, source, created_at, post_channel_id, voice_status
                FROM stream_links ORDER BY created_at ASC"""
         )
         links: list[dict[str, Any]] = []
@@ -5991,6 +6173,7 @@ class Reviews(commands.Cog):
                     "source": str(row["source"] or ""),
                     "created_at": int(row["created_at"] or 0),
                     "post_channel_id": int(_row_field(row, "post_channel_id", 0) or 0),
+                    "voice_status": int(_row_field(row, "voice_status", 0) or 0),
                 }
             )
         return links
@@ -6023,6 +6206,62 @@ class Reviews(commands.Cog):
             channels.append(channel_id)
         return channels
 
+    async def _voice_channel_for_status(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+    ) -> discord.VoiceChannel | discord.StageChannel | None:
+        if not channel_id:
+            return None
+        channel = guild.get_channel(int(channel_id))
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            return channel
+        try:
+            fetched = await self.bot.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+        return fetched if isinstance(fetched, (discord.VoiceChannel, discord.StageChannel)) else None
+
+    async def _set_voice_channel_status(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        hit: MediaHit | None,
+    ) -> bool:
+        channel = await self._voice_channel_for_status(guild, channel_id)
+        if channel is None:
+            return False
+        text = stream_status_text(hit) if hit is not None else None
+        try:
+            await channel.edit(status=text)
+            return True
+        except TypeError:
+            logger.info("Statut vocal non supporté")
+            return False
+        except discord.HTTPException as exc:
+            logger.info("Statut vocal impossible (%s) : %s", channel_id, exc)
+            return False
+
+    async def _refresh_voice_channel_status(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+        *,
+        we_owned: bool,
+    ) -> None:
+        if not channel_id or not we_owned:
+            return
+        others = [
+            link
+            for link in await self.list_active_stream_links(guild)
+            if int(link.get("channel_id") or 0) == int(channel_id)
+            and int(link.get("voice_status") or 0)
+        ]
+        if others:
+            await self._set_voice_channel_status(guild, channel_id, others[0]["hit"])
+            return
+        await self._set_voice_channel_status(guild, channel_id, None)
+
     async def set_stream_link(
         self,
         guild: discord.Guild,
@@ -6034,30 +6273,58 @@ class Reviews(commands.Cog):
         post_channel_id: int = 0,
     ) -> None:
         await self._ensure_schema(guild)
+        old = await self.get_stream_link(guild, user_id)
         self._cancel_stream_end(guild.id, user_id)
         self._cancel_stream_remind(guild.id, user_id)
         self._stream_session_reminded.add((guild.id, user_id))
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO stream_links
-               (user_id, channel_id, hit_json, source, created_at, post_channel_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (user_id, channel_id, hit_json, source, created_at, post_channel_id, voice_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             channel_id,
             json.dumps(hit_to_dict(hit), ensure_ascii=False),
             source,
             int(time.time()),
             int(post_channel_id or 0),
+            0,
         )
+        prefs = await self.get_user_prefs(guild, user_id)
+        owned = False
+        old_channel = int(old.get("channel_id") or 0) if old else 0
+        old_owned = bool(old and int(old.get("voice_status") or 0))
+        if old_owned and old_channel and old_channel != channel_id:
+            await self._refresh_voice_channel_status(guild, old_channel, we_owned=True)
+        if prefs.stream_voice_status:
+            owned = await self._set_voice_channel_status(guild, channel_id, hit)
+        elif old_owned and old_channel == channel_id:
+            await self._refresh_voice_channel_status(guild, channel_id, we_owned=True)
+        if owned:
+            await self.data.get(guild).execute(
+                "UPDATE stream_links SET voice_status=1 WHERE user_id=?",
+                user_id,
+            )
 
     async def _update_stream_channel(self, guild: discord.Guild, user_id: int, channel_id: int) -> None:
         link = await self.get_stream_link(guild, user_id)
         if link is None or int(link.get("channel_id") or 0) == channel_id:
             return
+        old_channel = int(link.get("channel_id") or 0)
+        owned = bool(int(link.get("voice_status") or 0))
         await self.data.get(guild).execute(
             "UPDATE stream_links SET channel_id=? WHERE user_id=?",
             channel_id,
             user_id,
         )
+        if not owned:
+            return
+        await self._refresh_voice_channel_status(guild, old_channel, we_owned=True)
+        still = await self._set_voice_channel_status(guild, channel_id, hit_from_dict(link["hit"]))
+        if not still:
+            await self.data.get(guild).execute(
+                "UPDATE stream_links SET voice_status=0 WHERE user_id=?",
+                user_id,
+            )
 
     async def clear_stream_link(
         self,
@@ -6067,12 +6334,17 @@ class Reviews(commands.Cog):
         cancel_end: bool = True,
     ) -> None:
         await self._ensure_schema(guild)
+        link = await self.get_stream_link(guild, user_id)
         if cancel_end:
             self._cancel_stream_end(guild.id, user_id)
         await self.data.get(guild).execute(
             "DELETE FROM stream_links WHERE user_id=?",
             user_id,
         )
+        if link and int(link.get("voice_status") or 0):
+            await self._refresh_voice_channel_status(
+                guild, int(link.get("channel_id") or 0), we_owned=True,
+            )
 
     async def _schedule_stream_end(self, guild: discord.Guild, user_id: int, ended: str) -> None:
         link = await self.get_stream_link(guild, user_id)
@@ -6344,13 +6616,11 @@ class Reviews(commands.Cog):
         hits = await self._search_or_reply(interaction, raw, resolved_type)
         if not hits:
             return
-        view = MediaSessionView(
+        view = StreamBindView(
             self,
             guild,
             hits,
             author_id=interaction.user.id,
-            ephemeral=True,
-            stream_bind=True,
         )
         await view.start(interaction, deferred=True)
 
@@ -6609,7 +6879,7 @@ class Reviews(commands.Cog):
     @app_commands.command(name="preferences")
     @app_commands.guild_only()
     async def critique_preferences(self, interaction: discord.Interaction) -> None:
-        """Tes défauts : date, listes, recherche, annonces et rappel stream."""
+        """Tes défauts : date, listes, recherche, annonces et stream."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
