@@ -641,14 +641,6 @@ def announce_pref_label(value: bool) -> str:
     return "Publier" if value else "Ne pas annoncer"
 
 
-def stream_remind_pref_label(value: bool) -> str:
-    return "Rappel : activé" if value else "Rappel : désactivé"
-
-
-def stream_voice_status_pref_label(value: bool) -> str:
-    return "Statut vocal : activé" if value else "Statut vocal : désactivé"
-
-
 def _row_field(row: Any, key: str, default: Any = None) -> Any:
     try:
         value = row[key]
@@ -4179,39 +4171,21 @@ class PrefSearchTypeSelect(discord.ui.Select):
         await apply_view(interaction, self._hub)
 
 
-class PrefStreamRemindButton(discord.ui.Button):
-    def __init__(self, parent: "PreferencesView"):
-        on = parent.prefs.stream_remind
+class PrefOnOffButton(discord.ui.Button):
+    def __init__(self, parent: "PreferencesView", field: str, on: bool):
         super().__init__(
-            label=stream_remind_pref_label(on),
+            label="ON" if on else "OFF",
             style=discord.ButtonStyle.green if on else discord.ButtonStyle.secondary,
         )
         self._hub = parent
+        self._field = field
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        current = bool(getattr(self._hub.prefs, self._field))
         self._hub.prefs = await self._hub.cog.set_user_prefs(
             self._hub.guild,
             self._hub.user_id,
-            stream_remind=not self._hub.prefs.stream_remind,
-        )
-        self._hub._build()
-        await apply_view(interaction, self._hub)
-
-
-class PrefStreamVoiceStatusButton(discord.ui.Button):
-    def __init__(self, parent: "PreferencesView"):
-        on = parent.prefs.stream_voice_status
-        super().__init__(
-            label=stream_voice_status_pref_label(on),
-            style=discord.ButtonStyle.green if on else discord.ButtonStyle.secondary,
-        )
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.prefs = await self._hub.cog.set_user_prefs(
-            self._hub.guild,
-            self._hub.user_id,
-            stream_voice_status=not self._hub.prefs.stream_voice_status,
+            **{self._field: not current},
         )
         self._hub._build()
         await apply_view(interaction, self._hub)
@@ -4343,17 +4317,17 @@ class PreferencesView(ReviewsLayout):
                 ),
             ),
             sep_wide(),
-            discord.ui.TextDisplay(
+            discord.ui.Section(
                 "**Rappel de stream**\n"
-                "-# MP quand tu lances un Go Live, pour lier une œuvre. Désactivé par défaut."
+                "-# MP quand tu lances un Go Live, pour lier une œuvre. Désactivé par défaut.",
+                accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
             ),
-            discord.ui.ActionRow(PrefStreamRemindButton(self)),
             sep_wide(),
-            discord.ui.TextDisplay(
+            discord.ui.Section(
                 "**Statut du salon vocal**\n"
-                "-# Met le nom de l'œuvre en statut du vocal (ex. Hokum (2026)), et le retire à la fin. Activé par défaut."
+                "-# Met le nom de l'œuvre en statut du vocal (ex. Hokum (2026)), et le retire à la fin. Activé par défaut.",
+                accessory=PrefOnOffButton(self, "stream_voice_status", prefs.stream_voice_status),
             ),
-            discord.ui.ActionRow(PrefStreamVoiceStatusButton(self)),
         ]
         self.clear_items()
         self.add_item(discord.ui.Container(*children))
