@@ -3324,6 +3324,16 @@ class SharedListBackButton(discord.ui.Button):
         await apply_view(interaction, hub)
 
 
+class SharedListShareButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(**_share_button_kwargs())
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._hub.share_list(interaction)
+
+
 class SharedListDoneButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
         super().__init__(label="Terminé", style=discord.ButtonStyle.primary)
@@ -3346,11 +3356,6 @@ class SharedListActionsSelect(discord.ui.Select):
                 value="add",
                 description="Chercher un titre à mettre dans la liste",
             ))
-        options.append(discord.SelectOption(
-            label="Partager",
-            value="share",
-            description="Publier la liste dans ce salon",
-        ))
         if owner:
             options.append(discord.SelectOption(
                 label="Modifier",
@@ -3405,9 +3410,6 @@ class SharedListActionsSelect(discord.ui.Select):
             self._hub.menu = "remove"
             self._hub._build()
             await apply_view(interaction, self._hub)
-            return
-        if action == "share":
-            await self._hub.share_list(interaction)
             return
         if action == "delete":
             await self._hub.delete_list(interaction)
@@ -3653,10 +3655,11 @@ class SharedListView(ReviewsLayout):
                 body.append(section_with_thumbnail(text, hit.poster_url))
         if self.menu == "remove" and page_items:
             rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
-        else:
+        elif self.can_edit(self.viewer_id) or self.is_owner(self.viewer_id):
             rows.append(discord.ui.ActionRow(SharedListActionsSelect(self)))
         rows.append(self._nav_row(max_page))
         self.set_layout(body, *rows)
+        self.add_item(discord.ui.ActionRow(SharedListShareButton(self)))
 
     async def share_list(self, interaction: discord.Interaction) -> None:
         body = self._share_layout()
