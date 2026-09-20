@@ -4563,7 +4563,7 @@ class CustomView(ReviewsLayout):
             else skin.description
         )
         return discord.ui.Section(
-            f"**{skin.name}**{status}\n{skin.preview(10)}\n{skin.preview(7)}\n-# {hint}",
+            f"**{skin.name}**{status}\n{skin.preview(7)}\n-# {hint}",
             accessory=EquipStarSkinButton(self, skin),
         )
 
