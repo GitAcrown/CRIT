@@ -6945,7 +6945,7 @@ class Reviews(commands.Cog):
             watchlist_entries=await self.load_watchlist(guild, target.id),
             affinities=affinities,
             viewer_id=interaction.user.id,
-            star_skin=await self.star_skin_for(guild, interaction.user.id),
+            star_skin=await self.star_skin_for(guild, target.id),
         )
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
