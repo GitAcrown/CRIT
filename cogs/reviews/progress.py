@@ -8,7 +8,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .emojis import HEART_EMPTY, HEART_FULL, HEART_HALF, STAR, STAR_EMPTY, STAR_HALF
+from .emojis import (
+    CROWN_EMPTY,
+    CROWN_FULL,
+    CROWN_HALF,
+    HEART_EMPTY,
+    HEART_FULL,
+    HEART_HALF,
+    STAR,
+    STAR_EMPTY,
+    STAR_HALF,
+)
 
 # ---------------------------------------------------------------------------
 # Récompenses de profil
@@ -123,7 +133,16 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         HEART_HALF,
         HEART_EMPTY,
         2,
-        "**Les cœurs CRIT**, se débloque au niveau 2.",
+        "Les cœurs CRIT. Se débloque au niveau 2.",
+    ),
+    StarSkin(
+        "couronnes",
+        "Couronnes CRIT",
+        CROWN_FULL,
+        CROWN_HALF,
+        CROWN_EMPTY,
+        3,
+        "Les couronnes CRIT. Se débloque au niveau 3.",
     ),
 )
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
