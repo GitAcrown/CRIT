@@ -114,7 +114,7 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         STAR_HALF,
         STAR_EMPTY,
         1,
-        "Les étoiles CRIT, disponibles dès le niveau 1.",
+        "**Les étoiles CRIT**, disponibles dès le niveau 1.",
     ),
     StarSkin(
         "coeurs",
@@ -123,7 +123,7 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         HEART_HALF,
         HEART_EMPTY,
         2,
-        "Les cœurs CRIT. Se débloque au niveau 2 (~10 notes).",
+        "**Les cœurs CRIT**, se débloque au niveau 2.",
     ),
 )
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
