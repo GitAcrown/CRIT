@@ -1,8 +1,14 @@
-"""XP, paliers et affinités de goût — la liste PROFILE_REWARDS se craft ici."""
+"""XP, paliers, skins d'étoiles et affinités de goût.
+
+La liste PROFILE_REWARDS se craft ici. XP_LEVEL_STEP règle la durée des niveaux :
+le palier 2 vaut ~10 notes sans commentaire (100 XP).
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from .emojis import HEART_EMPTY, HEART_FULL, HEART_HALF, STAR, STAR_EMPTY, STAR_HALF
 
 # ---------------------------------------------------------------------------
 # Récompenses de profil
@@ -47,6 +53,10 @@ XP_UPDATE = 2
 DAILY_CAP = 80
 FULL_AWARDS_PER_DAY = 5
 MIN_AFFINITY_OVERLAP = 3
+# XP pour passer du niveau n au n+1 : STEP * n  → niveau 2 = 100 XP ≈ 10 notes.
+XP_LEVEL_STEP = 100
+DEFAULT_STAR_SKIN = "classique"
+XP_BAR_WIDTH = 10
 
 
 @dataclass
@@ -78,14 +88,81 @@ def rewards_for_level(level: int) -> list[ProfileReward]:
     return [r for r in PROFILE_REWARDS if r.unlock_level <= level]
 
 
+@dataclass(frozen=True)
+class StarSkin:
+    id: str
+    name: str
+    full: str
+    half: str
+    empty: str
+    unlock_level: int
+    description: str = ""
+
+    def preview(self, rating: float = 10) -> str:
+        points = int(round(max(0.0, min(10.0, float(rating)))))
+        full = points // 2
+        half = points % 2 == 1
+        empty = 5 - full - (1 if half else 0)
+        return self.full * full + (self.half if half else "") + self.empty * empty
+
+
+STAR_SKINS: tuple[StarSkin, ...] = (
+    StarSkin(
+        DEFAULT_STAR_SKIN,
+        "Classique",
+        STAR,
+        STAR_HALF,
+        STAR_EMPTY,
+        1,
+        "Les étoiles CRIT, disponibles dès le niveau 1.",
+    ),
+    StarSkin(
+        "rpg",
+        "RPG",
+        HEART_FULL,
+        HEART_HALF,
+        HEART_EMPTY,
+        2,
+        "Cœurs de RPG. Se débloque au niveau 2 (~10 notes).",
+    ),
+)
+STAR_SKIN_BY_ID: dict[str, StarSkin] = {skin.id: skin for skin in STAR_SKINS}
+
+
+def resolve_star_skin(skin: StarSkin | str | None, *, level: int | None = None) -> StarSkin:
+    classic = STAR_SKIN_BY_ID[DEFAULT_STAR_SKIN]
+    if isinstance(skin, StarSkin):
+        chosen = skin
+    else:
+        chosen = STAR_SKIN_BY_ID.get(str(skin or "").strip(), classic)
+    if level is not None and level < chosen.unlock_level:
+        return classic
+    return chosen
+
+
+def skins_unlocked_between(previous_level: int, level: int) -> list[StarSkin]:
+    return [skin for skin in STAR_SKINS if previous_level < skin.unlock_level <= level]
+
+
+def format_xp_bar(into: int, need: int, *, width: int = XP_BAR_WIDTH) -> str:
+    if need <= 0:
+        filled = width
+    else:
+        filled = round(width * max(0, into) / need)
+        filled = max(0, min(width, filled))
+        if into > 0 and filled == 0:
+            filled = 1
+        if 0 < into < need and filled == width:
+            filled = width - 1
+    return "█" * filled + "░" * (width - filled)
+
+
 def xp_to_reach_level(level: int) -> int:
     """XP cumulé nécessaire pour atteindre `level` (le niveau 1 vaut 0)."""
     if level <= 1:
         return 0
-    total = 0
-    for current in range(1, level):
-        total += 40 * current
-    return total
+    n = level - 1
+    return XP_LEVEL_STEP * n * (n + 1) // 2
 
 
 def level_for_xp(xp: int) -> int:

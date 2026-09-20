@@ -46,8 +46,6 @@ from .emojis import (
     SALE,
     SHARE,
     STAR,
-    STAR_EMPTY,
-    STAR_HALF,
     STREAMING,
     TWIN,
     TV,
@@ -55,13 +53,19 @@ from .emojis import (
 )
 from .progress import (
     Affinity,
+    DEFAULT_STAR_SKIN,
     MIN_AFFINITY_OVERLAP,
+    STAR_SKINS,
+    StarSkin,
     XpAward,
     agreement_percent,
     apply_daily_limits,
     compute_review_xp,
+    format_xp_bar,
     level_for_xp,
     level_progress,
+    resolve_star_skin,
+    skins_unlocked_between,
     title_for_level,
 )
 from .providers import MediaCatalog, MediaHit, parse_search_query
@@ -170,6 +174,13 @@ class ReviewsLayout(discord.ui.LayoutView):
         super().__init__(timeout=timeout)
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
+        self.star_skin: StarSkin | None = None
+
+    def stars(self, rating: float) -> str:
+        return format_stars(rating, self.star_skin)
+
+    def stars_compact(self, rating: float) -> str:
+        return format_stars_compact(rating, self.star_skin)
 
     async def on_error(
         self,
@@ -305,24 +316,26 @@ FAVORITE_LABELS = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def format_stars(rating: float) -> str:
+def format_stars(rating: float, skin: StarSkin | str | None = None) -> str:
     """Rangée de 5 étoiles : chaque étoile vaut 2 points, une demi vaut 1."""
+    chosen = resolve_star_skin(skin)
     points = int(round(max(0.0, min(float(RATING_MAX), float(rating)))))
     full = points // 2
     half = points % 2 == 1
     empty = 5 - full - (1 if half else 0)
-    return STAR * full + (STAR_HALF if half else "") + STAR_EMPTY * empty
+    return chosen.full * full + (chosen.half if half else "") + chosen.empty * empty
 
 
-def format_stars_compact(rating: float) -> str:
+def format_stars_compact(rating: float, skin: StarSkin | str | None = None) -> str:
     """Une seule étoile custom + note, pour boutons et texte rich."""
+    chosen = resolve_star_skin(skin)
     points = int(round(max(0.0, min(float(RATING_MAX), float(rating)))))
     if points <= 0:
-        icon = STAR_EMPTY
+        icon = chosen.empty
     elif points % 2 == 1:
-        icon = STAR_HALF
+        icon = chosen.half
     else:
-        icon = STAR
+        icon = chosen.full
     return f"{icon} {points}"
 
 
@@ -579,6 +592,7 @@ class UserPrefs:
     announce_notes: bool = True
     stream_remind: bool = False
     stream_voice_status: bool = True
+    star_skin: str = DEFAULT_STAR_SKIN
 
 
 def today_experienced() -> str:
@@ -661,6 +675,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
         stream_remind=bool(int(_row_field(row, "stream_remind", 0) or 0)),
         stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
+        star_skin=resolve_star_skin(_row_field(row, "star_skin", DEFAULT_STAR_SKIN)).id,
     )
 
 
@@ -797,8 +812,9 @@ def critiques_summary_line(
     avg: float | None,
     page: int = 0,
     total_pages: int = 1,
+    skin: StarSkin | str | None = None,
 ) -> str:
-    line = f"-# {count} critique(s) · moyenne {format_stars(avg or 0)} {format_score(avg or 0, average=True)}"
+    line = f"-# {count} critique(s) · moyenne {format_stars(avg or 0, skin)} {format_score(avg or 0, average=True)}"
     if count:
         line += f" · page {page + 1}/{total_pages}"
     if hit.url:
@@ -915,13 +931,13 @@ def _source_name(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, hit.source)
 
 
-def _official_line(hit: MediaHit) -> str:
+def _official_line(hit: MediaHit, skin: StarSkin | str | None = None) -> str:
     source = _source_name(hit)
     if hit.source == "tmdb":
         rating = float(hit.extra.get("vote_average") or 0)
         count = int(hit.extra.get("vote_count") or 0)
         if rating:
-            stars = format_stars(rating)
+            stars = format_stars(rating, skin)
             votes = f"  ·  {_fmt_int(count)} votes" if count else ""
             return f"**{source}** · {stars}  **{rating:.1f}/10**{votes}"
     if hit.source == "steam":
@@ -1015,13 +1031,14 @@ def append_fiche_sections(
     my_review: dict | None,
     social_line: str = "",
     guild_name: str = "",
+    skin: StarSkin | str | None = None,
 ) -> None:
     head: list[str] = []
-    official = _official_line(hit)
+    official = _official_line(hit, skin)
     if official:
         head.append(official)
     if count:
-        stars = format_stars(avg or 0)
+        stars = format_stars(avg or 0, skin)
         label = pretty.shorten_text((guild_name or "Serveur").strip() or "Serveur", 40)
         head.append(
             f"**{label}** · {stars}  **{format_score(avg or 0, average=True)}**  ·  "
@@ -1036,7 +1053,7 @@ def append_fiche_sections(
             hide=False,
             limit=180,
         )
-        mine = f"Ta note · {format_stars(my_review['rating'])}  **{format_score(my_review['rating'])}**"
+        mine = f"Ta note · {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
         if comment:
             mine += f"\n{comment}"
         seen = experienced_line(hit.media_type, experienced_from_row(my_review))
@@ -1400,7 +1417,7 @@ async def handle_published_fiche_click(
     if action == "critiques":
         menu = await PublicCritiquesView.create(cog, guild, hit, interaction.user.id)
     else:
-        menu = await PublicFichePeekView.create(cog, guild, hit)
+        menu = await PublicFichePeekView.create(cog, guild, hit, interaction.user.id)
     await send_ephemeral_menu(interaction, menu)
 
 
@@ -1478,13 +1495,14 @@ def build_announce_view(
     posted_at: int | None = None,
     wid: str | None = None,
     live: bool = False,
+    skin: StarSkin | str | None = None,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
     stamped = f"<t:{int(posted_at or time.time())}:f>"
     profile = f"{mention} · _{title}_ · le {stamped} · {verb}"
-    film = f"{_title_line(hit)}\n{format_stars(rating)}  **{format_score(rating)}**"
+    film = f"{_title_line(hit)}\n{format_stars(rating, skin)}  **{format_score(rating)}**"
     shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
     if shown:
         film += f"\n{shown}"
@@ -1522,6 +1540,7 @@ def render_announce_record(rec: FicheRecord, *, live: bool) -> discord.ui.Layout
         posted_at=posted_at,
         wid=rec.id,
         live=live,
+        skin=rec.payload.get("star_skin"),
     )
 
 
@@ -1535,9 +1554,16 @@ def render_dyn_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutView 
 # Modal de notation
 # ---------------------------------------------------------------------------
 
-def _review_saved_lines(hit: MediaHit, rating: float, created: bool, award: XpAward) -> list[str]:
+def _review_saved_lines(
+    hit: MediaHit,
+    rating: float,
+    created: bool,
+    award: XpAward,
+    *,
+    skin: StarSkin | str | None = None,
+) -> list[str]:
     verb = "enregistrée" if created else "mise à jour"
-    parts = [f"**Critique {verb} ·** {format_stars(rating)}  **{format_score(rating)}** — {hit.title}."]
+    parts = [f"**Critique {verb} ·** {format_stars(rating, skin)}  **{format_score(rating)}** — {hit.title}."]
     if award.gained:
         parts.append(f"{XP} +{award.gained} · niveau {award.level}")
         if award.capped:
@@ -1548,6 +1574,10 @@ def _review_saved_lines(hit: MediaHit, rating: float, created: bool, award: XpAw
         new_title = title_for_level(award.level)
         old_title = title_for_level(award.previous_level)
         parts.append(f"Nouveau titre · {new_title}" if new_title != old_title else f"Niveau {award.level}")
+        unlocked = skins_unlocked_between(award.previous_level, award.level)
+        if unlocked:
+            names = " · ".join(skin.name for skin in unlocked)
+            parts.append(f"Nouveau skin · {names} (`/custom`)")
     return parts
 
 
@@ -1671,6 +1701,7 @@ class MyNoteView(ReviewsLayout):
         published_wid: str | None,
         prefs: UserPrefs | None = None,
         on_watchlist: bool = False,
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -1680,6 +1711,7 @@ class MyNoteView(ReviewsLayout):
         self.my_review = my_review
         self.published_wid = published_wid
         self.prefs = prefs or UserPrefs()
+        self.star_skin = star_skin if star_skin is not None else resolve_star_skin(self.prefs.star_skin)
         self.on_watchlist = on_watchlist and not bool(my_review)
         self.from_published_modal = False
         self._interaction: discord.Interaction | None = None
@@ -1714,6 +1746,7 @@ class MyNoteView(ReviewsLayout):
             published_wid=published_wid,
             prefs=prefs,
             on_watchlist=on_watchlist,
+            star_skin=await cog.star_skin_for(guild, author_id),
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1732,7 +1765,7 @@ class MyNoteView(ReviewsLayout):
         if mine:
             text = (
                 f"{_title_line(hit)}\n"
-                f"{format_stars(mine['rating'])}  **{format_score(mine['rating'])}**\n"
+                f"{self.stars(mine['rating'])}  **{format_score(mine['rating'])}**\n"
             )
             shown = format_comment(
                 mine.get("comment") or "",
@@ -1782,7 +1815,7 @@ class MyNoteView(ReviewsLayout):
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
         await apply_view(interaction, self)
-        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award)), ephemeral=True)
+        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award, skin=self.star_skin)), ephemeral=True)
         await self.cog.announce_review(
             self.guild, interaction.user, self.hit, rating, comment,
             updated=not created, experienced_at=experienced_at, spoiler=spoiler,
@@ -1825,14 +1858,17 @@ class PublicFichePeekView(ReviewsLayout):
         social: str,
         stream_channels: list[int] | None = None,
         guild_name: str = "",
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
+        self.star_skin = star_skin
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
         body.extend(stream_live_items(stream_channels or []))
         body.extend(fiche_intro(hit))
         append_fiche_sections(
             body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+            skin=self.star_skin,
         )
         footer = _footer_line(hit)
         if footer:
@@ -1840,7 +1876,9 @@ class PublicFichePeekView(ReviewsLayout):
         self.set_layout(body)
 
     @classmethod
-    async def create(cls, cog: "Reviews", guild: discord.Guild, hit: MediaHit) -> "PublicFichePeekView":
+    async def create(
+        cls, cog: "Reviews", guild: discord.Guild, hit: MediaHit, viewer_id: int,
+    ) -> "PublicFichePeekView":
         media_id = await cog.lookup_media_id(guild, hit)
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
@@ -1853,6 +1891,7 @@ class PublicFichePeekView(ReviewsLayout):
             social=social,
             stream_channels=stream_channels,
             guild_name=guild.name,
+            star_skin=await cog.star_skin_for(guild, viewer_id),
         )
 
 
@@ -1882,6 +1921,7 @@ class PublicCritiquesView(ReviewsLayout):
         avg: float | None,
         count: int,
         stream_channels: list[int] | None = None,
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -1892,6 +1932,7 @@ class PublicCritiquesView(ReviewsLayout):
         self.avg = avg
         self.count = count
         self.stream_channels = stream_channels or []
+        self.star_skin = star_skin
         self.page = 0
         self._interaction: discord.Interaction | None = None
         self._build()
@@ -1917,6 +1958,7 @@ class PublicCritiquesView(ReviewsLayout):
             avg=avg,
             count=count,
             stream_channels=stream_channels,
+            star_skin=await cog.star_skin_for(guild, author_id),
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1941,6 +1983,7 @@ class PublicCritiquesView(ReviewsLayout):
             self.page = min(self.page, max_page)
         body.append(discord.ui.TextDisplay(critiques_summary_line(
             hit, count=self.count, avg=self.avg, page=self.page, total_pages=total_pages,
+            skin=self.star_skin,
         )))
         body.append(sep_tight())
         if not self.reviews:
@@ -1956,7 +1999,7 @@ class PublicCritiquesView(ReviewsLayout):
             _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
             text = (
                 f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                f"{format_stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
+                f"{self.stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
             )
             shown = format_comment(
                 row["comment"] or "",
@@ -2616,6 +2659,7 @@ class MediaSessionView(ReviewsLayout):
     async def prepare(self) -> None:
         await self.cog.get_comment_max(self.guild)
         self.prefs = await self.cog.get_user_prefs(self.guild, self.author_id)
+        self.star_skin = await self.cog.star_skin_for(self.guild, self.author_id)
         await self.enrich_selected()
         self._enriched.add(self.selected)
         await self.reload_stats()
@@ -2669,7 +2713,7 @@ class MediaSessionView(ReviewsLayout):
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
         if not self.from_published_modal:
             await self.refresh(interaction)
-        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award)), ephemeral=True)
+        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award, skin=self.star_skin)), ephemeral=True)
         await self.cog.announce_review(
             self.guild, interaction.user, self.hit, rating, comment,
             updated=not created, experienced_at=experienced_at, spoiler=spoiler,
@@ -2713,6 +2757,7 @@ class MediaSessionView(ReviewsLayout):
                 my_review=self.my_review if self.ephemeral and not self.published_wid else None,
                 social_line=self.social_line,
                 guild_name=self.guild.name,
+                skin=self.star_skin,
             )
             footer = _footer_line(hit)
             if footer:
@@ -2725,6 +2770,7 @@ class MediaSessionView(ReviewsLayout):
                 self.review_page = min(self.review_page, max_page)
             body.append(discord.ui.TextDisplay(critiques_summary_line(
                 hit, count=self.count, avg=self.avg, page=self.review_page, total_pages=total_pages,
+                skin=self.star_skin,
             )))
             body.append(sep_tight())
             if not self.reviews:
@@ -2739,7 +2785,7 @@ class MediaSessionView(ReviewsLayout):
                     _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
                     text = (
                         f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                        f"{format_stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
+                        f"{self.stars(row['rating'])}  **{format_score(row['rating'])}** · <t:{row['updated_at']}:R>"
                     )
                     shown = format_comment(
                         row["comment"] or "",
@@ -2765,7 +2811,7 @@ class MediaSessionView(ReviewsLayout):
         if not self.published_wid:
             rate_label = "Noter"
             if self.ephemeral and self.pending_rating is not None and self.my_review is None:
-                rate_label = f"Noter {format_stars_compact(self.pending_rating)}"
+                rate_label = f"Noter {self.stars_compact(self.pending_rating)}"
             elif self.ephemeral and self.my_review:
                 rate_label = "Modifier ma note"
             rate_btn = RateButton(self)
@@ -2956,6 +3002,7 @@ class AffinityCompareSelect(discord.ui.Select):
             other_id,
             affinity=next(a for a in self._hub.affinities if a.user_id == other_id),
             titles=self._hub.titles,
+            star_skin=self._hub.star_skin,
         )
         view._interaction = interaction
         bind_view_message(view, await interaction.followup.send(view=view))
@@ -2971,6 +3018,7 @@ class AffinityCompareView(ReviewsLayout):
         *,
         affinity: Affinity,
         titles: dict[int, str],
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -2979,6 +3027,7 @@ class AffinityCompareView(ReviewsLayout):
         self.right_id = right_id
         self.affinity = affinity
         self.titles = titles
+        self.star_skin = star_skin
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self._build()
@@ -3001,13 +3050,13 @@ class AffinityCompareView(ReviewsLayout):
         if self.affinity.agreements:
             lines = ["**D'accord**"]
             for title, left, right in self.affinity.agreements:
-                lines.append(f"{format_stars_compact(left)} / {format_stars_compact(right)}  ·  {title}")
+                lines.append(f"{self.stars_compact(left)} / {self.stars_compact(right)}  ·  {title}")
             body.append(discord.ui.Separator())
             body.append(discord.ui.TextDisplay("\n".join(lines)))
         if self.affinity.disagreements:
             lines = ["**Désaccord**"]
             for title, left, right in self.affinity.disagreements:
-                lines.append(f"{format_stars_compact(left)} / {format_stars_compact(right)}  ·  {title}")
+                lines.append(f"{self.stars_compact(left)} / {self.stars_compact(right)}  ·  {title}")
             body.append(discord.ui.Separator())
             body.append(discord.ui.TextDisplay("\n".join(lines)))
         self.set_layout(body)
@@ -3717,6 +3766,7 @@ class ProfileView(ReviewsLayout):
         affinities: list[Affinity],
         viewer_id: int,
         tab: str = "profil",
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -3735,6 +3785,7 @@ class ProfileView(ReviewsLayout):
         self.viewer_id = viewer_id
         self.editable = viewer_id == member.id
         self.tab = tab
+        self.star_skin = star_skin
         self.journal_page = 0
         self.watchlist_page = 0
         self.journal_type = "all"
@@ -3849,7 +3900,7 @@ class ProfileView(ReviewsLayout):
             + (f"  ·  {hit.subtitle}" if hit.subtitle else ""),
         ]
         if rating is not None:
-            lines.append(f"{format_stars(rating)}  **{format_score(rating)}**")
+            lines.append(f"{self.stars(rating)}  **{format_score(rating)}**")
         return section_with_thumbnail("\n".join(lines), hit.poster_url)
 
     def _profil_content(self) -> list[discord.ui.Item]:
@@ -3896,7 +3947,7 @@ class ProfileView(ReviewsLayout):
             if index:
                 content.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
-            text = f"{format_stars(row['rating'])}  **{hit.title}**{year}\n-# {type_label(hit.media_type)}"
+            text = f"{self.stars(row['rating'])}  **{hit.title}**{year}\n-# {type_label(hit.media_type)}"
             shown = format_comment(
                 row["comment"] or "",
                 spoiler=row_spoiler(row),
@@ -4029,6 +4080,7 @@ class ServerHubView(ReviewsLayout):
         media_type: str = "all",
         period: str = "all",
         tab: str = "recentes",
+        star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -4040,6 +4092,7 @@ class ServerHubView(ReviewsLayout):
         self.media_type = media_type
         self.period = period
         self.tab = tab
+        self.star_skin = star_skin
         self.recent_page = 0
         self.catalog_page = 0
         self.top_page = 0
@@ -4094,7 +4147,7 @@ class ServerHubView(ReviewsLayout):
         for index, (hit, avg, count) in enumerate(page_items, start=start + 1):
             year = f" ({hit.year})" if hit.year else ""
             lines.append(
-                f"**{index}.** {format_stars(avg)}  **{hit.title}**{year}  ·  "
+                f"**{index}.** {self.stars(avg)}  **{hit.title}**{year}  ·  "
                 f"{type_label(hit.media_type)}  ·  {count} note{'s' if count > 1 else ''}"
             )
         body.append(discord.ui.TextDisplay("\n".join(lines)))
@@ -4122,7 +4175,7 @@ class ServerHubView(ReviewsLayout):
             year = f" ({hit.year})" if hit.year else ""
             text = (
                 f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                f"{format_stars(row['rating'])}  **{format_score(row['rating'])}**\n"
+                f"{self.stars(row['rating'])}  **{format_score(row['rating'])}**\n"
                 f"**{hit.title}**{year} · {type_label(hit.media_type)} · <t:{row['updated_at']}:R>"
             )
             shown = format_comment(
@@ -4404,6 +4457,131 @@ class PreferencesView(ReviewsLayout):
 
     async def start(self, interaction: discord.Interaction) -> None:
         self._interaction = interaction
+        await interaction.response.send_message(view=self, ephemeral=True)
+        await self.attach(interaction)
+
+
+# ---------------------------------------------------------------------------
+# Skins d'étoiles
+# ---------------------------------------------------------------------------
+
+class EquipStarSkinButton(discord.ui.Button):
+    def __init__(self, parent: "CustomView", skin: StarSkin):
+        equipped = parent.equipped_id == skin.id
+        locked = parent.level < skin.unlock_level
+        if locked:
+            super().__init__(
+                label=f"Niv. {skin.unlock_level}",
+                style=discord.ButtonStyle.secondary,
+                disabled=True,
+            )
+        elif equipped:
+            super().__init__(label="Équipé", style=discord.ButtonStyle.green, disabled=True)
+        else:
+            super().__init__(label="Équiper", style=discord.ButtonStyle.primary)
+        self._hub = parent
+        self._skin_id = skin.id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        skin = resolve_star_skin(self._skin_id, level=self._hub.level)
+        if skin.id != self._skin_id:
+            await interaction.response.send_message(
+                f"**Verrouillé ·** {resolve_star_skin(self._skin_id).name} se débloque au niveau "
+                f"{resolve_star_skin(self._skin_id).unlock_level}.",
+                ephemeral=True,
+                delete_after=8,
+            )
+            return
+        self._hub.prefs = await self._hub.cog.set_user_prefs(
+            self._hub.guild, self._hub.user_id, star_skin=skin.id,
+        )
+        self._hub.star_skin = skin
+        self._hub.equipped_id = skin.id
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class CustomView(ReviewsLayout):
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        *,
+        user: discord.abc.User,
+        prefs: UserPrefs,
+        xp: int,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.user = user
+        self.user_id = user.id
+        self.prefs = prefs
+        self.xp = xp
+        level, into, need, total = level_progress(xp)
+        self.level = level
+        self.into = into
+        self.need = need
+        self.total = total
+        self.star_skin = resolve_star_skin(prefs.star_skin, level=level)
+        self.equipped_id = self.star_skin.id
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Ce menu ne s'affiche que pour toi.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    def _header(self) -> str:
+        title = title_for_level(self.level)
+        lines = [
+            "## Personnalisation",
+            f"**Niveau {self.level}** · {title}",
+        ]
+        if self.level >= 99:
+            lines.append(f"{XP} Niveau max · **{self.total} XP** au total")
+        else:
+            lines.append(
+                f"{XP} **{self.into}** / **{self.need}** XP vers le niveau {self.level + 1}\n"
+                f"{format_xp_bar(self.into, self.need)}\n"
+                f"-# {self.total} XP au total"
+            )
+        return "\n".join(lines)
+
+    def _skin_section(self, skin: StarSkin) -> discord.ui.Section:
+        locked = self.level < skin.unlock_level
+        equipped = self.equipped_id == skin.id
+        status = " · équipé" if equipped else (" · verrouillé" if locked else "")
+        hint = (
+            f"Se débloque au niveau {skin.unlock_level}."
+            if locked
+            else skin.description
+        )
+        return discord.ui.Section(
+            f"**{skin.name}**{status}\n{skin.preview(10)}\n{skin.preview(7)}\n-# {hint}",
+            accessory=EquipStarSkinButton(self, skin),
+        )
+
+    def _build(self) -> None:
+        children: list[discord.ui.Item] = [
+            section_with_thumbnail(self._header(), self.user.display_avatar.url),
+        ]
+        for skin in STAR_SKINS:
+            children.append(sep_wide())
+            children.append(self._skin_section(skin))
+        self.set_layout(children)
+
+    async def start(self, interaction: discord.Interaction) -> None:
+        self._interaction = interaction
+        if self.equipped_id != self.prefs.star_skin:
+            self.prefs = await self.cog.set_user_prefs(
+                self.guild, self.user_id, star_skin=self.equipped_id,
+            )
         await interaction.response.send_message(view=self, ephemeral=True)
         await self.attach(interaction)
 
@@ -4695,6 +4873,7 @@ class HelpView(ReviewsLayout):
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
             "`/preferences` — tes défauts : date, listes, recherche, annonces, stream\n"
+            "`/custom` — skins d'étoiles : collections débloquées avec les niveaux\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -4709,7 +4888,8 @@ class HelpView(ReviewsLayout):
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres) et permet d'y lier le tien. "
-            "Tes défauts (date, listes, recherche, annonces, rappel et statut vocal) se règlent dans `/preferences`.\n"
+            "Tes défauts (date, listes, recherche, annonces, rappel et statut vocal) se règlent dans `/preferences`. "
+            "Les skins d'étoiles se choisissent dans `/custom`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -4847,7 +5027,8 @@ class Reviews(commands.Cog):
                 default_search_type TEXT NOT NULL DEFAULT 'all',
                 announce_notes INTEGER NOT NULL DEFAULT 1,
                 stream_remind INTEGER NOT NULL DEFAULT 0,
-                stream_voice_status INTEGER NOT NULL DEFAULT 1
+                stream_voice_status INTEGER NOT NULL DEFAULT 1,
+                star_skin TEXT NOT NULL DEFAULT 'classique'
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -5083,12 +5264,14 @@ class Reviews(commands.Cog):
             cleaned["stream_remind"] = bool(updates["stream_remind"])
         if "stream_voice_status" in updates:
             cleaned["stream_voice_status"] = bool(updates["stream_voice_status"])
+        if "star_skin" in updates:
+            cleaned["star_skin"] = resolve_star_skin(updates["star_skin"]).id
         prefs = replace(current, **cleaned) if cleaned else current
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
@@ -5097,9 +5280,15 @@ class Reviews(commands.Cog):
             int(prefs.announce_notes),
             int(prefs.stream_remind),
             int(prefs.stream_voice_status),
+            prefs.star_skin,
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
+
+    async def star_skin_for(self, guild: discord.Guild, user_id: int) -> StarSkin:
+        prefs = await self.get_user_prefs(guild, user_id)
+        level = level_for_xp(await self.get_profile_xp(guild, user_id))
+        return resolve_star_skin(prefs.star_skin, level=level)
 
     async def _resolve_search_type(
         self,
@@ -5214,7 +5403,8 @@ class Reviews(commands.Cog):
                 default_search_type TEXT NOT NULL DEFAULT 'all',
                 announce_notes INTEGER NOT NULL DEFAULT 1,
                 stream_remind INTEGER NOT NULL DEFAULT 0,
-                stream_voice_status INTEGER NOT NULL DEFAULT 1
+                stream_voice_status INTEGER NOT NULL DEFAULT 1,
+                star_skin TEXT NOT NULL DEFAULT 'classique'
             )"""
         )
         await db.execute(
@@ -5237,6 +5427,7 @@ class Reviews(commands.Cog):
             "announce_notes": "INTEGER NOT NULL DEFAULT 1",
             "stream_remind": "INTEGER NOT NULL DEFAULT 0",
             "stream_voice_status": "INTEGER NOT NULL DEFAULT 1",
+            "star_skin": "TEXT NOT NULL DEFAULT 'classique'",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
@@ -6020,6 +6211,7 @@ class Reviews(commands.Cog):
                 spoiler=spoiler,
             ):
                 return
+        skin = await self.star_skin_for(guild, user.id)
         posted_at = int(time.time())
         wid = create_record(
             {
@@ -6035,6 +6227,7 @@ class Reviews(commands.Cog):
                 "experienced_at": experienced_at,
                 "spoiler": spoiler,
                 "posted_at": posted_at,
+                "star_skin": skin.id,
             },
             ttl=ANNOUNCE_TTL,
         )
@@ -6050,6 +6243,7 @@ class Reviews(commands.Cog):
             posted_at=posted_at,
             wid=wid,
             live=True,
+            skin=skin,
         )
         try:
             message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -6078,6 +6272,13 @@ class Reviews(commands.Cog):
         except (TypeError, ValueError):
             posted_at = int(time.time())
         was_update = bool(rec.payload.get("updated"))
+        guild_id = int(rec.payload.get("guild_id") or 0)
+        user_id = int(rec.payload.get("user_id") or 0)
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None and user_id:
+            skin = await self.star_skin_for(guild, user_id)
+        else:
+            skin = resolve_star_skin(rec.payload.get("star_skin"))
         rec.payload.update(
             {
                 "hit": hit_to_dict(hit),
@@ -6087,6 +6288,7 @@ class Reviews(commands.Cog):
                 "comment": comment,
                 "experienced_at": experienced_at,
                 "spoiler": spoiler,
+                "star_skin": skin.id,
             }
         )
         update_payload(rec.id, rec.payload)
@@ -6103,6 +6305,7 @@ class Reviews(commands.Cog):
             posted_at=posted_at,
             wid=rec.id,
             live=True,
+            skin=skin,
         )
         try:
             channel = self.bot.get_channel(rec.channel_id) or await self.bot.fetch_channel(rec.channel_id)
@@ -6751,6 +6954,7 @@ class Reviews(commands.Cog):
             watchlist_entries=await self.load_watchlist(guild, target.id),
             affinities=affinities,
             viewer_id=interaction.user.id,
+            star_skin=await self.star_skin_for(guild, interaction.user.id),
         )
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
@@ -6828,6 +7032,7 @@ class Reviews(commands.Cog):
             catalog_subtitle="  ·  ".join(subtitle_parts) or "Toutes les œuvres notées",
             media_type=media_type,
             tab="catalogue" if filtered else "recentes",
+            star_skin=await self.star_skin_for(guild, interaction.user.id),
         )
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
@@ -6950,6 +7155,20 @@ class Reviews(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         return await self._shared_list_choices(interaction, current)
+
+    @app_commands.command(name="custom")
+    @app_commands.guild_only()
+    async def critique_custom(self, interaction: discord.Interaction) -> None:
+        """Équipe un skin d'étoiles parmi les collections débloquées."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        prefs = await self.get_user_prefs(guild, interaction.user.id)
+        xp = await self.get_profile_xp(guild, interaction.user.id)
+        view = CustomView(self, guild, user=interaction.user, prefs=prefs, xp=xp)
+        await view.start(interaction)
 
     @app_commands.command(name="preferences")
     @app_commands.guild_only()
