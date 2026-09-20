@@ -2526,23 +2526,14 @@ class StreamRemindView(ReviewsLayout):
         self.guild = guild
         self.viewer_id = viewer_id
         salon = f" sur <#{channel_id}>" if channel_id else ""
-        body: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(
-                f"{STREAMING} **Stream en cours{salon}**\n"
-                "-# Lie une œuvre pour l'afficher sur ta fiche."
-            )
-        ]
-        self.set_layout(body, discord.ui.ActionRow(StreamHubBindButton(self)))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.viewer_id:
-            await interaction.response.send_message(
-                "**Action impossible ·** Ce rappel est pour le streamer.",
-                ephemeral=True,
-                delete_after=10,
-            )
-            return False
-        return True
+        self.set_layout(
+            [
+                discord.ui.TextDisplay(
+                    f"{STREAMING} **Stream en cours{salon}**\n"
+                    f"-# Lance `/stream` sur **{guild.name}** pour lier une œuvre."
+                )
+            ]
+        )
 
 
 class ProfileShareButton(discord.ui.Button):
