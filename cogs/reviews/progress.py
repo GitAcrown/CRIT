@@ -119,30 +119,30 @@ class StarSkin:
 STAR_SKINS: tuple[StarSkin, ...] = (
     StarSkin(
         DEFAULT_STAR_SKIN,
-        "Étoiles CRIT",
+        "Étoiles",
         STAR,
         STAR_HALF,
         STAR_EMPTY,
         1,
-        "**Les étoiles CRIT**, disponibles dès le niveau 1.",
+        "Disponibles dès le niveau 1.",
     ),
     StarSkin(
         "coeurs",
-        "Cœurs CRIT",
+        "Cœurs",
         HEART_FULL,
         HEART_HALF,
         HEART_EMPTY,
         2,
-        "Les cœurs CRIT. Se débloque au niveau 2.",
+        "Se débloque au niveau 2.",
     ),
     StarSkin(
         "couronnes",
-        "Couronnes CRIT",
+        "Couronnes",
         CROWN_FULL,
         CROWN_HALF,
         CROWN_EMPTY,
         3,
-        "Les couronnes CRIT. Se débloque au niveau 3.",
+        "Se débloque au niveau 3.",
     ),
 )
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
