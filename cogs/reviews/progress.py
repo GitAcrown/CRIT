@@ -114,7 +114,7 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         STAR_HALF,
         STAR_EMPTY,
         1,
-        "Les étoiles CRIT, disponibles dès le niveau 1.",
+        "**Les étoiles CRIT**, disponibles dès le niveau 1.",
     ),
     StarSkin(
         "rpg",
@@ -123,7 +123,7 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         HEART_HALF,
         HEART_EMPTY,
         2,
-        "Cœurs de RPG. Se débloque au niveau 2 (~10 notes).",
+        "**Cœurs pixelisés**, se débloque au niveau 2.",
     ),
 )
 STAR_SKIN_BY_ID: dict[str, StarSkin] = {skin.id: skin for skin in STAR_SKINS}
