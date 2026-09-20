@@ -2986,17 +2986,45 @@ class AffinityCompareSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         other_id = int(self.values[0])
+        cog = self._hub.cog
+        guild = self._hub.guild
         view = AffinityCompareView(
-            self._hub.cog,
-            self._hub.guild,
+            cog,
+            guild,
             self._hub.member.id,
             other_id,
             affinity=next(a for a in self._hub.affinities if a.user_id == other_id),
             titles=self._hub.titles,
-            star_skin=self._hub.star_skin,
+            left_skin=await cog.star_skin_for(guild, self._hub.member.id),
+            right_skin=await cog.star_skin_for(guild, other_id),
         )
         view._interaction = interaction
-        bind_view_message(view, await interaction.followup.send(view=view))
+        bind_view_message(
+            view,
+            await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_PINGS),
+        )
+
+
+class AffinityShareButton(discord.ui.Button):
+    def __init__(self, parent: "AffinityCompareView"):
+        super().__init__(**_share_button_kwargs())
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        body = self._hub._compare_items()
+        view = discord.ui.LayoutView(timeout=None)
+        if body:
+            view.add_item(discord.ui.Container(*body))
+        message = await publish_layout_message(interaction, view)
+        if message is None:
+            await interaction.followup.send(
+                "**Erreur ·** Impossible de publier cette comparaison.",
+                ephemeral=True,
+            )
+            return
+        self._hub.stop()
+        await discard_ephemeral_menu(interaction)
 
 
 class AffinityCompareView(ReviewsLayout):
@@ -3009,7 +3037,8 @@ class AffinityCompareView(ReviewsLayout):
         *,
         affinity: Affinity,
         titles: dict[int, str],
-        star_skin: StarSkin | None = None,
+        left_skin: StarSkin | None = None,
+        right_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
@@ -3018,7 +3047,8 @@ class AffinityCompareView(ReviewsLayout):
         self.right_id = right_id
         self.affinity = affinity
         self.titles = titles
-        self.star_skin = star_skin
+        self.left_skin = left_skin
+        self.right_skin = right_skin
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self._build()
@@ -3029,7 +3059,13 @@ class AffinityCompareView(ReviewsLayout):
             self.titles.get(user_id, title_for_level(1)),
         )
 
-    def _build(self) -> None:
+    def _pair_line(self, title: str, left: float, right: float) -> str:
+        return (
+            f"{format_stars_compact(left, self.left_skin)} / "
+            f"{format_stars_compact(right, self.right_skin)}  ·  {title}"
+        )
+
+    def _compare_items(self) -> list[discord.ui.Item]:
         _left_name, left_avatar = _user_display(self.guild, self.cog.bot, self.left_id)
         body: list[discord.ui.Item] = [
             section_with_thumbnail(
@@ -3041,16 +3077,20 @@ class AffinityCompareView(ReviewsLayout):
         if self.affinity.agreements:
             lines = ["**D'accord**"]
             for title, left, right in self.affinity.agreements:
-                lines.append(f"{self.stars_compact(left)} / {self.stars_compact(right)}  ·  {title}")
+                lines.append(self._pair_line(title, left, right))
             body.append(discord.ui.Separator())
             body.append(discord.ui.TextDisplay("\n".join(lines)))
         if self.affinity.disagreements:
             lines = ["**Désaccord**"]
             for title, left, right in self.affinity.disagreements:
-                lines.append(f"{self.stars_compact(left)} / {self.stars_compact(right)}  ·  {title}")
+                lines.append(self._pair_line(title, left, right))
             body.append(discord.ui.Separator())
             body.append(discord.ui.TextDisplay("\n".join(lines)))
-        self.set_layout(body)
+        return body
+
+    def _build(self) -> None:
+        self.set_layout(self._compare_items())
+        self.add_item(discord.ui.ActionRow(AffinityShareButton(self)))
 
 
 # ---------------------------------------------------------------------------
