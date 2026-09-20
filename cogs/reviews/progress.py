@@ -109,23 +109,24 @@ class StarSkin:
 STAR_SKINS: tuple[StarSkin, ...] = (
     StarSkin(
         DEFAULT_STAR_SKIN,
-        "Classique",
+        "Étoiles CRIT",
         STAR,
         STAR_HALF,
         STAR_EMPTY,
         1,
-        "**Les étoiles CRIT**, disponibles dès le niveau 1.",
+        "Les étoiles CRIT, disponibles dès le niveau 1.",
     ),
     StarSkin(
-        "rpg",
-        "RPG",
+        "coeurs",
+        "Cœurs CRIT",
         HEART_FULL,
         HEART_HALF,
         HEART_EMPTY,
         2,
-        "**Cœurs pixelisés**, se débloque au niveau 2.",
+        "Les cœurs CRIT. Se débloque au niveau 2 (~10 notes).",
     ),
 )
+STAR_SKIN_ALIASES = {"rpg": "coeurs"}
 STAR_SKIN_BY_ID: dict[str, StarSkin] = {skin.id: skin for skin in STAR_SKINS}
 
 
@@ -134,7 +135,8 @@ def resolve_star_skin(skin: StarSkin | str | None, *, level: int | None = None) 
     if isinstance(skin, StarSkin):
         chosen = skin
     else:
-        chosen = STAR_SKIN_BY_ID.get(str(skin or "").strip(), classic)
+        key = STAR_SKIN_ALIASES.get(str(skin or "").strip(), str(skin or "").strip())
+        chosen = STAR_SKIN_BY_ID.get(key, classic)
     if level is not None and level < chosen.unlock_level:
         return classic
     return chosen
