@@ -254,6 +254,9 @@ class ReviewsLayout(discord.ui.LayoutView):
 VALID_RATINGS = tuple(range(11))
 RATING_MAX = 10
 LIKE_RATING = 7
+BAD_RATING = 4
+ALSO_PUBLIC_PERCENT = 70
+ALSO_PUBLIC_GAP = 2
 ALSO_LIKED_MIN = 2
 ALSO_LIKED_LIMIT = 3
 FOR_YOU_LIMIT = 24
@@ -1038,7 +1041,6 @@ def append_fiche_sections(
     social_line: str = "",
     guild_name: str = "",
     skin: StarSkin | str | None = None,
-    also_liked: list[tuple[MediaHit, float, int]] | None = None,
 ) -> None:
     head: list[str] = []
     official = _official_line(hit, skin)
@@ -1060,7 +1062,7 @@ def append_fiche_sections(
             hide=False,
             limit=180,
         )
-        mine = f"Ta note · {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
+        mine = f"__**Ta note**__ · {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
         if comment:
             mine += f"\n{comment}"
         seen = experienced_line(hit.media_type, experienced_from_row(my_review))
@@ -1087,17 +1089,21 @@ def append_fiche_sections(
     body.append(section_with_thumbnail("\n".join(head), hit.poster_url))
     if tail:
         body.append(discord.ui.TextDisplay("\n".join(tail)))
-    if also_liked:
-        lines = ["**Aussi aimé**"]
-        for liked, avg, people in also_liked:
-            year = f" ({liked.year})" if liked.year else ""
-            who = "personne" if people == 1 else "personnes"
-            lines.append(
-                f"{format_stars(avg, skin)}  **{liked.title}**{year}  ·  "
-                f"{type_label(liked.media_type)}  ·  {people} {who}"
-            )
-        body.append(sep_tight())
-        body.append(discord.ui.TextDisplay("\n".join(lines)))
+
+
+def also_liked_line(hit: MediaHit, items: list[tuple[MediaHit, float, int]]) -> str:
+    """Une ligne, au même endroit que « X a mis 10/10 »."""
+    if not items:
+        return ""
+    titles = [f"**{pretty.shorten_text(liked.title, 42)}**" for liked, _avg, _people in items[:3]]
+    if len(titles) == 1:
+        also = titles[0]
+    elif len(titles) == 2:
+        also = f"{titles[0]} et {titles[1]}"
+    else:
+        also = f"{', '.join(titles[:-1])} et {titles[-1]}"
+    source = pretty.shorten_text(hit.title, 42)
+    return f"Ceux qui ont aimé **{source}** ont aussi aimé {also}"
 
 
 def hit_identity(hit: MediaHit | dict[str, Any]) -> tuple[str, str, str]:
@@ -1154,28 +1160,6 @@ def _link_label(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, "Fiche")
 
 
-def _also_liked_to_payload(items: list[tuple[MediaHit, float, int]]) -> list[dict[str, Any]]:
-    return [
-        {"hit": hit_to_dict(liked), "avg": avg, "people": people}
-        for liked, avg, people in items
-    ]
-
-
-def _also_liked_from_payload(raw: Any) -> list[tuple[MediaHit, float, int]]:
-    if not isinstance(raw, list):
-        return []
-    items: list[tuple[MediaHit, float, int]] = []
-    for entry in raw:
-        if not isinstance(entry, dict) or not isinstance(entry.get("hit"), dict):
-            continue
-        items.append((
-            hit_from_dict(entry["hit"]),
-            float(entry.get("avg") or 0),
-            int(entry.get("people") or 0),
-        ))
-    return items
-
-
 def render_published_fiche(
     hit: MediaHit,
     *,
@@ -1187,7 +1171,6 @@ def render_published_fiche(
     banner: str = "",
     stream_channels: list[int] | None = None,
     guild_name: str = "",
-    also_liked: list[tuple[MediaHit, float, int]] | None = None,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
@@ -1198,7 +1181,6 @@ def render_published_fiche(
     body.extend(fiche_intro(hit))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
-        also_liked=also_liked,
     )
     footer = _footer_line(hit)
     if footer:
@@ -1224,7 +1206,6 @@ def render_published_record(rec: FicheRecord, *, live: bool) -> discord.ui.Layou
         wid=rec.id,
         live=live,
         guild_name=str(rec.payload.get("guild_name") or ""),
-        also_liked=_also_liked_from_payload(rec.payload.get("also_liked")),
     )
 
 
@@ -1243,8 +1224,7 @@ async def prepare_published_fiche(
     media_id = await cog.lookup_media_id(guild, hit)
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
-    social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
-    also = await cog.also_liked(guild, media_id) if media_id else []
+    social = await cog.public_fiche_line(guild, hit, reviews, media_id)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
     wid = create_record({
         "kind": "fiche",
@@ -1254,7 +1234,6 @@ async def prepare_published_fiche(
         "avg": avg,
         "count": count,
         "social": social,
-        "also_liked": _also_liked_to_payload(also),
     })
     view = render_published_fiche(
         hit,
@@ -1266,7 +1245,6 @@ async def prepare_published_fiche(
         banner=banner,
         stream_channels=stream_channels,
         guild_name=guild.name,
-        also_liked=also,
     )
     return view, wid
 
@@ -1323,15 +1301,13 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
     media_id = await cog.lookup_media_id(guild, hit)
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
-    social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
-    also = await cog.also_liked(guild, media_id) if media_id else []
+    social = await cog.public_fiche_line(guild, hit, reviews, media_id)
     rec.payload.update({
         "hit": hit_to_dict(hit),
         "avg": avg,
         "count": count,
         "social": social,
         "guild_name": guild.name,
-        "also_liked": _also_liked_to_payload(also),
     })
     update_payload(wid, rec.payload)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
@@ -1340,7 +1316,6 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         avg=avg,
         count=count,
         social=social,
-        also_liked=also,
         wid=wid,
         live=True,
         stream_channels=stream_channels,
@@ -1908,7 +1883,6 @@ class PublicFichePeekView(ReviewsLayout):
         stream_channels: list[int] | None = None,
         guild_name: str = "",
         star_skin: StarSkin | None = None,
-        also_liked: list[tuple[MediaHit, float, int]] | None = None,
     ):
         super().__init__()
         self.star_skin = star_skin
@@ -1919,7 +1893,6 @@ class PublicFichePeekView(ReviewsLayout):
         append_fiche_sections(
             body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
             skin=self.star_skin,
-            also_liked=also_liked,
         )
         footer = _footer_line(hit)
         if footer:
@@ -1933,9 +1906,8 @@ class PublicFichePeekView(ReviewsLayout):
         media_id = await cog.lookup_media_id(guild, hit)
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
-        social = cog.social_line_for_reviews(guild, reviews, viewer_id=None)
+        social = await cog.public_fiche_line(guild, hit, reviews, media_id)
         stream_channels = await cog.stream_channels_for_hit(guild, hit)
-        also = await cog.also_liked(guild, media_id, viewer_id=viewer_id) if media_id else []
         return cls(
             hit,
             avg=avg,
@@ -1944,7 +1916,6 @@ class PublicFichePeekView(ReviewsLayout):
             stream_channels=stream_channels,
             guild_name=guild.name,
             star_skin=await cog.star_skin_for(guild, viewer_id),
-            also_liked=also,
         )
 
 
@@ -2678,7 +2649,6 @@ class MediaSessionView(ReviewsLayout):
         self.on_watchlist = False
         self.reviews: list[Any] = []
         self.social_line = ""
-        self.also_liked: list[tuple[MediaHit, float, int]] = []
         self.stream_channels: list[int] = []
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
@@ -2727,15 +2697,15 @@ class MediaSessionView(ReviewsLayout):
         if media_id and self.ephemeral:
             self.my_review = await self.cog.get_review(self.guild, self.author_id, media_id)
             self.on_watchlist = await self.cog.is_on_watchlist(self.guild, self.author_id, media_id)
-        self.social_line = self.cog.social_line_for_reviews(
-            self.guild,
-            self.reviews,
-            viewer_id=self.author_id if self.ephemeral else None,
-        )
-        self.also_liked = (
-            await self.cog.also_liked(self.guild, media_id, viewer_id=self.author_id)
-            if media_id else []
-        )
+        if self.ephemeral:
+            liked = await self.cog.also_liked(self.guild, media_id, viewer_id=self.author_id) if media_id else []
+            self.social_line = also_liked_line(self.hit, liked)
+        else:
+            self.social_line = self.cog.social_line_for_reviews(
+                self.guild,
+                self.reviews,
+                viewer_id=None,
+            )
         self.stream_channels = await self.cog.stream_channels_for_hit(self.guild, self.hit)
 
     async def save_review(
@@ -2807,7 +2777,6 @@ class MediaSessionView(ReviewsLayout):
                 social_line=self.social_line,
                 guild_name=self.guild.name,
                 skin=self.star_skin,
-                also_liked=self.also_liked,
             )
             footer = _footer_line(hit)
             if footer:
@@ -3904,12 +3873,6 @@ class ProfileView(ReviewsLayout):
         name, _avatar = _user_display(self.guild, self.cog.bot, user_id)
         return name
 
-    def _person(self, user_id: int) -> str:
-        return _titled(
-            _mention(self.guild, self.cog.bot, user_id),
-            self.titles.get(user_id, title_for_level(1)),
-        )
-
     def _profile_header(self, extra: str = "") -> str:
         level, into, need, total = level_progress(self.xp)
         title = self.titles.get(self.member.id, title_for_level(level))
@@ -4094,6 +4057,13 @@ class ProfileView(ReviewsLayout):
             actions.append(nav)
         return content, actions
 
+    def _affinity_line(self, item: Affinity) -> str:
+        common = "œuvre" if item.overlap == 1 else "œuvres"
+        return (
+            f"{_mention(self.guild, self.cog.bot, item.user_id)}\n"
+            f"-# {item.percent:.0f} % d'accord · {item.overlap} {common} en commun"
+        )
+
     def _affinites_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
         content: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
@@ -4105,18 +4075,20 @@ class ProfileView(ReviewsLayout):
             return content, actions
         twins = self.affinities[:3]
         rival = min(self.affinities, key=lambda a: (a.percent, -a.overlap))
-        lines = [
-            f"**{TWIN} Jumeaux**",
-            f"-# {len(self.affinities)} affinité(s) · min. {MIN_AFFINITY_OVERLAP} en commun",
-        ]
-        for twin in twins:
-            lines.append(self._person(twin.user_id))
-            lines.append(f"-# {twin.percent:.0f} % · {twin.overlap} en commun")
-        if rival.user_id not in {t.user_id for t in twins}:
-            lines.append(f"**{RIVAL} Rival**")
-            lines.append(self._person(rival.user_id))
-            lines.append(f"-# {rival.percent:.0f} %")
-        content.append(discord.ui.TextDisplay("\n".join(lines)))
+        count = len(self.affinities)
+        content.append(discord.ui.TextDisplay(
+            f"**{TWIN} Jumeaux**\n"
+            f"-# {count} affinité{'s' if count != 1 else ''} · min. {MIN_AFFINITY_OVERLAP} en commun"
+        ))
+        for index, twin in enumerate(twins):
+            if index:
+                content.append(sep_tight())
+            content.append(discord.ui.TextDisplay(self._affinity_line(twin)))
+        if rival.user_id not in {twin.user_id for twin in twins}:
+            content.append(sep_wide())
+            content.append(discord.ui.TextDisplay(f"**{RIVAL} Rival**"))
+            content.append(sep_tight())
+            content.append(discord.ui.TextDisplay(self._affinity_line(rival)))
         actions.append(discord.ui.ActionRow(AffinityCompareSelect(self)))
         return content, actions
 
@@ -6039,6 +6011,65 @@ class Reviews(commands.Cog):
         rows = await db.fetchall(sql, *args)
         return [(hit_from_row(row), float(row["avg_rating"]), int(row["people"])) for row in rows]
 
+    async def also_liked_similar(
+        self,
+        guild: discord.Guild,
+        media_id: int | None,
+    ) -> list[tuple[MediaHit, float, int]]:
+        """Œuvres notées pareil, par une large part de ceux qui ont noté les deux."""
+        if not media_id:
+            return []
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            """SELECT r1.user_id AS user_id, r1.rating AS left_rating, r2.rating AS right_rating,
+                      m.id AS other_media, m.source, m.source_id, m.media_type, m.title, m.subtitle,
+                      m.year, m.poster_url, m.url, m.overview, m.genres, m.extra_json
+               FROM reviews r1
+               JOIN reviews r2 ON r2.user_id = r1.user_id AND r2.media_id != r1.media_id
+               JOIN media m ON m.id = r2.media_id
+               WHERE r1.media_id=?""",
+            media_id,
+        )
+        grouped: dict[int, list[tuple[float, float]]] = {}
+        sample: dict[int, Any] = {}
+        for row in rows:
+            if guild.get_member(int(row["user_id"])) is None:
+                continue
+            other_id = int(row["other_media"])
+            grouped.setdefault(other_id, []).append((float(row["left_rating"]), float(row["right_rating"])))
+            sample[other_id] = row
+        ranked: list[tuple[int, float, int, Any]] = []
+        for other_id, pairs in grouped.items():
+            if len(pairs) < ALSO_LIKED_MIN:
+                continue
+            similar = sum(
+                1
+                for left, right in pairs
+                if abs(left - right) <= ALSO_PUBLIC_GAP and left >= LIKE_RATING and right >= LIKE_RATING
+            )
+            if similar * 100 < ALSO_PUBLIC_PERCENT * len(pairs):
+                continue
+            ranked.append((similar, similar / len(pairs), other_id, sample[other_id]))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [
+            (hit_from_row(row), agreement_percent(grouped[other_id]), similar)
+            for similar, _ratio, other_id, row in ranked[:ALSO_LIKED_LIMIT]
+        ]
+
+    async def public_fiche_line(
+        self,
+        guild: discord.Guild,
+        hit: MediaHit,
+        reviews: list[Any],
+        media_id: int | None,
+    ) -> str:
+        social = self.social_line_for_reviews(guild, reviews, viewer_id=None)
+        liked = await self.also_liked_similar(guild, media_id)
+        options = [line for line in (social, also_liked_line(hit, liked)) if line]
+        if not options:
+            return ""
+        return random.choice(options)
+
     async def load_for_you(
         self,
         guild: discord.Guild,
@@ -6160,22 +6191,43 @@ class Reviews(commands.Cog):
         if not reviews:
             return ""
 
-        groups: dict[float, list[int]] = {}
+        scored: list[tuple[int, float]] = []
         for row in reviews:
             user_id = int(row["user_id"])
             if viewer_id is not None and user_id == viewer_id:
                 continue
-            groups.setdefault(float(row["rating"]), []).append(user_id)
-        if not groups:
+            scored.append((user_id, float(row["rating"])))
+        if not scored:
             return ""
 
-        rating, user_ids = max(groups.items(), key=lambda item: (len(item[1]), item[0]))
-        named_max = 3
-        shown = user_ids[:named_max]
-        extra = max(0, len(user_ids) - named_max)
+        good = [(user_id, rating) for user_id, rating in scored if rating >= LIKE_RATING]
+        bad = [(user_id, rating) for user_id, rating in scored if rating <= BAD_RATING]
+        total = len(scored)
+        if len(good) * 2 > total:
+            camp = good
+            liked = True
+        elif len(bad) * 2 > total:
+            camp = bad
+            liked = False
+        else:
+            return ""
+
+        camp.sort(key=lambda item: item[1], reverse=liked)
+        user_ids = [user_id for user_id, _rating in camp]
+        scores = {rating for _user_id, rating in camp}
+        if len(scores) == 1:
+            verb = "a mis" if len(user_ids) == 1 else "ont mis"
+            tail = f" {format_score(next(iter(scores)))}"
+        elif liked:
+            verb = "a aimé" if len(user_ids) == 1 else "ont aimé"
+            tail = ""
+        else:
+            verb = "n'a pas aimé" if len(user_ids) == 1 else "n'ont pas aimé"
+            tail = ""
+        shown = user_ids[:3]
+        extra = max(0, len(user_ids) - 3)
         people = _format_people_fr([_mention_silent(uid) for uid in shown], extra)
-        verb = "a mis" if len(user_ids) == 1 else "ont mis"
-        return f"{people} {verb} {format_score(rating)}"
+        return f"{people} {verb}{tail}"
 
     async def list_affinities(self, guild: discord.Guild, user_id: int) -> list[Affinity]:
         await self.ensure_progress(guild)
