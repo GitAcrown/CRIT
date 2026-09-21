@@ -35,6 +35,7 @@ from .dyn import (
     update_payload,
 )
 from .emojis import (
+    ALBUM,
     BOOK,
     HOUSE,
     MORE,
@@ -270,7 +271,7 @@ TYPE_META: dict[str, tuple[str, str]] = {
     "movie": (MOVIE, "Film"),
     "tv": (TV, "Série"),
     "game": (GAME, "Jeu"),
-    "album": (MUSIC, "Album"),
+    "album": (ALBUM, "Album"),
     "track": (MUSIC, "Morceau"),
     "book": (BOOK, "Livre"),
 }
@@ -4911,7 +4912,7 @@ class HelpView(ReviewsLayout):
         )
         extras = (
             f"### {XP} Autour des notes\n"
-            f"{MOVIE} Films  ·  {TV} Séries  ·  {GAME} Jeux  ·  {MUSIC} Albums et morceaux  ·  {BOOK} Livres\n"
+            f"{MOVIE} Films  ·  {TV} Séries  ·  {GAME} Jeux  ·  {ALBUM} Albums  ·  {MUSIC} Morceaux  ·  {BOOK} Livres\n"
             "Le journal de `/carnet` se filtre par type et se trie (récentes / mieux notées). "
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
