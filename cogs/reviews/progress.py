@@ -12,6 +12,9 @@ from .emojis import (
     CROWN_EMPTY,
     CROWN_FULL,
     CROWN_HALF,
+    FLOWER_EMPTY,
+    FLOWER_FULL,
+    FLOWER_HALF,
     HEART_EMPTY,
     HEART_FULL,
     HEART_HALF,
@@ -143,6 +146,15 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         CROWN_EMPTY,
         3,
         "Se débloque au niveau 3.",
+    ),
+    StarSkin(
+        "fleurs",
+        "Fleurs",
+        FLOWER_FULL,
+        FLOWER_HALF,
+        FLOWER_EMPTY,
+        4,
+        "Se débloque au niveau 4.",
     ),
 )
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
