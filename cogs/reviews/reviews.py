@@ -2111,7 +2111,7 @@ class WatchlistButton(discord.ui.Button):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            label="Retirer le signet" if on else "Signet",
+            label="Retirer le signet" if on else "Ajouter un signet",
             style=discord.ButtonStyle.secondary if (on or rated) else discord.ButtonStyle.primary,
             disabled=rated,
         )
@@ -4887,7 +4887,7 @@ class HelpView(ReviewsLayout):
             f"({format_stars(0)} 0 → {format_stars(10)} 10, entier), "
             "un commentaire optionnel, la date (vu, joué, écouté ou lu) "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
-            "4. **Signet** l'ajoute à tes signets — il disparaît dès que tu notes.\n"
+            "4. **Ajouter un signet** l'ajoute à tes signets — il disparaît dès que tu notes.\n"
             "5. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
             "\n"
