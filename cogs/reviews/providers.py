@@ -12,6 +12,7 @@ import copy
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,7 @@ SPOTIFY_SEARCH_URL = "https://api.spotify.com/v1/search"
 OPENLIB_SEARCH = "https://openlibrary.org/search.json"
 OPENLIB_COVER = "https://covers.openlibrary.org/b/id/{}-M.jpg"
 OPENLIB_WORK = "https://openlibrary.org{}"
+OPENLIB_FIELDS = "key,title,author_name,first_publish_year,cover_i,subject,language"
 
 _YEAR_RE = re.compile(r"\s*[\(\[]?(19\d{2}|20\d{2})[\)\]]?\s*$")
 _PREFIX_RE = re.compile(r"^([^\s:/]+)\s*:\s*(.+)$")
@@ -243,6 +245,12 @@ def parse_search_query(raw: str) -> SearchSpec:
 
 def _poster(path: str | None) -> str | None:
     return TMDB_IMG.format(path) if path else None
+
+
+def _fold(text: str) -> str:
+    """Minuscules sans accents, pour comparer « Résister » et « Resister »."""
+    decomposed = unicodedata.normalize("NFD", text.casefold())
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
 def _year_from(date_str: str | None) -> int | None:
@@ -819,30 +827,77 @@ class SpotifyClient:
         )
 
 
+def _title_covers(query: str, hits: list[MediaHit]) -> bool:
+    folded = _fold(query)
+    if not folded:
+        return False
+    for hit in hits:
+        title = _fold(hit.title)
+        if title == folded or title.startswith(folded) or folded.startswith(title):
+            return True
+    return False
+
+
+def _rank_books(query: str, hits: list[MediaHit]) -> list[MediaHit]:
+    folded = _fold(query)
+    unique: list[MediaHit] = []
+    seen: set[str] = set()
+    for hit in hits:
+        if not hit.source_id or hit.source_id in seen:
+            continue
+        seen.add(hit.source_id)
+        unique.append(hit)
+
+    def key(hit: MediaHit) -> tuple[bool, bool, bool, bool, int]:
+        title = _fold(hit.title)
+        languages = hit.extra.get("languages") or []
+        return (
+            title == folded,
+            bool(title) and folded.startswith(title),
+            title.startswith(folded),
+            "fre" in languages,
+            hit.year or 0,
+        )
+
+    unique.sort(key=key, reverse=True)
+    return unique
+
+
 class OpenLibraryClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
 
     async def search(self, query: str, limit: int) -> list[MediaHit]:
+        text = query.strip()
+        if len(text) < 2:
+            return []
+        # `q=` seul ramène l'anglais « resist » devant le titre français « Résister ».
+        french = await self._query({"title": text, "language": "fre", "limit": max(limit, 8)})
+        if _title_covers(text, french):
+            return _rank_books(text, french)[:limit]
+        broad = await self._query({"q": text, "limit": max(limit, 8)})
+        return _rank_books(text, [*french, *broad])[:limit]
+
+    async def _query(self, params: dict[str, Any]) -> list[MediaHit]:
         try:
             payload = await _json(
                 self.session,
                 OPENLIB_SEARCH,
-                params={"q": query, "limit": limit, "fields": "key,title,author_name,first_publish_year,cover_i,subject"},
+                params={**params, "fields": OPENLIB_FIELDS},
                 timeout=aiohttp.ClientTimeout(total=6, sock_connect=2),
             )
         except Exception as exc:
             logger.warning("Recherche Open Library échouée : %s", exc)
             return []
-
         hits: list[MediaHit] = []
         for item in payload.get("docs") or []:
             key = item.get("key") or ""
             if not key:
                 continue
-            authors = item.get("author_name") or []
+            authors = [name for name in (item.get("author_name") or []) if isinstance(name, str)]
             cover_id = item.get("cover_i")
             subjects = [s for s in (item.get("subject") or []) if isinstance(s, str)][:3]
+            languages = [code for code in (item.get("language") or []) if isinstance(code, str)]
             hits.append(
                 MediaHit(
                     source="openlibrary",
@@ -854,7 +909,7 @@ class OpenLibraryClient:
                     poster_url=OPENLIB_COVER.format(cover_id) if cover_id else None,
                     url=OPENLIB_WORK.format(key),
                     genres=subjects,
-                    extra={"authors": authors[:3]},
+                    extra={"authors": authors[:3], "languages": languages},
                 )
             )
         return hits
@@ -968,8 +1023,11 @@ class MediaCatalog:
             tasks.append(("spotify-album", self.spotify.search(clean, "album", per), 2.5 if quick else 3.5))
         if source in (None, "spotify") and wants("track"):
             tasks.append(("spotify-track", self.spotify.search(clean, "track", 3 if wide else 8), 2.5 if quick else 3.5))
-        if source == "openlibrary" or (kinds is not None and "book" in kinds):
-            tasks.append(("books", self.books.search(clean, per), 6.0))
+        # « Tous types » incluait les livres seulement via `livre:`. Une recherche
+        # complète les interroge aussi ; l'autocomplete reste sans Open Library.
+        want_books = source == "openlibrary" or (kinds is not None and "book" in kinds)
+        if want_books or (source is None and wide and not quick):
+            tasks.append(("books", self.books.search(clean, per if want_books else 4), 6.0))
 
         async def one_source(name: str, coro: Any, budget: float) -> list[MediaHit]:
             try:
@@ -1001,13 +1059,13 @@ class MediaCatalog:
                 seen.add(hit.identity)
                 merged.append(hit)
 
-        q = clean.casefold()
+        q = _fold(clean)
 
         def rank(hit: MediaHit) -> tuple[int, int, int, int]:
-            title = hit.title.casefold()
+            title = _fold(hit.title)
             return (
-                -_TYPE_PRIORITY.get(hit.media_type, 9),
                 int(title == q),
+                -_TYPE_PRIORITY.get(hit.media_type, 9),
                 int(title.startswith(q)),
                 int(q in title),
             )
