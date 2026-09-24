@@ -35,12 +35,20 @@ from .dyn import (
     update_payload,
 )
 from .emojis import (
+    ADD_LIST,
+    AFFINITY,
     ALBUM,
     BOOK,
-    HOUSE,
-    MORE,
+    BOOKMARK_LIST,
+    BOOKMARK_OFF,
+    BOOKMARK_ON,
+    EDIT_LIST,
     EXPLICIT,
     GAME,
+    HOUSE,
+    JOURNAL,
+    LIST,
+    MORE,
     MOVIE,
     MUSIC,
     RIVAL,
@@ -1813,6 +1821,7 @@ class MyNoteView(ReviewsLayout):
         if mine:
             actions.append(MyNoteDeleteButton(self))
         actions.append(WatchlistButton(self))
+        actions.append(AddToListButton(self))
         self.set_layout([section_with_thumbnail(text, hit.poster_url)], discord.ui.ActionRow(*actions))
 
     async def save_review(
@@ -2134,8 +2143,8 @@ class WatchlistButton(discord.ui.Button):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            label="Retirer le signet" if on else "Ajouter un signet",
-            style=discord.ButtonStyle.secondary if (on or rated) else discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(BOOKMARK_ON if on else BOOKMARK_OFF),
             disabled=rated,
         )
         self._hub = parent
@@ -2156,6 +2165,79 @@ class WatchlistButton(discord.ui.Button):
         else:
             await self._hub.cog.add_watchlist(self._hub.guild, interaction.user.id, self._hub.hit)
         await self._hub.refresh(interaction)
+
+
+class AddToListButton(discord.ui.Button):
+    def __init__(self, parent: Any):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(ADD_LIST),
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        lists = await self._hub.cog.writable_shared_lists(self._hub.guild, interaction.user.id)
+        if not lists:
+            await interaction.followup.send(
+                "**Listes ·** Tu n'as aucune liste que tu peux modifier.",
+                ephemeral=True,
+            )
+            return
+        view = FicheAddListView(self._hub.cog, self._hub.guild, self._hub.hit, lists[:25])
+        await interaction.followup.send(view=view, ephemeral=True)
+
+
+class FicheAddListSelect(discord.ui.Select):
+    def __init__(self, parent: "FicheAddListView"):
+        options = [
+            discord.SelectOption(
+                label=pretty.shorten_text(record["title"], 95) or "Sans titre",
+                value=str(record["id"]),
+                description=pretty.shorten_text(
+                    f"{record['item_count']} œuvre{'s' if record['item_count'] != 1 else ''}",
+                    95,
+                ),
+            )
+            for record in parent.lists
+        ]
+        super().__init__(placeholder="Choisir une liste", options=options)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        list_id = int(self.values[0])
+        record = next((item for item in self._hub.lists if int(item["id"]) == list_id), None)
+        if record is None:
+            await interaction.response.send_message("**Erreur ·** Cette liste n'existe plus.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        error = await self._hub.cog.add_shared_list_item(
+            self._hub.guild, list_id, interaction.user.id, self._hub.hit,
+        )
+        title = pretty.shorten_text(record["title"], 80)
+        await interaction.followup.send(
+            f"**Liste ·** {error}" if error else f"**Ajouté ·** {self._hub.hit.title} dans **{title}**.",
+            ephemeral=True,
+        )
+
+
+class FicheAddListView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        hit: MediaHit,
+        lists: list[dict[str, Any]],
+    ):
+        super().__init__(timeout=MENU_TIMEOUT)
+        self.cog = cog
+        self.guild = guild
+        self.hit = hit
+        self.lists = lists
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("**Ajouter à une liste**"),
+            discord.ui.ActionRow(FicheAddListSelect(self)),
+        ))
 
 
 class DeleteReviewButton(discord.ui.Button):
@@ -2840,6 +2922,7 @@ class MediaSessionView(ReviewsLayout):
                 page_actions.append(DeleteReviewButton(self))
             if self.ephemeral:
                 page_actions.append(WatchlistButton(self))
+                page_actions.append(AddToListButton(self))
             actions.append(discord.ui.ActionRow(*page_actions[:5]))
         self.set_layout(body, *actions)
         if not self.published_wid:
@@ -3458,74 +3541,68 @@ class SharedListDoneButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
-class SharedListActionsSelect(discord.ui.Select):
+class SharedListAddButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        can_edit = parent.can_edit(parent.viewer_id)
-        owner = parent.is_owner(parent.viewer_id)
-        options: list[discord.SelectOption] = []
-        if can_edit:
-            options.append(discord.SelectOption(
-                label="Ajouter une œuvre",
-                value="add",
-                description="Chercher un titre à mettre dans la liste",
-            ))
-        if owner:
-            options.append(discord.SelectOption(
-                label="Modifier",
-                value="edit",
-                description="Titre, description et droits",
-            ))
-        if can_edit and parent.items:
-            options.append(discord.SelectOption(
-                label="Retirer une œuvre",
-                value="remove",
-                description="Choisir une œuvre de cette page",
-            ))
-        if owner:
-            options.append(discord.SelectOption(
-                label="Supprimer la liste",
-                value="delete",
-                description="La liste disparaît du serveur",
-            ))
-        super().__init__(placeholder="Actions", options=options)
+        super().__init__(label="Ajouter", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        action = self.values[0]
-        if action == "add":
-            if not self._hub.can_edit(interaction.user.id):
-                await interaction.response.send_message(
-                    "**Action impossible ·** Tu ne peux pas modifier cette liste.",
-                    ephemeral=True,
-                    delete_after=10,
-                )
-                return
-            await interaction.response.send_modal(SharedListAddModal(self._hub))
+        if not self._hub.can_edit(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
             return
-        if action == "edit":
-            if not self._hub.is_owner(interaction.user.id):
-                await interaction.response.send_message(
-                    "**Action impossible ·** Seul le créateur peut modifier cette liste.",
-                    ephemeral=True,
-                    delete_after=10,
-                )
-                return
-            await interaction.response.send_modal(EditSharedListModal(self._hub))
+        await interaction.response.send_modal(SharedListAddModal(self._hub))
+
+
+class SharedListRemoveButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Retirer", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.can_edit(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Tu ne peux pas modifier cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
             return
         await interaction.response.defer()
-        if action == "remove":
-            if not self._hub.can_edit(interaction.user.id):
-                await interaction.followup.send(
-                    "**Action impossible ·** Tu ne peux pas modifier cette liste.",
-                    ephemeral=True,
-                )
-                return
-            self._hub.menu = "remove"
-            self._hub._build()
-            await apply_view(interaction, self._hub)
+        self._hub.menu = "remove"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class SharedListEditButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(EDIT_LIST),
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur peut modifier cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
             return
-        if action == "delete":
-            await self._hub.delete_list(interaction)
+        await interaction.response.send_modal(EditSharedListModal(self._hub))
+
+
+class SharedListDeleteButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._hub.delete_list(interaction)
 
 
 class SharedListRemoveSelect(discord.ui.Select):
@@ -3616,7 +3693,7 @@ class ListsHubView(ReviewsLayout):
             desc = pretty.shorten_text(record["description"], 160) if record["description"] else "*Pas de description.*"
             n = record["item_count"]
             text = (
-                f"### {record['title']}\n{desc}\n"
+                f"### {LIST} {record['title']}\n{desc}\n"
                 f"-# {_mention(self.guild, self.cog.bot, record['owner_id'])} · "
                 f"{n} œuvre{'s' if n != 1 else ''} · {list_edit_label(record['edit_mode'])}"
             )
@@ -3709,7 +3786,7 @@ class SharedListView(ReviewsLayout):
         desc = pretty.shorten_text(self.record["description"], 220) if self.record["description"] else "*Pas de description.*"
         n = len(self.items)
         lines = [
-            f"## {self.record['title']}",
+            f"## {LIST} {self.record['title']}",
             desc,
             f"-# {_mention(self.guild, self.cog.bot, self.record['owner_id'])} · "
             f"{n} œuvre{'s' if n != 1 else ''} · édition : {list_edit_label(self.record['edit_mode']).lower()}",
@@ -3768,8 +3845,17 @@ class SharedListView(ReviewsLayout):
                 body.append(section_with_thumbnail(text, hit.poster_url))
         if self.menu == "remove" and page_items:
             rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
-        elif self.can_edit(self.viewer_id) or self.is_owner(self.viewer_id):
-            rows.append(discord.ui.ActionRow(SharedListActionsSelect(self)))
+        else:
+            actions: list[discord.ui.Item] = []
+            if self.can_edit(self.viewer_id):
+                actions.append(SharedListAddButton(self))
+                if self.items:
+                    actions.append(SharedListRemoveButton(self))
+            if self.is_owner(self.viewer_id):
+                actions.append(SharedListEditButton(self))
+                actions.append(SharedListDeleteButton(self))
+            if actions:
+                rows.append(discord.ui.ActionRow(*actions[:5]))
         rows.append(self._nav_row(max_page))
         self.set_layout(body, *rows)
         self.add_item(discord.ui.ActionRow(SharedListShareButton(self)))
@@ -3900,16 +3986,11 @@ class ProfileView(ReviewsLayout):
         return discord.ui.TextDisplay(self._profile_header())
 
     def _tabs_row(self) -> discord.ui.ActionRow:
-        journal, signets, affinites = labeled_tabs(
-            f"Journal ({self.review_count})",
-            f"Signets ({len(self.watchlist_entries)})",
-            "Affinités",
-        )
         return discord.ui.ActionRow(
             HubTabButton(self, "profil", None, emoji=HOUSE),
-            HubTabButton(self, "journal", journal),
-            HubTabButton(self, "signets", signets),
-            HubTabButton(self, "affinites", affinites),
+            HubTabButton(self, "journal", str(self.review_count), emoji=JOURNAL),
+            HubTabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_LIST),
+            HubTabButton(self, "affinites", str(len(self.affinities)), emoji=AFFINITY),
         )
 
     def _assemble(
@@ -4944,7 +5025,7 @@ class HelpView(ReviewsLayout):
             f"({format_stars(0)} 0 → {format_stars(10)} 10, entier), "
             "un commentaire optionnel, la date (vu, joué, écouté ou lu) "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
-            "4. **Ajouter un signet** l'ajoute à tes signets — il disparaît dès que tu notes.\n"
+            "4. Le signet l'ajoute à tes signets — il disparaît dès que tu notes.\n"
             "5. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
             "\n"
@@ -5664,6 +5745,17 @@ class Reviews(commands.Cog):
         if mode == "public":
             return True
         return mode == "members" and user_id in editor_ids
+
+    async def writable_shared_lists(self, guild: discord.Guild, user_id: int) -> list[dict[str, Any]]:
+        lists = await self.load_shared_lists(guild)
+        writable: list[dict[str, Any]] = []
+        for record in lists:
+            editors: list[int] = []
+            if record.get("edit_mode") == "members" and int(record["owner_id"]) != user_id:
+                editors = await self.load_shared_list_editors(guild, record["id"])
+            if self.can_edit_shared_list(record, user_id, editors):
+                writable.append(record)
+        return writable
 
     def _shared_list_from_row(self, row: Any, *, item_count: int | None = None) -> dict[str, Any]:
         count = item_count
