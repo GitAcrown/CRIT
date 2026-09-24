@@ -3044,18 +3044,43 @@ class JournalTypeSelect(discord.ui.Select):
         await apply_view(interaction, self._hub)
 
 
-class JournalSortButton(discord.ui.Button):
-    def __init__(self, parent: "ProfileView"):
-        by_rating = parent.journal_sort == "rating"
+SORT_CYCLE = ("recent", "best", "worst")
+SORT_LABELS = {
+    "recent": "Tri : Récentes",
+    "best": "Tri : Meilleures",
+    "worst": "Tri : Pires",
+}
+SORT_STYLES = {
+    "recent": discord.ButtonStyle.primary,
+    "best": discord.ButtonStyle.success,
+    "worst": discord.ButtonStyle.danger,
+}
+
+
+def next_sort(current: str) -> str:
+    try:
+        index = SORT_CYCLE.index(current)
+    except ValueError:
+        return "recent"
+    return SORT_CYCLE[(index + 1) % len(SORT_CYCLE)]
+
+
+class CycleSortButton(discord.ui.Button):
+    """Bouton entre les flèches : Récentes → Meilleures → Pires."""
+
+    def __init__(self, parent: Any, attr: str, page_attr: str):
+        current = getattr(parent, attr)
         super().__init__(
-            label="Tri : Mieux notées" if by_rating else "Tri : Plus récentes",
-            style=discord.ButtonStyle.green if by_rating else discord.ButtonStyle.primary,
+            label=SORT_LABELS.get(current, SORT_LABELS["recent"]),
+            style=SORT_STYLES.get(current, discord.ButtonStyle.primary),
         )
         self._hub = parent
+        self._attr = attr
+        self._page_attr = page_attr
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.journal_sort = "recent" if self._hub.journal_sort == "rating" else "rating"
-        self._hub.journal_page = 0
+        setattr(self._hub, self._attr, next_sort(getattr(self._hub, self._attr)))
+        setattr(self._hub, self._page_attr, 0)
         self._hub._build()
         await apply_view(interaction, self._hub)
 
@@ -3113,27 +3138,6 @@ class CatalogOpenSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         hit, _avg, _count = self._items[int(self.values[0])]
-        await interaction.response.defer()
-        await open_public_fiche(self._hub.cog, self._hub.guild, interaction, hit)
-
-
-class RecentOpenSelect(discord.ui.Select):
-    def __init__(self, parent: "ServerHubView", page_items: list[tuple[MediaHit, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(hit.title, 95),
-                value=str(index),
-                description=pretty.shorten_text(f"{format_stars_select(row['rating'])}/{RATING_MAX} · {type_label(hit.media_type)}", 95),
-                emoji=select_emoji(hit.media_type),
-            )
-            for index, (hit, row) in enumerate(page_items)
-        ]
-        super().__init__(placeholder="Ouvrir une fiche", options=options)
-        self._hub = parent
-        self._items = page_items
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        hit, _row = self._items[int(self.values[0])]
         await interaction.response.defer()
         await open_public_fiche(self._hub.cog, self._hub.guild, interaction, hit)
 
@@ -4095,11 +4099,16 @@ class ProfileView(ReviewsLayout):
         items = self.journal_entries
         if self.journal_type != "all":
             items = [(hit, row) for hit, row in items if hit.media_type == self.journal_type]
-        if self.journal_sort == "rating":
+        if self.journal_sort == "best":
             items = sorted(
                 items,
                 key=lambda item: (float(item[1]["rating"]), int(item[1]["updated_at"] or 0)),
                 reverse=True,
+            )
+        elif self.journal_sort == "worst":
+            items = sorted(
+                items,
+                key=lambda item: (float(item[1]["rating"]), -int(item[1]["updated_at"] or 0)),
             )
         return items
 
@@ -4139,7 +4148,7 @@ class ProfileView(ReviewsLayout):
         return content
 
     def _journal_nav(self, max_page: int) -> discord.ui.ActionRow:
-        sort = JournalSortButton(self)
+        sort = CycleSortButton(self, "journal_sort", "journal_page")
         if max_page <= 0:
             return discord.ui.ActionRow(sort)
         prev_btn = HubPageButton(self, "journal_page", -1, "←", max_page)
@@ -4274,78 +4283,42 @@ class ProfileView(ReviewsLayout):
         await self.push(interaction)
 
 
-class TopPeriodSelect(discord.ui.Select):
-    def __init__(self, parent: "ServerHubView"):
-        options = [
-            discord.SelectOption(label="Toutes périodes", value="all", default=parent.period == "all"),
-            discord.SelectOption(label="Cette semaine", value="semaine", default=parent.period == "semaine"),
-            discord.SelectOption(label="Ce mois", value="mois", default=parent.period == "mois"),
-        ]
-        super().__init__(placeholder="Période du top", options=options, min_values=1, max_values=1)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        self._hub.period = self.values[0]
-        self._hub.top_page = 0
-        self._hub.top_items = await self._hub.cog.load_top(
-            self._hub.guild,
-            media_type=self._hub.media_type,
-            period=self._hub.period,
-        )
-        await self._hub.refresh(interaction)
-
-
 class ServerHubView(ReviewsLayout):
-    """Récentes, catalogue, top et recommandations du serveur, dans une seule vue à onglets."""
+    """Catalogue du serveur et recommandations, dans une seule vue à onglets."""
 
     def __init__(
         self,
         cog: "Reviews",
         guild: discord.Guild,
         *,
-        recent: list[tuple[MediaHit, Any]],
-        catalog: list[tuple[MediaHit, float, int]],
-        top: list[tuple[MediaHit, float, int]],
+        catalog: list[tuple[MediaHit, float, int, int]],
         for_you: list[tuple[MediaHit, float, int]],
         for_you_hint: str,
         catalog_subtitle: str,
-        media_type: str = "all",
-        period: str = "all",
-        tab: str = "recentes",
         star_skin: StarSkin | None = None,
     ):
         super().__init__()
         self.cog = cog
         self.guild = guild
-        self.recent = recent
         self.catalog = catalog
-        self.top_items = top
         self.for_you = for_you
         self.for_you_hint = for_you_hint
         self.catalog_subtitle = catalog_subtitle
-        self.media_type = media_type
-        self.period = period
-        self.tab = tab
+        self.tab = "catalogue"
+        self.catalog_sort = "recent"
         self.star_skin = star_skin
-        self.recent_page = 0
         self.catalog_page = 0
-        self.top_page = 0
         self.for_you_page = 0
         self._interaction: discord.Interaction | None = None
         self._build()
 
     def _tabs_row(self) -> discord.ui.ActionRow:
-        recentes, catalogue, top, pour_toi = labeled_tabs(
-            "Récentes",
+        catalogue, pour_toi = labeled_tabs(
             f"Catalogue ({len(self.catalog)})",
-            "Top",
             "Pour toi",
         )
         return discord.ui.ActionRow(
-            HubTabButton(self, "recentes", recentes),
             HubTabButton(self, "catalogue", catalogue),
-            HubTabButton(self, "top", top),
             HubTabButton(self, "pour_toi", pour_toi),
         )
 
@@ -4358,6 +4331,25 @@ class ServerHubView(ReviewsLayout):
         prev_btn.disabled = page <= 0
         next_btn.disabled = page >= max_page
         return discord.ui.ActionRow(prev_btn, next_btn)
+
+    def _sorted_catalog(self) -> list[tuple[MediaHit, float, int]]:
+        if self.catalog_sort == "best":
+            ordered = sorted(self.catalog, key=lambda item: (item[1], item[2], item[3]), reverse=True)
+        elif self.catalog_sort == "worst":
+            ordered = sorted(self.catalog, key=lambda item: (item[1], -item[2], -item[3]))
+        else:
+            ordered = sorted(self.catalog, key=lambda item: (item[3], item[1]), reverse=True)
+        return [(hit, avg, count) for hit, avg, count, _latest in ordered]
+
+    def _catalog_nav(self, max_page: int) -> discord.ui.ActionRow:
+        sort = CycleSortButton(self, "catalog_sort", "catalog_page")
+        if max_page <= 0:
+            return discord.ui.ActionRow(sort)
+        prev_btn = HubPageButton(self, "catalog_page", -1, "←", max_page)
+        next_btn = HubPageButton(self, "catalog_page", 1, "→", max_page)
+        prev_btn.disabled = self.catalog_page <= 0
+        next_btn.disabled = self.catalog_page >= max_page
+        return discord.ui.ActionRow(prev_btn, sort, next_btn)
 
     def _ranked_layout(
         self,
@@ -4392,73 +4384,28 @@ class ServerHubView(ReviewsLayout):
             )
         body.append(discord.ui.TextDisplay("\n".join(lines)))
         rows.append(discord.ui.ActionRow(CatalogOpenSelect(self, page_items, count_label=count_label)))
-        nav = self._page_nav(page_attr, max_page)
-        if nav:
-            rows.append(nav)
+        if page_attr == "catalog_page":
+            rows.append(self._catalog_nav(max_page))
+        else:
+            nav = self._page_nav(page_attr, max_page)
+            if nav:
+                rows.append(nav)
         return body, rows
 
-    def _recentes_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
-        body: list[discord.ui.Item] = [discord.ui.TextDisplay(
-            f"## Dernières critiques\n-# {len(self.recent)} récente(s) sur ce serveur"
-        )]
-        rows: list[discord.ui.ActionRow] = []
-        if not self.recent:
-            body.append(discord.ui.TextDisplay("*Personne n'a encore noté d'œuvre ici.*"))
-            return body, rows
-        max_page = max(0, (len(self.recent) - 1) // JOURNAL_PAGE)
-        self.recent_page = min(self.recent_page, max_page)
-        start = self.recent_page * JOURNAL_PAGE
-        page_items = self.recent[start:start + JOURNAL_PAGE]
-        for index, (hit, row) in enumerate(page_items):
-            if index:
-                body.append(sep_tight())
-            user_id = int(row["user_id"])
-            _name, avatar = _user_display(self.guild, self.cog.bot, user_id)
-            year = f" ({hit.year})" if hit.year else ""
-            text = (
-                f"{_mention(self.guild, self.cog.bot, user_id)}\n"
-                f"{self.stars(row['rating'])}  **{format_score(row['rating'])}**\n"
-                f"**{hit.title}**{year} · {type_label(hit.media_type)} · <t:{row['updated_at']}:R>"
-            )
-            shown = format_comment(
-                row["comment"] or "",
-                spoiler=row_spoiler(row),
-                hide=True,
-                limit=180,
-            )
-            if shown:
-                text += f"\n{shown}"
-            seen = experienced_line(hit.media_type, experienced_from_row(row))
-            if seen:
-                text += f"\n{seen}"
-            body.append(section_with_thumbnail(text, avatar or hit.poster_url))
-        rows.append(discord.ui.ActionRow(RecentOpenSelect(self, page_items)))
-        nav = self._page_nav("recent_page", max_page)
-        if nav:
-            rows.append(nav)
-        return body, rows
+    def _catalog_heading(self) -> str:
+        hints = {
+            "recent": "Les plus récemment notées",
+            "best": "Les mieux notées",
+            "worst": "Les moins bien notées",
+        }
+        hint = hints.get(self.catalog_sort, hints["recent"])
+        extra = self.catalog_subtitle
+        if extra and extra != "Toutes les œuvres notées":
+            return f"{hint}  ·  {extra}"
+        return hint
 
     def _build(self) -> None:
-        if self.tab == "catalogue":
-            body, rows = self._ranked_layout(
-                title="Catalogue du serveur",
-                subtitle=self.catalog_subtitle,
-                items=self.catalog,
-                page_attr="catalog_page",
-            )
-        elif self.tab == "top":
-            period_label = {"all": "toutes périodes", "semaine": "cette semaine", "mois": "ce mois"}.get(
-                self.period, self.period
-            )
-            type_part = type_label(self.media_type) if self.media_type != "all" else "Tous types"
-            body, rows = self._ranked_layout(
-                title="Top du serveur",
-                subtitle=f"{type_part}  ·  {period_label}",
-                items=self.top_items,
-                page_attr="top_page",
-                extra_row=discord.ui.ActionRow(TopPeriodSelect(self)),
-            )
-        elif self.tab == "pour_toi":
+        if self.tab == "pour_toi":
             body, rows = self._ranked_layout(
                 title="Pour toi",
                 subtitle="Pas encore notées, aimées par des membres proches de tes goûts",
@@ -4468,7 +4415,12 @@ class ServerHubView(ReviewsLayout):
                 empty=self.for_you_hint,
             )
         else:
-            body, rows = self._recentes_layout()
+            body, rows = self._ranked_layout(
+                title="Catalogue du serveur",
+                subtitle=self._catalog_heading(),
+                items=self._sorted_catalog(),
+                page_attr="catalog_page",
+            )
         self.set_layout([self._tabs_row(), sep_tight(), *body], *rows)
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
@@ -5120,7 +5072,7 @@ class HelpView(ReviewsLayout):
             "`/stream` — lives en cours : voir la fiche liée, ou lier le tien\n"
             "`/carnet` — page d'un membre : profil, journal, signets, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
-            "`/explore` — ce que le salon a déjà noté : récentes, catalogue, top, pour toi\n"
+            "`/explore` — catalogue du serveur (récentes, meilleures, pires) et pour toi\n"
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
             "`/preferences` — tes défauts : date, listes, recherche, annonces, stream\n"
@@ -5132,7 +5084,7 @@ class HelpView(ReviewsLayout):
         extras = (
             f"### {XP} Autour des notes\n"
             f"{MOVIE} Films  ·  {TV} Séries  ·  {GAME} Jeux  ·  {ALBUM} Albums  ·  {MUSIC} Morceaux  ·  {BOOK} Livres\n"
-            "Le journal de `/carnet` se filtre par type et se trie (récentes / mieux notées). "
+            "Le journal de `/carnet` se filtre par type et se trie (récentes, meilleures, pires). "
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
             "(lui seul, des membres, ou tout le serveur). "
@@ -6088,18 +6040,6 @@ class Reviews(commands.Cog):
             )
         return [(hit_from_row(row), row) for row in rows]
 
-    async def load_recent(self, guild: discord.Guild, *, limit: int = 40) -> list[tuple[MediaHit, Any]]:
-        await self._ensure_schema(guild)
-        rows = await self.data.get(guild).fetchall(
-            """SELECT r.*, m.source, m.source_id, m.media_type, m.title, m.subtitle, m.year,
-                      m.poster_url, m.url, m.overview, m.genres, m.extra_json
-               FROM reviews r JOIN media m ON m.id = r.media_id
-               ORDER BY r.updated_at DESC
-               LIMIT ?""",
-            limit,
-        )
-        return [(hit_from_row(row), row) for row in rows]
-
     async def load_catalog(
         self,
         guild: discord.Guild,
@@ -6108,8 +6048,9 @@ class Reviews(commands.Cog):
         member_id: int | None = None,
         media_type: str = "all",
         min_rating: float | None = None,
-    ) -> list[tuple[MediaHit, float, int]]:
-        sql = """SELECT m.*, AVG(r.rating) AS avg_rating, COUNT(r.id) AS n
+    ) -> list[tuple[MediaHit, float, int, int]]:
+        sql = """SELECT m.*, AVG(r.rating) AS avg_rating, COUNT(r.id) AS n,
+                        MAX(r.updated_at) AS latest
                  FROM media m JOIN reviews r ON r.media_id = m.id"""
         clauses: list[str] = []
         args: list[Any] = []
@@ -6126,7 +6067,10 @@ class Reviews(commands.Cog):
             sql += " WHERE " + " AND ".join(clauses)
         sql += " GROUP BY m.id"
         rows = await self.data.get(guild).fetchall(sql, *args)
-        items = [(hit_from_row(row), float(row["avg_rating"]), int(row["n"])) for row in rows]
+        items = [
+            (hit_from_row(row), float(row["avg_rating"]), int(row["n"]), int(row["latest"] or 0))
+            for row in rows
+        ]
         if query:
             items = fuzzy.finder(
                 query,
@@ -6134,29 +6078,6 @@ class Reviews(commands.Cog):
                 key=lambda item: f"{item[0].title} {item[0].subtitle} {item[0].year or ''}",
             )
         return items
-
-    async def load_top(
-        self,
-        guild: discord.Guild,
-        *,
-        media_type: str = "all",
-        period: str = "all",
-    ) -> list[tuple[MediaHit, float, int]]:
-        sql = """SELECT m.*, AVG(r.rating) AS avg_rating, COUNT(r.id) AS n
-                 FROM media m JOIN reviews r ON r.media_id = m.id"""
-        clauses: list[str] = []
-        args: list[Any] = []
-        if media_type != "all":
-            clauses.append("m.media_type=?")
-            args.append(media_type)
-        if period in PERIOD_SECONDS:
-            clauses.append("r.updated_at>=?")
-            args.append(int(time.time()) - PERIOD_SECONDS[period])
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " GROUP BY m.id ORDER BY avg_rating DESC, n DESC LIMIT 25"
-        rows = await self.data.get(guild).fetchall(sql, *args)
-        return [(hit_from_row(row), float(row["avg_rating"]), int(row["n"])) for row in rows]
 
     def _present_members(self, guild: discord.Guild, user_ids: list[int]) -> list[int]:
         seen: set[int] = set()
@@ -7461,14 +7382,13 @@ class Reviews(commands.Cog):
         media_type: str = "all",
         min_rating: float | None = None,
     ) -> None:
-        """Feuillette ce que le serveur a déjà noté : récentes, catalogue, top et pour toi."""
+        """Feuillette le catalogue du serveur : récentes, meilleures, pires, et pour toi."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
                 "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
             )
         await interaction.response.defer(ephemeral=True)
-        recent = await self.load_recent(guild)
         catalog = await self.load_catalog(
             guild,
             query=query,
@@ -7476,7 +7396,6 @@ class Reviews(commands.Cog):
             media_type=media_type,
             min_rating=min_rating,
         )
-        top = await self.load_top(guild, media_type=media_type)
         for_you, for_you_hint = await self.load_for_you(
             guild, interaction.user.id, media_type=media_type,
         )
@@ -7489,18 +7408,13 @@ class Reviews(commands.Cog):
             subtitle_parts.append(type_label(media_type))
         if min_rating is not None:
             subtitle_parts.append(f"≥ {format_score(min_rating)}")
-        filtered = bool(query or member or min_rating is not None or media_type != "all")
         view = ServerHubView(
             self,
             guild,
-            recent=recent,
             catalog=catalog,
-            top=top,
             for_you=for_you,
             for_you_hint=for_you_hint,
             catalog_subtitle="  ·  ".join(subtitle_parts) or "Toutes les œuvres notées",
-            media_type=media_type,
-            tab="catalogue" if filtered else "recentes",
             star_skin=await self.star_skin_for(guild, interaction.user.id),
         )
         view._interaction = interaction
