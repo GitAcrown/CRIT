@@ -598,6 +598,55 @@ def list_edit_label(mode: str) -> str:
     }.get(mode, "Créateur seul")
 
 
+def parse_list_types(raw: str | None) -> tuple[str, ...]:
+    """Types autorisés. Vide = tous les types."""
+    if not raw or raw == "all":
+        return ()
+    chosen = {part.strip() for part in str(raw).split(",") if part.strip() in TYPE_META}
+    if not chosen or chosen >= set(TYPE_META):
+        return ()
+    return tuple(kind for kind in TYPE_META if kind in chosen)
+
+
+def format_list_types(kinds: list[str] | tuple[str, ...]) -> str:
+    chosen = [kind for kind in TYPE_META if kind in set(kinds)]
+    if not chosen or set(chosen) >= set(TYPE_META):
+        return ""
+    return ",".join(chosen)
+
+
+def list_types_label(raw: str | None) -> str:
+    kinds = parse_list_types(raw)
+    if not kinds:
+        return "Tous types"
+    return " · ".join(type_label(kind) for kind in kinds)
+
+
+def list_accepts_type(raw: str | None, media_type: str) -> bool:
+    kinds = parse_list_types(raw)
+    return not kinds or media_type in kinds
+
+
+def list_type_select(raw: str | None) -> discord.ui.Select:
+    chosen = set(parse_list_types(raw))
+    return discord.ui.Select(
+        placeholder="Tous les types",
+        min_values=0,
+        max_values=len(TYPE_META),
+        required=False,
+        options=[
+            discord.SelectOption(
+                label=type_label(kind),
+                value=kind,
+                emoji=select_emoji(kind),
+                description="Peut être combiné",
+                default=kind in chosen,
+            )
+            for kind in TYPE_META
+        ],
+    )
+
+
 DATE_PREF_VALUES = ("empty", "today")
 
 
@@ -2178,9 +2227,13 @@ class AddToListButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         lists = await self._hub.cog.writable_shared_lists(self._hub.guild, interaction.user.id)
+        lists = [
+            record for record in lists
+            if list_accepts_type(record.get("allowed_types"), self._hub.hit.media_type)
+        ]
         if not lists:
             await interaction.followup.send(
-                "**Listes ·** Tu n'as aucune liste que tu peux modifier.",
+                "**Listes ·** Aucune liste que tu peux modifier n'accepte ce type.",
                 ephemeral=True,
             )
             return
@@ -3232,8 +3285,16 @@ class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
             max_length=LIST_DESC_MAX,
             required=False,
         )
+        self.types_select = list_type_select("")
         self.add_item(self.title_input)
         self.add_item(self.desc_input)
+        self.add_item(
+            discord.ui.Label(
+                text="Types acceptés",
+                description="Vide = tous les types",
+                component=self.types_select,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         title = str(self.title_input.value or "").strip()
@@ -3253,6 +3314,7 @@ class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
             interaction.user.id,
             title,
             str(self.desc_input.value or "").strip(),
+            allowed_types=format_list_types(self.types_select.values or []),
         )
         view = await SharedListView.create(
             self._hub.cog, self._hub.guild, record["id"], viewer_id=self._hub.viewer_id,
@@ -3319,8 +3381,16 @@ class EditSharedListModal(discord.ui.Modal, title="Modifier la liste"):
                 discord.Object(id=user_id) for user_id in parent.editor_ids[:25]
             ]
         self.editors_select = discord.ui.UserSelect(**editors_kwargs)
+        self.types_select = list_type_select(parent.record.get("allowed_types"))
         self.add_item(self.title_input)
         self.add_item(self.desc_input)
+        self.add_item(
+            discord.ui.Label(
+                text="Types acceptés",
+                description="Vide = tous les types",
+                component=self.types_select,
+            )
+        )
         self.add_item(
             discord.ui.Label(
                 text="Peuvent éditer la liste",
@@ -3351,6 +3421,7 @@ class EditSharedListModal(discord.ui.Modal, title="Modifier la liste"):
             title=title,
             description=str(self.desc_input.value or "").strip(),
             edit_mode=mode,
+            allowed_types=format_list_types(self.types_select.values or []),
         )
         if mode == "members":
             ids = [
@@ -3390,7 +3461,9 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
             await interaction.followup.send("**Erreur ·** Catalogue média indisponible.", ephemeral=True)
             return
         try:
-            hits = await catalog.search(query, "all")
+            kinds = parse_list_types(self._hub.record.get("allowed_types"))
+            hits = await catalog.search(query, ",".join(kinds) if kinds else "all")
+            hits = [hit for hit in hits if list_accepts_type(self._hub.record.get("allowed_types"), hit.media_type)]
         except Exception:
             logger.exception("Recherche pour liste commune impossible")
             await interaction.followup.send("**Erreur ·** Recherche impossible pour le moment.", ephemeral=True)
@@ -3696,6 +3769,10 @@ class ListsHubView(ReviewsLayout):
                 f"### {LIST} {record['title']}\n{desc}\n"
                 f"-# {_mention(self.guild, self.cog.bot, record['owner_id'])} · "
                 f"{n} œuvre{'s' if n != 1 else ''} · {list_edit_label(record['edit_mode'])}"
+                + (
+                    f" · {list_types_label(record.get('allowed_types'))}"
+                    if parse_list_types(record.get("allowed_types")) else ""
+                )
             )
             body.append(discord.ui.TextDisplay(text))
         rows.append(discord.ui.ActionRow(ListsHubOpenSelect(self, page_items)))
@@ -3789,7 +3866,11 @@ class SharedListView(ReviewsLayout):
             f"## {LIST} {self.record['title']}",
             desc,
             f"-# {_mention(self.guild, self.cog.bot, self.record['owner_id'])} · "
-            f"{n} œuvre{'s' if n != 1 else ''} · édition : {list_edit_label(self.record['edit_mode']).lower()}",
+            f"{n} œuvre{'s' if n != 1 else ''} · édition : {list_edit_label(self.record['edit_mode']).lower()}"
+            + (
+                f" · {list_types_label(self.record.get('allowed_types'))}"
+                if parse_list_types(self.record.get("allowed_types")) else ""
+            ),
         ]
         if self.record["edit_mode"] == "members" and self.editor_ids:
             shown = [_mention(self.guild, self.cog.bot, user_id) for user_id in self.editor_ids[:8]]
@@ -5169,6 +5250,7 @@ class Reviews(commands.Cog):
                 title TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 edit_mode TEXT NOT NULL DEFAULT 'owner',
+                allowed_types TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL
             )"""
         )
@@ -5545,6 +5627,7 @@ class Reviews(commands.Cog):
                 title TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 edit_mode TEXT NOT NULL DEFAULT 'owner',
+                allowed_types TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL
             )"""
         )
@@ -5610,6 +5693,11 @@ class Reviews(commands.Cog):
         if "voice_status" not in stream_columns:
             await db.execute(
                 "ALTER TABLE stream_links ADD COLUMN voice_status INTEGER NOT NULL DEFAULT 0"
+            )
+        list_columns = await db.column_names("shared_lists")
+        if "allowed_types" not in list_columns:
+            await db.execute(
+                "ALTER TABLE shared_lists ADD COLUMN allowed_types TEXT NOT NULL DEFAULT ''"
             )
         scaled = await db.get_dict_value("settings", "RatingsOnTen")
         if scaled != "1":
@@ -5770,6 +5858,7 @@ class Reviews(commands.Cog):
             "title": row["title"] or "Sans titre",
             "description": row["description"] or "",
             "edit_mode": row["edit_mode"] if row["edit_mode"] in LIST_EDIT_MODES else "owner",
+            "allowed_types": format_list_types(parse_list_types(_row_field(row, "allowed_types", ""))),
             "created_at": int(row["created_at"] or 0),
             "item_count": count,
         }
@@ -5806,7 +5895,12 @@ class Reviews(commands.Cog):
         return int(row["n"]) if row else 0
 
     async def create_shared_list(
-        self, guild: discord.Guild, user_id: int, title: str, description: str
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        title: str,
+        description: str,
+        allowed_types: str = "",
     ) -> dict[str, Any]:
         await self._ensure_schema(guild)
         prefs = await self.get_user_prefs(guild, user_id)
@@ -5814,12 +5908,13 @@ class Reviews(commands.Cog):
         now = int(time.time())
         db = self.data.get(guild)
         await db.execute(
-            """INSERT INTO shared_lists (owner_id, title, description, edit_mode, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO shared_lists (owner_id, title, description, edit_mode, allowed_types, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             user_id,
             title.strip()[:LIST_TITLE_MAX],
             description.strip()[:LIST_DESC_MAX],
             edit_mode,
+            format_list_types(parse_list_types(allowed_types)),
             now,
         )
         row = await db.fetchone("SELECT last_insert_rowid() AS id")
@@ -5835,16 +5930,22 @@ class Reviews(commands.Cog):
         title: str | None = None,
         description: str | None = None,
         edit_mode: str | None = None,
+        allowed_types: str | None = None,
     ) -> None:
         await self._ensure_schema(guild)
         record = await self.get_shared_list(guild, list_id)
         if record is None:
             return
         await self.data.get(guild).execute(
-            "UPDATE shared_lists SET title=?, description=?, edit_mode=? WHERE id=?",
+            "UPDATE shared_lists SET title=?, description=?, edit_mode=?, allowed_types=? WHERE id=?",
             (title.strip()[:LIST_TITLE_MAX] if title is not None else record["title"]),
             (description.strip()[:LIST_DESC_MAX] if description is not None else record["description"]),
             (edit_mode if edit_mode in LIST_EDIT_MODES else record["edit_mode"]),
+            (
+                format_list_types(parse_list_types(allowed_types))
+                if allowed_types is not None
+                else record.get("allowed_types") or ""
+            ),
             list_id,
         )
 
@@ -5903,6 +6004,8 @@ class Reviews(commands.Cog):
         record = await self.get_shared_list(guild, list_id)
         if record is None:
             return "Cette liste n'existe plus."
+        if not list_accepts_type(record.get("allowed_types"), hit.media_type):
+            return f"Cette liste n'accepte que {list_types_label(record.get('allowed_types'))}."
         if record["item_count"] >= MAX_LIST_ITEMS:
             return f"Cette liste est pleine ({MAX_LIST_ITEMS} œuvres)."
         media_id = await self.upsert_media(guild, hit)
