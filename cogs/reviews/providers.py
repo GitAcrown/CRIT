@@ -243,6 +243,12 @@ def parse_search_query(raw: str) -> SearchSpec:
     return spec
 
 
+def _generic_episode_title(name: str) -> bool:
+    """« Épisode 12 » : fourre-tout TMDB, pas un vrai épisode spécial."""
+    folded = _fold(name).strip()
+    return bool(re.fullmatch(r"(?:episode|ep)\s*\d+", folded))
+
+
 def _tmdb_season_list(details: dict) -> list[dict]:
     entries: list[dict] = []
     for item in details.get("seasons") or []:
@@ -529,7 +535,7 @@ class TMDBClient:
         except Exception as exc:
             logger.warning("Détails TMDB indisponibles (%s/%s) : %s", hit.media_type, hit.source_id, exc)
             return hit
-        return self._from_details(hit, payload)
+        return await self._attach_seasons(hit, payload)
 
     def _from_search(self, item: dict) -> MediaHit:
         kind = item.get("media_type", "movie")
@@ -583,6 +589,38 @@ class TMDBClient:
         }
         if hit.media_type == "tv":
             hit.extra["season_list"] = _tmdb_season_list(details)
+        return hit
+
+    async def _attach_seasons(self, hit: MediaHit, details: dict) -> MediaHit:
+        hit = self._from_details(hit, details)
+        seasons = list(hit.extra.get("season_list") or [])
+        specials = next((item for item in seasons if int(item.get("n") or -1) == 0), None)
+        if specials is None:
+            return hit
+        regular = sum(int(item.get("episodes") or 0) for item in seasons if int(item.get("n") or 0) > 0)
+        try:
+            payload = await _json(
+                self.session,
+                f"{TMDB_BASE}/tv/{hit.source_id}/season/0",
+                params={"api_key": self.api_key, "language": "fr-FR"},
+                timeout=aiohttp.ClientTimeout(total=8),
+            )
+        except Exception as exc:
+            logger.warning("Saison spéciale TMDB indisponible (%s) : %s", hit.source_id, exc)
+            if regular and int(specials.get("episodes") or 0) >= regular:
+                hit.extra["season_list"] = [item for item in seasons if int(item.get("n") or 0) != 0]
+            return hit
+        episodes = payload.get("episodes") or []
+        names = [(item.get("name") or "").strip() for item in episodes]
+        generic = sum(1 for name in names if _generic_episode_title(name))
+        dumped = bool(names) and generic / len(names) >= 0.6
+        if dumped or (not names and regular and int(specials.get("episodes") or 0) >= regular):
+            hit.extra["season_list"] = [item for item in seasons if int(item.get("n") or 0) != 0]
+            return hit
+        specials["episodes"] = len(episodes)
+        overview = (payload.get("overview") or "").strip()
+        if overview:
+            specials["overview"] = overview[:240]
         return hit
 
 

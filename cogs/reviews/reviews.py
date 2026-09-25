@@ -3140,7 +3140,6 @@ class MediaSessionView(ReviewsLayout):
             body.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
 
         body.append(self._tabs_row())
-        body.extend(self._season_rows())
         body.extend(stream_live_items(self.stream_channels))
 
         if self.tab == "fiche":
@@ -3204,6 +3203,7 @@ class MediaSessionView(ReviewsLayout):
                 if nav_btns:
                     actions.append(discord.ui.ActionRow(*nav_btns))
 
+        actions.extend(self._season_rows())
         if not self.published_wid:
             rate_label = "Noter"
             if self.ephemeral and self.pending_rating is not None and self.my_review is None:
