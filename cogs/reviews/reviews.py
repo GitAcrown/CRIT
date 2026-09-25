@@ -398,6 +398,24 @@ def experienced_verb(media_type: str) -> str:
     }.get(media_type, "Vu")
 
 
+ONGOING = "ongoing"
+
+
+def ongoing_label(media_type: str) -> str:
+    return {
+        "movie": "En cours de visionnage",
+        "tv": "En cours de visionnage",
+        "game": "En cours de jeu",
+        "album": "En cours d'écoute",
+        "track": "En cours d'écoute",
+        "book": "En cours de lecture",
+    }.get(media_type, "En cours")
+
+
+def is_ongoing(raw: str | None) -> bool:
+    return (raw or "").strip() == ONGOING
+
+
 def format_experienced_date(raw: str) -> str:
     if not raw:
         return ""
@@ -411,6 +429,8 @@ def format_experienced_date(raw: str) -> str:
 def experienced_line(media_type: str, raw: str | None) -> str:
     if not raw:
         return ""
+    if is_ongoing(raw):
+        return f"-# {ongoing_label(media_type)}"
     return f"-# {experienced_verb(media_type)} le {format_experienced_date(raw)}"
 
 
@@ -444,7 +464,7 @@ def parse_experienced_date(raw: str) -> tuple[str | None, str | None]:
 
 
 def experienced_to_input(raw: str) -> str:
-    if not raw:
+    if not raw or is_ongoing(raw):
         return ""
     parts = raw.split("-")
     if len(parts) != 3:
@@ -1058,7 +1078,11 @@ def _footer_line(hit: MediaHit) -> str:
     extra = hit.extra
     if extra.get("runtime"):
         parts.append(_runtime_label(extra["runtime"]))
-    if extra.get("seasons"):
+    if extra.get("season") is not None:
+        episodes = int(extra.get("episodes") or 0)
+        if episodes:
+            parts.append(f"{episodes} épisode{'s' if episodes != 1 else ''}")
+    elif extra.get("seasons"):
         seasons = extra["seasons"]
         parts.append(f"{seasons} saison{'s' if seasons > 1 else ''}")
     if extra.get("director"):
@@ -1170,6 +1194,133 @@ def hit_identity(hit: MediaHit | dict[str, Any]) -> tuple[str, str, str]:
         str(hit.get("source") or ""),
         str(hit.get("source_id") or ""),
         str(hit.get("media_type") or ""),
+    )
+
+
+def season_label(number: int) -> str:
+    if number == 0:
+        return "Spéciales"
+    return f"Saison {number}"
+
+
+def season_number_of(hit: MediaHit) -> int | None:
+    if hit.media_type != "tv" or hit.source != "tmdb":
+        return None
+    raw = hit.extra.get("season")
+    if raw is None and ":s" in str(hit.source_id):
+        raw = str(hit.source_id).rsplit(":s", 1)[-1]
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def tv_season_list(hit: MediaHit) -> list[dict[str, Any]]:
+    raw = hit.extra.get("season_list") if hit.media_type == "tv" else None
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("n") is None:
+            continue
+        try:
+            number = int(item["n"])
+        except (TypeError, ValueError):
+            continue
+        items.append({**item, "n": number})
+    items.sort(key=lambda item: int(item["n"]))
+    return items
+
+
+def _strip_season_title(title: str) -> str:
+    marker = " — "
+    if marker not in title:
+        return title
+    head, tail = title.rsplit(marker, 1)
+    if tail == "Spéciales" or tail.startswith("Saison "):
+        return head
+    return title
+
+
+def split_tv_scope(hit: MediaHit) -> tuple[MediaHit, int | None]:
+    """Ramène une fiche saison à la série, et le numéro de saison choisi."""
+    number = season_number_of(hit)
+    if number is None:
+        return hit, None
+    show_id = str(hit.extra.get("show_id") or str(hit.source_id).split(":s", 1)[0])
+    if not show_id:
+        return hit, None
+    drop = {
+        "season", "show_id", "show_title", "show_subtitle", "show_year",
+        "show_poster", "show_overview", "show_genres", "episodes",
+    }
+    extra = {key: value for key, value in hit.extra.items() if key not in drop}
+    genres = hit.extra.get("show_genres")
+    if not isinstance(genres, list):
+        genres = list(hit.genres)
+    year = hit.extra.get("show_year")
+    try:
+        year_value = int(year) if year else None
+    except (TypeError, ValueError):
+        year_value = None
+    show = MediaHit(
+        source="tmdb",
+        source_id=show_id,
+        media_type="tv",
+        title=str(hit.extra.get("show_title") or _strip_season_title(hit.title)),
+        subtitle=str(hit.extra.get("show_subtitle") or ""),
+        year=year_value,
+        poster_url=hit.extra.get("show_poster") or None,
+        url=f"https://www.themoviedb.org/tv/{show_id}",
+        overview=str(hit.extra.get("show_overview") or ""),
+        genres=[str(item) for item in genres if item],
+        extra=extra,
+    )
+    return show, number
+
+
+def season_media(show: MediaHit, number: int) -> MediaHit:
+    info = next((item for item in tv_season_list(show) if int(item["n"]) == number), {})
+    label = season_label(number)
+    show_id = str(show.source_id).split(":s", 1)[0]
+    poster = info.get("poster") or show.poster_url
+    year = info.get("year") or show.year
+    try:
+        year_value = int(year) if year else None
+    except (TypeError, ValueError):
+        year_value = show.year
+    overview = (info.get("overview") or "").strip() or show.overview
+    extra = {
+        key: value
+        for key, value in show.extra.items()
+        if key not in {"seasons", "runtime", "vote_average", "vote_count"}
+    }
+    extra.update({
+        "show_id": show_id,
+        "show_title": show.title,
+        "show_subtitle": show.subtitle,
+        "show_year": show.year,
+        "show_poster": show.poster_url or "",
+        "show_overview": show.overview,
+        "show_genres": list(show.genres),
+        "season": number,
+        "episodes": int(info.get("episodes") or 0),
+        "season_list": tv_season_list(show),
+    })
+    return MediaHit(
+        source="tmdb",
+        source_id=f"{show_id}:s{number}",
+        media_type="tv",
+        title=f"{show.title} — {label}",
+        subtitle=show.subtitle,
+        year=year_value,
+        poster_url=poster or None,
+        url=f"https://www.themoviedb.org/tv/{show_id}/season/{number}",
+        overview=overview,
+        genres=list(show.genres),
+        extra=extra,
     )
 
 
@@ -1697,10 +1848,19 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
             max_length=12,
             required=False,
         )
+        media_type = getattr(getattr(parent, "hit", None), "media_type", "") or ""
+        self.ongoing_check = discord.ui.Checkbox(custom_id="ongoing", default=is_ongoing(default_experienced))
         self.spoiler_check = discord.ui.Checkbox(custom_id="spoiler", default=bool(default_spoiler))
         self.add_item(self.rating_input)
         self.add_item(self.comment_input)
         self.add_item(self.date_input)
+        self.add_item(
+            discord.ui.Label(
+                text=ongoing_label(media_type),
+                description="Remplace la date",
+                component=self.ongoing_check,
+            )
+        )
         self.add_item(
             discord.ui.Label(
                 text="Spoiler",
@@ -1717,7 +1877,10 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
                 ephemeral=True,
             )
             return
-        experienced_at, date_error = parse_experienced_date(str(self.date_input.value or ""))
+        if self.ongoing_check.value:
+            experienced_at, date_error = ONGOING, None
+        else:
+            experienced_at, date_error = parse_experienced_date(str(self.date_input.value or ""))
         if date_error:
             await interaction.response.send_message(f"**Erreur ·** {date_error}", ephemeral=True)
             return
@@ -2133,6 +2296,7 @@ class MediaSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self._hub.selected = int(self.values[0])
+        self._hub.season = None
         self._hub.review_page = 0
         self._hub.tab = "fiche"
         await self._hub.show_selected(interaction)
@@ -2152,6 +2316,53 @@ class TabButton(discord.ui.Button):
         self._hub.review_page = 0
         self._hub._build()
         await apply_view(interaction, self._hub)
+
+
+class SeasonScopeSelect(discord.ui.Select):
+    """Série complète, ou une saison. Chaque cible a sa propre note."""
+
+    def __init__(self, parent: "MediaSessionView", seasons: list[dict[str, Any]], *, include_show: bool):
+        current = parent.season
+        options: list[discord.SelectOption] = []
+        if include_show:
+            options.append(discord.SelectOption(
+                label="Série complète",
+                value="show",
+                description="Une note pour toute la série",
+                default=current is None,
+            ))
+        for item in seasons:
+            number = int(item["n"])
+            episodes = int(item.get("episodes") or 0)
+            bits: list[str] = []
+            if item.get("year"):
+                bits.append(str(item["year"]))
+            if episodes:
+                bits.append(f"{episodes} épisode{'s' if episodes != 1 else ''}")
+            options.append(discord.SelectOption(
+                label=season_label(number),
+                value=str(number),
+                description=pretty.shorten_text(" · ".join(bits), 95) or None,
+                default=current == number,
+            ))
+        super().__init__(
+            placeholder="Série ou saison",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        raw = self.values[0]
+        self._hub.season = None if raw == "show" else int(raw)
+        self._hub.review_page = 0
+        self._hub.pending_rating = None
+        self._hub.pending_comment = ""
+        await interaction.response.defer()
+        await self._hub.reload_stats()
+        self._hub._build()
+        await self._hub.push(interaction)
 
 
 class RateButton(discord.ui.Button):
@@ -2776,6 +2987,7 @@ class MediaSessionView(ReviewsLayout):
         self.pending_rating = pending_rating
         self.pending_comment = pending_comment
         self.selected = selected
+        self.season: int | None = None
         self.tab = "fiche"
         self.review_page = 0
         self.avg: float | None = None
@@ -2793,8 +3005,15 @@ class MediaSessionView(ReviewsLayout):
         self._enriched: set[int] = set()
 
     @property
-    def hit(self) -> MediaHit:
+    def show_hit(self) -> MediaHit:
         return self.hits[self.selected]
+
+    @property
+    def hit(self) -> MediaHit:
+        show = self.show_hit
+        if self.season is None or show.media_type != "tv":
+            return show
+        return season_media(show, self.season)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.ephemeral and interaction.user.id != self.author_id:
@@ -2816,10 +3035,14 @@ class MediaSessionView(ReviewsLayout):
         self._build()
 
     async def enrich_selected(self) -> None:
+        show, season = split_tv_scope(self.hits[self.selected])
+        self.hits[self.selected] = show
+        if season is not None and self.season is None:
+            self.season = season
         if self.cog.catalog is None:
             return
         try:
-            self.hits[self.selected] = await self.cog.catalog.enrich(self.hit)
+            self.hits[self.selected] = await self.cog.catalog.enrich(show)
         except Exception:
             logger.exception("Enrichissement de fiche impossible")
 
@@ -2841,7 +3064,7 @@ class MediaSessionView(ReviewsLayout):
                 self.reviews,
                 viewer_id=None,
             )
-        self.stream_channels = await self.cog.stream_channels_for_hit(self.guild, self.hit)
+        self.stream_channels = await self.cog.stream_channels_for_hit(self.guild, self.show_hit)
 
     async def save_review(
         self,
@@ -2880,6 +3103,24 @@ class MediaSessionView(ReviewsLayout):
             TabButton(self, "critiques", critiques_tab),
         )
 
+    def _season_rows(self) -> list[discord.ui.ActionRow]:
+        if self.show_hit.media_type != "tv":
+            return []
+        seasons = tv_season_list(self.show_hit)
+        if self.season is not None and all(int(item["n"]) != self.season for item in seasons):
+            seasons = [*seasons, {"n": self.season, "episodes": 0}]
+        if not seasons:
+            return []
+        rows: list[discord.ui.ActionRow] = []
+        for index in range(0, len(seasons), 24):
+            chunk = seasons[index:index + 24]
+            rows.append(discord.ui.ActionRow(
+                SeasonScopeSelect(self, chunk, include_show=index == 0),
+            ))
+            if len(rows) == 3:
+                break
+        return rows
+
     def _build(self) -> None:
         hit = self.hit
         body: list[discord.ui.Item] = []
@@ -2899,6 +3140,7 @@ class MediaSessionView(ReviewsLayout):
             body.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
 
         body.append(self._tabs_row())
+        body.extend(self._season_rows())
         body.extend(stream_live_items(self.stream_channels))
 
         if self.tab == "fiche":
@@ -5056,10 +5298,13 @@ class HelpView(ReviewsLayout):
             "2. S'il y a plusieurs résultats, choisis l'œuvre dans le menu.\n"
             "3. Clique **Noter** : un formulaire demande la note "
             f"({format_stars(0)} 0 → {format_stars(10)} 10, entier), "
-            "un commentaire optionnel, la date (vu, joué, écouté ou lu) "
+            "un commentaire optionnel, la date (vu, joué, écouté ou lu), "
+            "une case **En cours** qui remplace cette date, "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
-            "4. Le signet l'ajoute à tes signets — il disparaît dès que tu notes.\n"
-            "5. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
+            "4. Sur une série, le menu choisit la série complète ou une saison. "
+            "Chacune a sa propre note.\n"
+            "5. Le signet l'ajoute à tes signets — il disparaît dès que tu notes.\n"
+            "6. Si tu as déjà donné la note dans `/search` et que tu n'avais pas encore "
             "noté cette œuvre, **Noter** l'enregistre tout de suite.\n"
             "\n"
             "Une seule note par œuvre et par membre.\n"

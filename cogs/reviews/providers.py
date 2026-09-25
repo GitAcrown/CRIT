@@ -243,6 +243,26 @@ def parse_search_query(raw: str) -> SearchSpec:
     return spec
 
 
+def _tmdb_season_list(details: dict) -> list[dict]:
+    entries: list[dict] = []
+    for item in details.get("seasons") or []:
+        raw = item.get("season_number")
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            continue
+        overview = (item.get("overview") or "").strip()
+        entries.append({
+            "n": number,
+            "year": _year_from(item.get("air_date") or ""),
+            "poster": _poster(item.get("poster_path")) or "",
+            "episodes": int(item.get("episode_count") or 0),
+            "overview": overview[:240],
+        })
+    entries.sort(key=lambda item: item["n"])
+    return entries
+
+
 def _poster(path: str | None) -> str | None:
     return TMDB_IMG.format(path) if path else None
 
@@ -493,6 +513,8 @@ class TMDBClient:
     async def enrich(self, hit: MediaHit) -> MediaHit:
         if not self.available:
             return hit
+        if ":" in str(hit.source_id):
+            return hit
         try:
             payload = await _json(
                 self.session,
@@ -559,6 +581,8 @@ class TMDBClient:
             "original_language": details.get("original_language") or "",
             "backdrop_url": TMDB_BACKDROP.format(backdrop) if backdrop else "",
         }
+        if hit.media_type == "tv":
+            hit.extra["season_list"] = _tmdb_season_list(details)
         return hit
 
 
