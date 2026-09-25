@@ -3203,8 +3203,11 @@ class MediaSessionView(ReviewsLayout):
                 if nav_btns:
                     actions.append(discord.ui.ActionRow(*nav_btns))
 
-        actions.extend(self._season_rows())
+        season_rows = self._season_rows()
+        actions.extend(season_rows)
         if not self.published_wid:
+            if season_rows:
+                actions.append(sep_tight())
             rate_label = "Noter"
             if self.ephemeral and self.pending_rating is not None and self.my_review is None:
                 rate_label = f"Noter {self.stars_compact(self.pending_rating)}"
