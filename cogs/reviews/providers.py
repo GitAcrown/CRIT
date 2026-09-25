@@ -249,6 +249,51 @@ def _generic_episode_title(name: str) -> bool:
     return bool(re.fullmatch(r"(?:episode|ep)\s*\d+", folded))
 
 
+def _youtube_trailer(videos: dict | None) -> str:
+    ranked: list[tuple[int, int, int, str]] = []
+    for item in (videos or {}).get("results") or []:
+        if (item.get("site") or "").lower() != "youtube":
+            continue
+        key = str(item.get("key") or "")
+        if not key:
+            continue
+        kind = (item.get("type") or "").lower()
+        if kind not in {"trailer", "teaser"}:
+            continue
+        lang = (item.get("iso_639_1") or "").lower()
+        ranked.append((
+            2 if kind == "trailer" else 1,
+            1 if item.get("official") else 0,
+            2 if lang == "fr" else 1 if lang == "en" else 0,
+            key,
+        ))
+    if not ranked:
+        return ""
+    ranked.sort(reverse=True)
+    return f"https://www.youtube.com/watch?v={ranked[0][3]}"
+
+
+def _steam_trailer(data: dict) -> str:
+    movies = data.get("movies") or []
+    chosen = None
+    for movie in movies:
+        name = (movie.get("name") or "").casefold()
+        if movie.get("highlight") or "trailer" in name or "bande" in name:
+            chosen = movie
+            break
+    if chosen is None and movies:
+        chosen = movies[0]
+    if not chosen:
+        return ""
+    for bucket in (chosen.get("mp4"), chosen.get("webm")):
+        if not isinstance(bucket, dict):
+            continue
+        url = bucket.get("max") or bucket.get("480") or ""
+        if url:
+            return str(url)
+    return ""
+
+
 def _tmdb_season_list(details: dict) -> list[dict]:
     entries: list[dict] = []
     for item in details.get("seasons") or []:
@@ -476,7 +521,7 @@ class TMDBClient:
                     params={
                         "api_key": self.api_key,
                         "language": "fr-FR",
-                        "append_to_response": "credits",
+                        "append_to_response": "credits,videos",
                     },
                     timeout=aiohttp.ClientTimeout(total=8),
                 )
@@ -528,7 +573,7 @@ class TMDBClient:
                 params={
                     "api_key": self.api_key,
                     "language": "fr-FR",
-                    "append_to_response": "credits",
+                    "append_to_response": "credits,videos",
                 },
                 timeout=aiohttp.ClientTimeout(total=8),
             )
@@ -586,6 +631,7 @@ class TMDBClient:
             "cast": cast,
             "original_language": details.get("original_language") or "",
             "backdrop_url": TMDB_BACKDROP.format(backdrop) if backdrop else "",
+            "trailer": _youtube_trailer(details.get("videos")),
         }
         if hit.media_type == "tv":
             hit.extra["season_list"] = _tmdb_season_list(details)
@@ -733,6 +779,7 @@ class SteamClient:
             "review_emoji": emoji,
             "review_label": label,
             "developers": developers[:2],
+            "trailer": _steam_trailer(data),
         }
         return hit
 

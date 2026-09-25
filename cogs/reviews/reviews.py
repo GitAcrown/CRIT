@@ -1109,6 +1109,8 @@ def _footer_line(hit: MediaHit) -> str:
     lang = extra.get("original_language") or ""
     if lang and lang != "fr":
         parts.append(lang.upper())
+    if extra.get("trailer"):
+        parts.append(f"[Bande-annonce]({extra['trailer']})")
     if hit.url:
         parts.append(f"[{_source_name(hit)}]({hit.url})")
     elif hit.source:
