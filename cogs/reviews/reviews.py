@@ -401,6 +401,10 @@ def experienced_verb(media_type: str) -> str:
 ONGOING = "ongoing"
 
 
+def allows_ongoing(media_type: str) -> bool:
+    return media_type not in {"movie", "track"}
+
+
 def ongoing_label(media_type: str) -> str:
     return {
         "movie": "En cours de visionnage",
@@ -429,7 +433,7 @@ def format_experienced_date(raw: str) -> str:
 def experienced_line(media_type: str, raw: str | None) -> str:
     if not raw:
         return ""
-    if is_ongoing(raw):
+    if is_ongoing(raw) and allows_ongoing(media_type):
         return f"-# {ongoing_label(media_type)}"
     return f"-# {experienced_verb(media_type)} le {format_experienced_date(raw)}"
 
@@ -1849,18 +1853,23 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
             required=False,
         )
         media_type = getattr(getattr(parent, "hit", None), "media_type", "") or ""
-        self.ongoing_check = discord.ui.Checkbox(custom_id="ongoing", default=is_ongoing(default_experienced))
+        self.ongoing_check: discord.ui.Checkbox | None = None
         self.spoiler_check = discord.ui.Checkbox(custom_id="spoiler", default=bool(default_spoiler))
         self.add_item(self.rating_input)
         self.add_item(self.comment_input)
         self.add_item(self.date_input)
-        self.add_item(
-            discord.ui.Label(
-                text=ongoing_label(media_type),
-                description="Remplace la date",
-                component=self.ongoing_check,
+        if allows_ongoing(media_type):
+            self.ongoing_check = discord.ui.Checkbox(
+                custom_id="ongoing",
+                default=is_ongoing(default_experienced),
             )
-        )
+            self.add_item(
+                discord.ui.Label(
+                    text=ongoing_label(media_type),
+                    description="Remplace la date",
+                    component=self.ongoing_check,
+                )
+            )
         self.add_item(
             discord.ui.Label(
                 text="Spoiler",
@@ -1877,7 +1886,7 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
                 ephemeral=True,
             )
             return
-        if self.ongoing_check.value:
+        if self.ongoing_check is not None and self.ongoing_check.value:
             experienced_at, date_error = ONGOING, None
         else:
             experienced_at, date_error = parse_experienced_date(str(self.date_input.value or ""))
@@ -5302,7 +5311,8 @@ class HelpView(ReviewsLayout):
             "3. Clique **Noter** : un formulaire demande la note "
             f"({format_stars(0)} 0 → {format_stars(10)} 10, entier), "
             "un commentaire optionnel, la date (vu, joué, écouté ou lu), "
-            "une case **En cours** qui remplace cette date, "
+            "une case **En cours** qui remplace cette date "
+            "(série, saison, album, livre ou jeu), "
             "et une case **Spoiler** pour masquer le commentaire en public.\n"
             "4. Sur une série, le menu choisit la série complète ou une saison. "
             "Chacune a sa propre note.\n"
