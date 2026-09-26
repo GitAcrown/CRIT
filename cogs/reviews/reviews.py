@@ -48,9 +48,11 @@ from .emojis import (
     HOUSE,
     JOURNAL,
     LIST,
+    MINUS_SMALL,
     MORE,
     MOVIE,
     MUSIC,
+    PLUS_SMALL,
     RIVAL,
     SALE,
     SHARE,
@@ -58,6 +60,7 @@ from .emojis import (
     STREAMING,
     TWIN,
     TV,
+    TRASH,
     XP,
 )
 from .progress import (
@@ -1934,7 +1937,7 @@ class MyNoteEditButton(discord.ui.Button):
 
 class MyNoteDeleteButton(discord.ui.Button):
     def __init__(self, parent: "MyNoteView"):
-        super().__init__(label="Supprimer", style=discord.ButtonStyle.red)
+        super().__init__(style=discord.ButtonStyle.red, emoji=discord.PartialEmoji.from_str(TRASH))
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -2517,7 +2520,7 @@ class FicheAddListView(discord.ui.LayoutView):
 
 class DeleteReviewButton(discord.ui.Button):
     def __init__(self, parent: "MediaSessionView"):
-        super().__init__(label="Supprimer", style=discord.ButtonStyle.red)
+        super().__init__(style=discord.ButtonStyle.red, emoji=discord.PartialEmoji.from_str(TRASH))
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -3876,7 +3879,10 @@ class SharedListDoneButton(discord.ui.Button):
 
 class SharedListAddButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Ajouter", style=discord.ButtonStyle.secondary)
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(PLUS_SMALL),
+        )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -3892,7 +3898,10 @@ class SharedListAddButton(discord.ui.Button):
 
 class SharedListRemoveButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Retirer", style=discord.ButtonStyle.secondary)
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(MINUS_SMALL),
+        )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -3930,7 +3939,7 @@ class SharedListEditButton(discord.ui.Button):
 
 class SharedListDeleteButton(discord.ui.Button):
     def __init__(self, parent: "SharedListView"):
-        super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
+        super().__init__(style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(TRASH))
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
