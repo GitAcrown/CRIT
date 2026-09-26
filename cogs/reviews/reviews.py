@@ -1639,8 +1639,9 @@ def render_compact_fiche(
     social: str,
     stream_channels: list[int] | None = None,
     guild_name: str = "",
+    wid: str | None = None,
 ) -> discord.ui.LayoutView:
-    """Fiche de balise : sans image large ni boutons."""
+    """Fiche de balise : sans image large, avec le bouton Actions."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
     body.extend(stream_live_items(stream_channels or []))
@@ -1654,6 +1655,10 @@ def render_compact_fiche(
         body.append(discord.ui.TextDisplay(f"-# {footer}"))
     if body:
         view.add_item(discord.ui.Container(*body))
+    if wid:
+        view.add_item(discord.ui.ActionRow(
+            FicheDynButton(wid, "noter", label="Actions", emoji=MORE),
+        ))
     return view
 
 
@@ -1670,6 +1675,16 @@ async def post_compact_fiche(
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = await cog.public_fiche_line(guild, hit, reviews, media_id)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
+    wid = create_record({
+        "kind": "compact",
+        "guild_id": guild.id,
+        "guild_name": guild.name,
+        "hit": hit_to_dict(hit),
+        "avg": avg,
+        "count": count,
+        "social": social,
+        "stream_channels": stream_channels,
+    })
     view = render_compact_fiche(
         hit,
         avg=avg,
@@ -1677,16 +1692,20 @@ async def post_compact_fiche(
         social=social,
         stream_channels=stream_channels,
         guild_name=guild.name,
+        wid=wid,
     )
     try:
         kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
         if reference is not None:
             kwargs["reference"] = reference
             kwargs["mention_author"] = False
-        return await channel.send(**kwargs)
+        message = await channel.send(**kwargs)
     except discord.HTTPException as exc:
+        mark_stripped(wid)
         logger.info("Impossible de poster la fiche compacte : %s", exc)
         return None
+    bind_record(wid, message.channel.id, message.id)
+    return message
 
 
 async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, hit: MediaHit) -> None:
@@ -1808,7 +1827,7 @@ async def handle_published_fiche_click(
     rec = get_record(wid)
     if not is_live(rec):
         if rec is not None:
-            view = render_published_record(rec, live=False)
+            view = render_dyn_record(rec, live=False)
             if view is not None:
                 try:
                     await interaction.response.edit_message(view=view, allowed_mentions=NO_PINGS)
@@ -1829,7 +1848,8 @@ async def handle_published_fiche_click(
         return
     hit = hit_from_dict(raw)
     if action in {"noter", "voir"}:
-        await open_personal_hit_menu(interaction, cog, guild, hit, published_wid=wid)
+        published = None if rec.payload.get("kind") == "compact" else wid
+        await open_personal_hit_menu(interaction, cog, guild, hit, published_wid=published)
         return
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1963,9 +1983,27 @@ def render_announce_record(rec: FicheRecord, *, live: bool) -> discord.ui.Layout
     )
 
 
+def render_compact_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutView | None:
+    raw = rec.payload.get("hit")
+    if not isinstance(raw, dict):
+        return None
+    channels = rec.payload.get("stream_channels") or []
+    return render_compact_fiche(
+        hit_from_dict(raw),
+        avg=rec.payload.get("avg"),
+        count=int(rec.payload.get("count") or 0),
+        social=str(rec.payload.get("social") or ""),
+        stream_channels=[int(channel_id) for channel_id in channels if channel_id],
+        guild_name=str(rec.payload.get("guild_name") or ""),
+        wid=rec.id if live else None,
+    )
+
+
 def render_dyn_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutView | None:
     if rec.payload.get("kind") == "announce":
         return render_announce_record(rec, live=live)
+    if rec.payload.get("kind") == "compact":
+        return render_compact_record(rec, live=live)
     return render_published_record(rec, live=live)
 
 
