@@ -1613,6 +1613,63 @@ async def post_published_fiche(
     return message
 
 
+def render_compact_fiche(
+    hit: MediaHit,
+    *,
+    avg: float | None,
+    count: int,
+    social: str,
+    stream_channels: list[int] | None = None,
+    guild_name: str = "",
+) -> discord.ui.LayoutView:
+    """Fiche de balise : sans image large ni boutons."""
+    view = discord.ui.LayoutView(timeout=None)
+    body: list[discord.ui.Item] = []
+    body.extend(stream_live_items(stream_channels or []))
+    body.extend(fiche_intro(hit, backdrop=False))
+    append_fiche_sections(
+        body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+    )
+    footer = _footer_line(hit)
+    if footer:
+        body.append(discord.ui.TextDisplay(f"-# {footer}"))
+    if body:
+        view.add_item(discord.ui.Container(*body))
+    return view
+
+
+async def post_compact_fiche(
+    cog: "Reviews",
+    guild: discord.Guild,
+    hit: MediaHit,
+    channel: discord.abc.Messageable,
+    *,
+    reference: discord.Message | None = None,
+) -> discord.Message | None:
+    media_id = await cog.lookup_media_id(guild, hit)
+    avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
+    reviews = await cog.list_reviews(guild, media_id) if media_id else []
+    social = await cog.public_fiche_line(guild, hit, reviews, media_id)
+    stream_channels = await cog.stream_channels_for_hit(guild, hit)
+    view = render_compact_fiche(
+        hit,
+        avg=avg,
+        count=count,
+        social=social,
+        stream_channels=stream_channels,
+        guild_name=guild.name,
+    )
+    try:
+        kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
+        if reference is not None:
+            kwargs["reference"] = reference
+            kwargs["mention_author"] = False
+        return await channel.send(**kwargs)
+    except discord.HTTPException as exc:
+        logger.info("Impossible de poster la fiche compacte : %s", exc)
+        return None
+
+
 async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, hit: MediaHit) -> None:
     rec = get_record(wid)
     if not is_live(rec) or rec is None:
@@ -5480,7 +5537,7 @@ class HelpView(ReviewsLayout):
             "(y compris ceux des autres) et permet d'y lier le tien. "
             "Tes défauts (date, listes, recherche, annonces, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
             "Les skins d'étoiles se choisissent dans `/custom`. "
-            "Une balise dans le salon poste la fiche : "
+            "Une balise dans le salon poste une fiche compacte : "
             "`<tmdb:697698>`, `<tmdb:tv:1396:s2>`, `<steam:1245620>`, "
             "`<spotify:id>` ou `<ol:OL45883W>`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
@@ -5770,7 +5827,7 @@ class Reviews(commands.Cog):
                 logger.exception("Enrichissement balise %s", query)
             if season is not None and hit.media_type == "tv":
                 hit = season_media(hit, season)
-            sent = await post_published_fiche(
+            sent = await post_compact_fiche(
                 self, message.guild, hit, message.channel, reference=message,
             )
             if sent is not None:
