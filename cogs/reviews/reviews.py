@@ -617,6 +617,101 @@ def autocomplete_query_value(hit: MediaHit) -> str:
     return pretty.shorten_text(hit.title, 100)
 
 
+_FICHE_TAG_RE = re.compile(r"<(tmdb|steam|spotify|ol|openlibrary):([^<>]+)>", re.I)
+_FICHE_TMDB_RE = re.compile(
+    r"^(?:(movie|tv|film|serie|série)[:/])?(\d+)(?::s(\d+))?$",
+    re.I,
+)
+_FICHE_SPOTIFY_RE = re.compile(r"^(?:(album|track)[:/])?([A-Za-z0-9]{22})$", re.I)
+_FICHE_OL_RE = re.compile(r"^(?:/works/)?(OL\d+W)$", re.I)
+
+
+def parse_fiche_tags(content: str) -> list[tuple[str, int | None]]:
+    """Balises `<tmdb:697698>`, `<steam:…>`, `<spotify:…>`, `<ol:OL…W>`."""
+    found: list[tuple[str, int | None]] = []
+    seen: set[tuple[str, int | None]] = set()
+    for match in _FICHE_TAG_RE.finditer(content or ""):
+        tag = _fiche_tag_query(match.group(1), match.group(2).strip())
+        if tag is None or tag in seen:
+            continue
+        seen.add(tag)
+        found.append(tag)
+        if len(found) >= 3:
+            break
+    return found
+
+
+def _fiche_tag_query(service: str, rest: str) -> tuple[str, int | None] | None:
+    service = service.casefold()
+    if service == "tmdb":
+        parsed = _FICHE_TMDB_RE.match(rest)
+        if parsed is None:
+            return None
+        kind = (parsed.group(1) or "").casefold()
+        if kind in ("film", "serie", "série"):
+            kind = "movie" if kind == "film" else "tv"
+        number = parsed.group(2)
+        season = int(parsed.group(3)) if parsed.group(3) else None
+        if season is not None and not kind:
+            kind = "tv"
+        query = f"tmdb:{kind}/{number}" if kind else f"tmdb:{number}"
+        return query, season
+    if service == "steam" and rest.isdigit():
+        return f"steam:{rest}", None
+    if service == "spotify":
+        parsed = _FICHE_SPOTIFY_RE.match(rest)
+        if parsed is None:
+            return None
+        kind, sid = parsed.group(1), parsed.group(2)
+        return (f"spotify:{kind}/{sid}" if kind else f"spotify:{sid}"), None
+    if service in ("ol", "openlibrary"):
+        parsed = _FICHE_OL_RE.match(rest)
+        if parsed is None:
+            return None
+        return f"ol:{parsed.group(1)}", None
+    return None
+
+
+def pick_fiche_hit(hits: list[MediaHit]) -> MediaHit | None:
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0]
+
+    def rank(hit: MediaHit) -> tuple[int, float]:
+        extra = hit.extra or {}
+        return (int(extra.get("vote_count") or 0), float(extra.get("popularity") or 0))
+
+    return max(hits, key=rank)
+
+
+def message_is_only_tags(content: str) -> bool:
+    return not _FICHE_TAG_RE.sub("", content or "").strip()
+
+
+def fiche_tag(hit: MediaHit) -> str:
+    """Balise à coller pour rouvrir cette fiche. Vide si la source n'a pas d'id stable."""
+    source_id = str(hit.source_id or "").strip()
+    if not source_id:
+        return ""
+    if hit.source == "tmdb":
+        if ":s" in source_id:
+            show_id, _, season = source_id.partition(":s")
+            if show_id.isdigit() and season.isdigit():
+                return f"<tmdb:{show_id}:s{int(season)}>"
+        kind = "tv" if hit.media_type == "tv" else "movie"
+        return f"<tmdb:{kind}:{source_id}>"
+    if hit.source == "steam":
+        return f"<steam:{source_id}>"
+    if hit.source == "spotify" and hit.media_type in ("album", "track"):
+        return f"<spotify:{hit.media_type}:{source_id}>"
+    if hit.source == "openlibrary":
+        key = source_id.removeprefix("/works/")
+        if key:
+            return f"<ol:{key}>"
+    return ""
+
+
 def list_edit_label(mode: str) -> str:
     return {
         "owner": "Créateur seul",
@@ -686,6 +781,7 @@ class UserPrefs:
     stream_remind: bool = False
     stream_voice_status: bool = True
     star_skin: str = DEFAULT_STAR_SKIN
+    show_media_id: bool = False
 
 
 def today_experienced() -> str:
@@ -769,6 +865,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         stream_remind=bool(int(_row_field(row, "stream_remind", 0) or 0)),
         stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
         star_skin=resolve_star_skin(_row_field(row, "star_skin", DEFAULT_STAR_SKIN)).id,
+        show_media_id=bool(int(_row_field(row, "show_media_id", 0) or 0)),
     )
 
 
@@ -1499,10 +1596,15 @@ async def post_published_fiche(
     channel: discord.abc.Messageable,
     *,
     banner: str = "",
+    reference: discord.Message | None = None,
 ) -> discord.Message | None:
     view, wid = await prepare_published_fiche(cog, guild, hit, banner=banner)
     try:
-        message = await channel.send(view=view, allowed_mentions=NO_PINGS)
+        kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
+        if reference is not None:
+            kwargs["reference"] = reference
+            kwargs["mention_author"] = False
+        message = await channel.send(**kwargs)
     except discord.HTTPException as exc:
         mark_stripped(wid)
         logger.info("Impossible de poster la fiche stream : %s", exc)
@@ -2118,6 +2220,7 @@ class PublicFichePeekView(ReviewsLayout):
         stream_channels: list[int] | None = None,
         guild_name: str = "",
         star_skin: StarSkin | None = None,
+        show_media_id: bool = False,
     ):
         super().__init__()
         self.star_skin = star_skin
@@ -2132,6 +2235,9 @@ class PublicFichePeekView(ReviewsLayout):
         footer = _footer_line(hit)
         if footer:
             body.append(discord.ui.TextDisplay(f"-# {footer}"))
+        tag = fiche_tag(hit) if show_media_id else ""
+        if tag:
+            body.append(discord.ui.TextDisplay(f"-# {tag}"))
         self.set_layout(body)
 
     @classmethod
@@ -2151,6 +2257,7 @@ class PublicFichePeekView(ReviewsLayout):
             stream_channels=stream_channels,
             guild_name=guild.name,
             star_skin=await cog.star_skin_for(guild, viewer_id),
+            show_media_id=(await cog.get_user_prefs(guild, viewer_id)).show_media_id,
         )
 
 
@@ -3216,6 +3323,11 @@ class MediaSessionView(ReviewsLayout):
                     nav_btns.append(_ReviewPageButton(self, 1, "→"))
                 if nav_btns:
                     actions.append(discord.ui.ActionRow(*nav_btns))
+
+        if self.ephemeral and self.prefs.show_media_id:
+            tag = fiche_tag(hit)
+            if tag:
+                body.append(discord.ui.TextDisplay(f"-# {tag}"))
 
         season_rows = self._season_rows()
         actions.extend(season_rows)
@@ -4909,6 +5021,12 @@ class PreferencesView(ReviewsLayout):
             ),
             sep_wide(),
             discord.ui.Section(
+                "**Identifiant sur la fiche**\n"
+                "-# Affiche la balise `<tmdb:…>` sur tes fiches éphémères, pas sur celles publiées.",
+                accessory=PrefOnOffButton(self, "show_media_id", prefs.show_media_id),
+            ),
+            sep_wide(),
+            discord.ui.Section(
                 "**Rappel de stream**\n"
                 "-# MP quand tu lances un Go Live, pour lier une œuvre.",
                 accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
@@ -5360,8 +5478,11 @@ class HelpView(ReviewsLayout):
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres) et permet d'y lier le tien. "
-            "Tes défauts (date, listes, recherche, annonces, rappel et statut vocal) se règlent dans `/preferences`. "
-            "Les skins d'étoiles se choisissent dans `/custom`.\n"
+            "Tes défauts (date, listes, recherche, annonces, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
+            "Les skins d'étoiles se choisissent dans `/custom`. "
+            "Une balise dans le salon poste la fiche : "
+            "`<tmdb:697698>`, `<tmdb:tv:1396:s2>`, `<steam:1245620>`, "
+            "`<spotify:id>` ou `<ol:OL45883W>`.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
         self.set_layout(
@@ -5501,7 +5622,8 @@ class Reviews(commands.Cog):
                 announce_notes INTEGER NOT NULL DEFAULT 1,
                 stream_remind INTEGER NOT NULL DEFAULT 0,
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
-                star_skin TEXT NOT NULL DEFAULT 'classique'
+                star_skin TEXT NOT NULL DEFAULT 'classique',
+                show_media_id INTEGER NOT NULL DEFAULT 0
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -5625,6 +5747,44 @@ class Reviews(commands.Cog):
         if was_activity and not still_activity and member_stream_source(after) is None:
             await self._on_stream_stopped(after, "activity")
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None or "<" not in (message.content or ""):
+            return
+        tags = parse_fiche_tags(message.content)
+        if not tags or self.catalog is None:
+            return
+        posted = 0
+        for query, season in tags:
+            try:
+                hits = await self.catalog.search(query, "all")
+            except Exception:
+                logger.exception("Balise fiche %s", query)
+                continue
+            hit = pick_fiche_hit(hits)
+            if hit is None:
+                continue
+            try:
+                hit = await self.catalog.enrich(hit)
+            except Exception:
+                logger.exception("Enrichissement balise %s", query)
+            if season is not None and hit.media_type == "tv":
+                hit = season_media(hit, season)
+            sent = await post_published_fiche(
+                self, message.guild, hit, message.channel, reference=message,
+            )
+            if sent is not None:
+                posted += 1
+        if posted == 0 and message_is_only_tags(message.content):
+            try:
+                await message.reply(
+                    "**Introuvable ·** Aucune œuvre pour cette balise.",
+                    mention_author=False,
+                    allowed_mentions=NO_PINGS,
+                )
+            except discord.HTTPException:
+                pass
+
     # ------------------------------------------------------------------
     # Paramètres
     # ------------------------------------------------------------------
@@ -5737,14 +5897,16 @@ class Reviews(commands.Cog):
             cleaned["stream_remind"] = bool(updates["stream_remind"])
         if "stream_voice_status" in updates:
             cleaned["stream_voice_status"] = bool(updates["stream_voice_status"])
+        if "show_media_id" in updates:
+            cleaned["show_media_id"] = bool(updates["show_media_id"])
         if "star_skin" in updates:
             cleaned["star_skin"] = resolve_star_skin(updates["star_skin"]).id
         prefs = replace(current, **cleaned) if cleaned else current
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin, show_media_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
@@ -5754,6 +5916,7 @@ class Reviews(commands.Cog):
             int(prefs.stream_remind),
             int(prefs.stream_voice_status),
             prefs.star_skin,
+            int(prefs.show_media_id),
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
@@ -5878,7 +6041,8 @@ class Reviews(commands.Cog):
                 announce_notes INTEGER NOT NULL DEFAULT 1,
                 stream_remind INTEGER NOT NULL DEFAULT 0,
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
-                star_skin TEXT NOT NULL DEFAULT 'classique'
+                star_skin TEXT NOT NULL DEFAULT 'classique',
+                show_media_id INTEGER NOT NULL DEFAULT 0
             )"""
         )
         await db.execute(
@@ -5902,6 +6066,7 @@ class Reviews(commands.Cog):
             "stream_remind": "INTEGER NOT NULL DEFAULT 0",
             "stream_voice_status": "INTEGER NOT NULL DEFAULT 1",
             "star_skin": "TEXT NOT NULL DEFAULT 'classique'",
+            "show_media_id": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
