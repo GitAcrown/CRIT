@@ -1228,6 +1228,7 @@ def append_fiche_sections(
     social_line: str = "",
     guild_name: str = "",
     skin: StarSkin | str | None = None,
+    pack_with_poster: bool = False,
 ) -> None:
     head: list[str] = []
     official = _official_line(hit, skin)
@@ -1272,6 +1273,20 @@ def append_fiche_sections(
         tail.append(quoted)
     elif not official and not count:
         tail.append("-# Aucune description disponible.")
+
+    if pack_with_poster and hit.poster_url and (head or tail):
+        blocks = []
+        if head:
+            blocks.append("\n".join(head))
+        blocks.extend(tail)
+        try:
+            body.append(discord.ui.Section(
+                *blocks[:3],
+                accessory=discord.ui.Thumbnail(hit.poster_url),
+            ))
+            return
+        except Exception:
+            pass
 
     body.append(section_with_thumbnail("\n".join(head), hit.poster_url))
     if tail:
@@ -1632,6 +1647,7 @@ def render_compact_fiche(
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+        pack_with_poster=True,
     )
     footer = _footer_line(hit)
     if footer:
