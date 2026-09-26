@@ -2714,6 +2714,7 @@ class FicheAddListSelect(discord.ui.Select):
         await interaction.followup.send(
             f"**Liste ·** {error}" if error else f"**Ajouté ·** {self._hub.hit.title} dans **{title}**.",
             ephemeral=True,
+            delete_after=10,
         )
 
 
@@ -3964,6 +3965,7 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
             await interaction.followup.send(
                 f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}",
                 ephemeral=True,
+                delete_after=10,
             )
             return
         view = SharedListPickView(self._hub, hits)
@@ -3998,6 +4000,11 @@ class SharedListHitSelect(discord.ui.Select):
         ))
         done.add_item(box)
         await apply_view(interaction, done)
+        if interaction.message is not None:
+            try:
+                await interaction.message.delete(delay=10)
+            except discord.HTTPException:
+                pass
 
 
 class SharedListPickView(ReviewsLayout):
@@ -4162,8 +4169,38 @@ class SharedListDeleteButton(discord.ui.Button):
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if not self._hub.is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul le créateur peut supprimer cette liste.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        await interaction.response.defer()
+        self._hub.menu = "confirm_delete"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class SharedListDeleteConfirmButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         await self._hub.delete_list(interaction)
+
+
+class SharedListDeleteCancelButton(discord.ui.Button):
+    def __init__(self, parent: "SharedListView"):
+        super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.menu = "browse"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
 class SharedListRemoveSelect(discord.ui.Select):
@@ -4384,6 +4421,8 @@ class SharedListView(ReviewsLayout):
     def _build(self) -> None:
         if self.menu == "remove" and (not self.can_edit(self.viewer_id) or not self.items):
             self.menu = "browse"
+        if self.menu == "confirm_delete" and not self.is_owner(self.viewer_id):
+            self.menu = "browse"
         body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
         max_page = 0
@@ -4412,7 +4451,17 @@ class SharedListView(ReviewsLayout):
                 when = f" · <t:{added_at}:R>" if added_at else ""
                 text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)} · ajouté par {who}{when}"
                 body.append(section_with_thumbnail(text, hit.poster_url))
-        if self.menu == "remove" and page_items:
+        if self.menu == "confirm_delete":
+            title = pretty.shorten_text(str(self.record["title"]), 80) or "cette liste"
+            body.append(discord.ui.TextDisplay(
+                f"**Supprimer {title} ?**\n"
+                "-# La liste et les œuvres qu'elle contient seront retirées."
+            ))
+            rows.append(discord.ui.ActionRow(
+                SharedListDeleteConfirmButton(self),
+                SharedListDeleteCancelButton(self),
+            ))
+        elif self.menu == "remove" and page_items:
             rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
         else:
             actions: list[discord.ui.Item] = []
