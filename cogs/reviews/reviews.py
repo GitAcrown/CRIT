@@ -1455,9 +1455,12 @@ def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
     ]
 
 
-def fiche_intro(hit: MediaHit, *, backdrop: bool = True) -> list[discord.ui.Item]:
+def fiche_intro(hit: MediaHit, *, backdrop: bool = True, media_tag: str = "") -> list[discord.ui.Item]:
+    meta = _meta_line(hit)
+    if media_tag:
+        meta = f"{meta} · `{media_tag}`" if meta else f"`{media_tag}`"
     items: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {_meta_line(hit)}"),
+        discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {meta}"),
     ]
     if not backdrop:
         return items
@@ -2284,7 +2287,7 @@ class PublicFichePeekView(ReviewsLayout):
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
         body.extend(stream_live_items(stream_channels or []))
-        body.extend(fiche_intro(hit))
+        body.extend(fiche_intro(hit, media_tag=fiche_tag(hit) if show_media_id else ""))
         append_fiche_sections(
             body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
             skin=self.star_skin,
@@ -2292,9 +2295,6 @@ class PublicFichePeekView(ReviewsLayout):
         footer = _footer_line(hit)
         if footer:
             body.append(discord.ui.TextDisplay(f"-# {footer}"))
-        tag = fiche_tag(hit) if show_media_id else ""
-        if tag:
-            body.append(discord.ui.TextDisplay(f"-# {tag}"))
         self.set_layout(body)
 
     @classmethod
@@ -3319,9 +3319,10 @@ class MediaSessionView(ReviewsLayout):
 
         body.append(self._tabs_row())
         body.extend(stream_live_items(self.stream_channels))
+        media_tag = fiche_tag(hit) if self.ephemeral and self.prefs.show_media_id else ""
 
         if self.tab == "fiche":
-            body.extend(fiche_intro(hit))
+            body.extend(fiche_intro(hit, media_tag=media_tag))
             append_fiche_sections(
                 body,
                 hit,
@@ -3336,7 +3337,7 @@ class MediaSessionView(ReviewsLayout):
             if footer:
                 body.append(discord.ui.TextDisplay(f"-# {footer}"))
         else:
-            body.extend(fiche_intro(hit, backdrop=False))
+            body.extend(fiche_intro(hit, backdrop=False, media_tag=media_tag))
             total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
             if self.reviews:
                 max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
@@ -3380,11 +3381,6 @@ class MediaSessionView(ReviewsLayout):
                     nav_btns.append(_ReviewPageButton(self, 1, "→"))
                 if nav_btns:
                     actions.append(discord.ui.ActionRow(*nav_btns))
-
-        if self.ephemeral and self.prefs.show_media_id:
-            tag = fiche_tag(hit)
-            if tag:
-                body.append(discord.ui.TextDisplay(f"-# {tag}"))
 
         season_rows = self._season_rows()
         actions.extend(season_rows)
