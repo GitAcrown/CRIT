@@ -160,6 +160,17 @@ async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
         pass
 
 
+async def send_ephemeral_notice(interaction: discord.Interaction, content: str, *, delay: float = 10) -> None:
+    """Court message éphémère, retiré tout seul."""
+    message = await interaction.followup.send(content, ephemeral=True)
+    if message is None:
+        return
+    try:
+        await message.delete(delay=delay)
+    except discord.HTTPException:
+        pass
+
+
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
     """Met à jour le message cliqué, pas le defer d'origine."""
     kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
@@ -2711,10 +2722,9 @@ class FicheAddListSelect(discord.ui.Select):
             self._hub.guild, list_id, interaction.user.id, self._hub.hit,
         )
         title = pretty.shorten_text(record["title"], 80)
-        await interaction.followup.send(
+        await send_ephemeral_notice(
+            interaction,
             f"**Liste ·** {error}" if error else f"**Ajouté ·** {self._hub.hit.title} dans **{title}**.",
-            ephemeral=True,
-            delete_after=10,
         )
 
 
@@ -3962,10 +3972,9 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
                 self._hub.guild, self._hub.record["id"], interaction.user.id, hits[0],
             )
             await self._hub.refresh(interaction)
-            await interaction.followup.send(
+            await send_ephemeral_notice(
+                interaction,
                 f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}",
-                ephemeral=True,
-                delete_after=10,
             )
             return
         view = SharedListPickView(self._hub, hits)
@@ -4001,10 +4010,7 @@ class SharedListHitSelect(discord.ui.Select):
         done.add_item(box)
         await apply_view(interaction, done)
         if interaction.message is not None:
-            try:
-                await interaction.message.delete(delay=10)
-            except discord.HTTPException:
-                pass
+            await interaction.message.delete(delay=10)
 
 
 class SharedListPickView(ReviewsLayout):
