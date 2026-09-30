@@ -7,6 +7,8 @@ le palier 2 vaut ~10 notes sans commentaire (100 XP).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .emojis import (
     CROWN_EMPTY,
@@ -15,6 +17,9 @@ from .emojis import (
     FLOWER_EMPTY,
     FLOWER_FULL,
     FLOWER_HALF,
+    PUMPKIN_EMPTY,
+    PUMPKIN_FULL,
+    PUMPKIN_HALF,
     HEART_EMPTY,
     HEART_FULL,
     HEART_HALF,
@@ -110,6 +115,7 @@ class StarSkin:
     empty: str
     unlock_level: int
     description: str = ""
+    event: str = ""
 
     def preview(self, rating: float = 10) -> str:
         points = int(round(max(0.0, min(10.0, float(rating)))))
@@ -156,25 +162,68 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         4,
         "Se débloque au niveau 4.",
     ),
+    StarSkin(
+        "citrouille",
+        "Citrouilles",
+        PUMPKIN_FULL,
+        PUMPKIN_HALF,
+        PUMPKIN_EMPTY,
+        1,
+        "Note un film ou une série d'horreur en octobre.",
+        event="october_horror",
+    ),
 )
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
 STAR_SKIN_BY_ID: dict[str, StarSkin] = {skin.id: skin for skin in STAR_SKINS}
 
 
-def resolve_star_skin(skin: StarSkin | str | None, *, level: int | None = None) -> StarSkin:
+def resolve_star_skin(
+    skin: StarSkin | str | None,
+    *,
+    level: int | None = None,
+    owned: set[str] | frozenset[str] | None = None,
+) -> StarSkin:
     classic = STAR_SKIN_BY_ID[DEFAULT_STAR_SKIN]
     if isinstance(skin, StarSkin):
         chosen = skin
     else:
         key = STAR_SKIN_ALIASES.get(str(skin or "").strip(), str(skin or "").strip())
         chosen = STAR_SKIN_BY_ID.get(key, classic)
+    if chosen.event:
+        if owned is not None and chosen.id not in owned:
+            return classic
+        return chosen
     if level is not None and level < chosen.unlock_level:
         return classic
     return chosen
 
 
+def event_is_open(event: str, when: datetime | None = None) -> bool:
+    """Fenêtre pendant laquelle une collection d'événement peut encore se gagner."""
+    if event != "october_horror":
+        return False
+    moment = when or datetime.now(ZoneInfo("Europe/Paris"))
+    return moment.month == 10
+
+
+def parse_unlocked_skins(raw: object) -> frozenset[str]:
+    if isinstance(raw, (set, frozenset)):
+        parts = {str(part).strip() for part in raw}
+    else:
+        parts = {part.strip() for part in str(raw or "").split(",")}
+    known = {skin.id for skin in STAR_SKINS if skin.event}
+    return frozenset(part for part in parts if part in known)
+
+
+def format_unlocked_skins(owned: set[str] | frozenset[str]) -> str:
+    return ",".join(skin.id for skin in STAR_SKINS if skin.event and skin.id in owned)
+
+
 def skins_unlocked_between(previous_level: int, level: int) -> list[StarSkin]:
-    return [skin for skin in STAR_SKINS if previous_level < skin.unlock_level <= level]
+    return [
+        skin for skin in STAR_SKINS
+        if not skin.event and previous_level < skin.unlock_level <= level
+    ]
 
 
 def format_xp_bar(into: int, need: int, *, width: int = XP_BAR_WIDTH) -> str:

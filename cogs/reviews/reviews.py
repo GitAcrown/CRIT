@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
@@ -74,8 +75,11 @@ from .progress import (
     apply_daily_limits,
     compute_review_xp,
     format_xp_bar,
+    event_is_open,
+    format_unlocked_skins,
     level_for_xp,
     level_progress,
+    parse_unlocked_skins,
     resolve_star_skin,
     skins_unlocked_between,
     title_for_level,
@@ -198,6 +202,7 @@ class ReviewsLayout(discord.ui.LayoutView):
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.star_skin: StarSkin | None = None
+        self.accent_colour: discord.Colour | None = None
 
     def stars(self, rating: float) -> str:
         return format_stars(rating, self.star_skin)
@@ -271,7 +276,7 @@ class ReviewsLayout(discord.ui.LayoutView):
             children.append(row)
         children = with_control_separators(children)
         if children:
-            self.add_item(discord.ui.Container(*children))
+            self.add_item(discord.ui.Container(*children, accent_colour=self.accent_colour))
 
 VALID_RATINGS = tuple(range(11))
 RATING_MAX = 10
@@ -793,6 +798,26 @@ class UserPrefs:
     stream_voice_status: bool = True
     star_skin: str = DEFAULT_STAR_SKIN
     show_media_id: bool = False
+    unlocked_skins: frozenset[str] = frozenset()
+
+
+def _fold_genre(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text.casefold())
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+
+
+_HORROR_GENRES = {"horreur", "horror"}
+
+
+def is_october_horror(hit: MediaHit) -> bool:
+    """Film ou série dont un genre TMDB est l'horreur."""
+    if hit.media_type not in {"movie", "tv"}:
+        return False
+    names = [str(name) for name in hit.genres]
+    show_genres = hit.extra.get("show_genres")
+    if isinstance(show_genres, list):
+        names.extend(str(name) for name in show_genres)
+    return any(_fold_genre(name) in _HORROR_GENRES for name in names if name)
 
 
 def today_experienced() -> str:
@@ -877,6 +902,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
         star_skin=resolve_star_skin(_row_field(row, "star_skin", DEFAULT_STAR_SKIN)).id,
         show_media_id=bool(int(_row_field(row, "show_media_id", 0) or 0)),
+        unlocked_skins=parse_unlocked_skins(_row_field(row, "unlocked_skins", "")),
     )
 
 
@@ -1071,6 +1097,18 @@ def hit_from_row(row: Any) -> MediaHit:
         genres=genres,
         extra=extra,
     )
+
+
+async def member_accent(bot: commands.Bot, user_id: int) -> discord.Colour | None:
+    """Couleur d'accent du profil. Discord ne la donne qu'en allant chercher l'utilisateur."""
+    cached = bot.get_user(user_id)
+    if cached is not None and cached.accent_colour is not None:
+        return cached.accent_colour
+    try:
+        fetched = await bot.fetch_user(user_id)
+    except discord.HTTPException:
+        return None
+    return fetched.accent_colour
 
 
 def _user_display(guild: discord.Guild, bot: commands.Bot, user_id: int) -> tuple[str, str | None]:
@@ -2029,6 +2067,7 @@ def _review_saved_lines(
     award: XpAward,
     *,
     skin: StarSkin | str | None = None,
+    collections: list[StarSkin] | None = None,
 ) -> list[str]:
     verb = "enregistrée" if created else "mise à jour"
     parts = [f"**Critique {verb} ·** {format_stars(rating, skin)}  **{format_score(rating)}** — {hit.title}."]
@@ -2046,6 +2085,9 @@ def _review_saved_lines(
         if unlocked:
             names = " · ".join(skin.name for skin in unlocked)
             parts.append(f"Nouveau skin · {names} (`/custom`)")
+    if collections:
+        names = " · ".join(skin.name for skin in collections)
+        parts.append(f"Nouvelle collection · {names} (`/custom`)")
     return parts
 
 
@@ -2301,7 +2343,13 @@ class MyNoteView(ReviewsLayout):
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
         await apply_view(interaction, self)
-        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award, skin=self.star_skin)), ephemeral=True)
+        collections = await self.cog.grant_event_collections(self.guild, interaction.user.id, self.hit)
+        await interaction.followup.send(
+            "\n".join(_review_saved_lines(
+                self.hit, rating, created, award, skin=self.star_skin, collections=collections,
+            )),
+            ephemeral=True,
+        )
         await self.cog.announce_review(
             self.guild, interaction.user, self.hit, rating, comment,
             updated=not created, experienced_at=experienced_at, spoiler=spoiler,
@@ -3166,7 +3214,7 @@ class ProfileShareButton(discord.ui.Button):
             body.extend(content)
         view = discord.ui.LayoutView(timeout=None)
         if body:
-            view.add_item(discord.ui.Container(*body))
+            view.add_item(discord.ui.Container(*body, accent_colour=self._hub.accent_colour))
         message = await publish_layout_message(interaction, view)
         if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier ce profil.", ephemeral=True)
@@ -3333,7 +3381,13 @@ class MediaSessionView(ReviewsLayout):
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
         if not self.from_published_modal:
             await self.refresh(interaction)
-        await interaction.followup.send("\n".join(_review_saved_lines(self.hit, rating, created, award, skin=self.star_skin)), ephemeral=True)
+        collections = await self.cog.grant_event_collections(self.guild, interaction.user.id, self.hit)
+        await interaction.followup.send(
+            "\n".join(_review_saved_lines(
+                self.hit, rating, created, award, skin=self.star_skin, collections=collections,
+            )),
+            ephemeral=True,
+        )
         await self.cog.announce_review(
             self.guild, interaction.user, self.hit, rating, comment,
             updated=not created, experienced_at=experienced_at, spoiler=spoiler,
@@ -4543,11 +4597,13 @@ class ProfileView(ReviewsLayout):
         viewer_id: int,
         tab: str = "profil",
         star_skin: StarSkin | None = None,
+        accent: discord.Colour | None = None,
     ):
         super().__init__()
         self.cog = cog
         self.guild = guild
         self.member = member
+        self.accent_colour = accent
         self.xp = xp
         self.review_count = review_count
         self.average = average
@@ -5213,13 +5269,27 @@ class PreferencesView(ReviewsLayout):
 # Skins d'étoiles
 # ---------------------------------------------------------------------------
 
+def _skin_lock_label(parent: "CustomView", skin: StarSkin) -> str:
+    if skin.event:
+        return "Octobre" if event_is_open(skin.event) else "Terminé"
+    return f"Niv. {skin.unlock_level}"
+
+
+def _skin_lock_reason(skin: StarSkin) -> str:
+    if skin.event == "october_horror":
+        if event_is_open(skin.event):
+            return f"{skin.name} se débloque en notant un film ou une série d'horreur en octobre."
+        return f"{skin.name} n'est plus gagnable. Elle se débloquait en notant un film ou une série d'horreur en octobre."
+    return f"{skin.name} se débloque au niveau {skin.unlock_level}."
+
+
 class EquipStarSkinButton(discord.ui.Button):
     def __init__(self, parent: "CustomView", skin: StarSkin):
         equipped = parent.equipped_id == skin.id
-        locked = parent.level < skin.unlock_level
+        locked = not parent.skin_unlocked(skin)
         if locked:
             super().__init__(
-                label=f"Niv. {skin.unlock_level}",
+                label=_skin_lock_label(parent, skin),
                 style=discord.ButtonStyle.secondary,
                 disabled=True,
             )
@@ -5231,11 +5301,14 @@ class EquipStarSkinButton(discord.ui.Button):
         self._skin_id = skin.id
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        skin = resolve_star_skin(self._skin_id, level=self._hub.level)
+        skin = resolve_star_skin(
+            self._skin_id,
+            level=self._hub.level,
+            owned=self._hub.unlocked_skins,
+        )
         if skin.id != self._skin_id:
             await interaction.response.send_message(
-                f"**Verrouillé ·** {resolve_star_skin(self._skin_id).name} se débloque au niveau "
-                f"{resolve_star_skin(self._skin_id).unlock_level}.",
+                f"**Verrouillé ·** {_skin_lock_reason(resolve_star_skin(self._skin_id))}",
                 ephemeral=True,
                 delete_after=8,
             )
@@ -5271,7 +5344,8 @@ class CustomView(ReviewsLayout):
         self.into = into
         self.need = need
         self.total = total
-        self.star_skin = resolve_star_skin(prefs.star_skin, level=level)
+        self.unlocked_skins = prefs.unlocked_skins
+        self.star_skin = resolve_star_skin(prefs.star_skin, level=level, owned=self.unlocked_skins)
         self.equipped_id = self.star_skin.id
         self._build()
 
@@ -5284,6 +5358,11 @@ class CustomView(ReviewsLayout):
             )
             return False
         return True
+
+    def skin_unlocked(self, skin: StarSkin) -> bool:
+        if skin.event:
+            return skin.id in self.unlocked_skins
+        return self.level >= skin.unlock_level
 
     def _header(self) -> str:
         title = title_for_level(self.level)
@@ -5302,14 +5381,15 @@ class CustomView(ReviewsLayout):
         return "\n".join(lines)
 
     def _skin_section(self, skin: StarSkin) -> discord.ui.Section:
-        locked = self.level < skin.unlock_level
+        locked = not self.skin_unlocked(skin)
         equipped = self.equipped_id == skin.id
         status = " · équipé" if equipped else (" · verrouillé" if locked else "")
-        hint = (
-            f"Se débloque au niveau {skin.unlock_level}."
-            if locked
-            else skin.description
-        )
+        if locked:
+            hint = _skin_lock_reason(skin)
+        elif skin.event:
+            hint = "Débloquée. Elle reste équipable."
+        else:
+            hint = skin.description
         return discord.ui.Section(
             f"**{skin.name}**{status}\n{skin.preview(7)}\n-# {hint}",
             accessory=EquipStarSkinButton(self, skin),
@@ -5625,7 +5705,7 @@ class HelpView(ReviewsLayout):
             "`/listes` — listes communes (autocomplete pour ouvrir une liste)\n"
             "`/tirage` — une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)\n"
             "`/preferences` — tes défauts : date, listes, recherche, annonces, stream\n"
-            "`/custom` — skins d'étoiles : collections débloquées avec les niveaux\n"
+            "`/custom` — skins d'étoiles : niveaux, et citrouilles en notant un film ou une série d'horreur en octobre\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"
@@ -5642,6 +5722,7 @@ class HelpView(ReviewsLayout):
             "(y compris ceux des autres) et permet d'y lier le tien. "
             "Tes défauts (date, listes, recherche, annonces, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
             "Les skins d'étoiles se choisissent dans `/custom`. "
+            "En octobre, noter un film ou une série d'horreur débloque les citrouilles, qui restent équipables ensuite. "
             "Une balise dans le salon poste une fiche compacte : "
             "`<tmdb:697698>`, `<tmdb:tv:1396:s2>`, `<steam:1245620>`, "
             "`<spotify:id>` ou `<ol:OL45883W>`.\n"
@@ -5785,7 +5866,8 @@ class Reviews(commands.Cog):
                 stream_remind INTEGER NOT NULL DEFAULT 0,
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
                 star_skin TEXT NOT NULL DEFAULT 'classique',
-                show_media_id INTEGER NOT NULL DEFAULT 0
+                show_media_id INTEGER NOT NULL DEFAULT 0,
+                unlocked_skins TEXT NOT NULL DEFAULT ''
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -6062,13 +6144,18 @@ class Reviews(commands.Cog):
         if "show_media_id" in updates:
             cleaned["show_media_id"] = bool(updates["show_media_id"])
         if "star_skin" in updates:
-            cleaned["star_skin"] = resolve_star_skin(updates["star_skin"]).id
+            cleaned["star_skin"] = resolve_star_skin(
+                updates["star_skin"],
+                owned=current.unlocked_skins,
+            ).id
+        if "unlocked_skins" in updates:
+            cleaned["unlocked_skins"] = parse_unlocked_skins(updates["unlocked_skins"])
         prefs = replace(current, **cleaned) if cleaned else current
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin, show_media_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin, show_media_id, unlocked_skins)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
@@ -6079,6 +6166,7 @@ class Reviews(commands.Cog):
             int(prefs.stream_voice_status),
             prefs.star_skin,
             int(prefs.show_media_id),
+            format_unlocked_skins(prefs.unlocked_skins),
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
@@ -6086,7 +6174,28 @@ class Reviews(commands.Cog):
     async def star_skin_for(self, guild: discord.Guild, user_id: int) -> StarSkin:
         prefs = await self.get_user_prefs(guild, user_id)
         level = level_for_xp(await self.get_profile_xp(guild, user_id))
-        return resolve_star_skin(prefs.star_skin, level=level)
+        return resolve_star_skin(prefs.star_skin, level=level, owned=prefs.unlocked_skins)
+
+    async def grant_event_collections(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        hit: MediaHit,
+    ) -> list[StarSkin]:
+        """Débloque les collections d'événement encore gagnables pour cette note."""
+        prefs = await self.get_user_prefs(guild, user_id)
+        owned = set(prefs.unlocked_skins)
+        earned: list[StarSkin] = []
+        for skin in STAR_SKINS:
+            if not skin.event or skin.id in owned or not event_is_open(skin.event):
+                continue
+            if skin.event == "october_horror" and is_october_horror(hit):
+                owned.add(skin.id)
+                earned.append(skin)
+        if not earned:
+            return []
+        await self.set_user_prefs(guild, user_id, unlocked_skins=owned)
+        return earned
 
     async def _resolve_search_type(
         self,
@@ -6204,7 +6313,8 @@ class Reviews(commands.Cog):
                 stream_remind INTEGER NOT NULL DEFAULT 0,
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
                 star_skin TEXT NOT NULL DEFAULT 'classique',
-                show_media_id INTEGER NOT NULL DEFAULT 0
+                show_media_id INTEGER NOT NULL DEFAULT 0,
+                unlocked_skins TEXT NOT NULL DEFAULT ''
             )"""
         )
         await db.execute(
@@ -6229,6 +6339,7 @@ class Reviews(commands.Cog):
             "stream_voice_status": "INTEGER NOT NULL DEFAULT 1",
             "star_skin": "TEXT NOT NULL DEFAULT 'classique'",
             "show_media_id": "INTEGER NOT NULL DEFAULT 0",
+            "unlocked_skins": "TEXT NOT NULL DEFAULT ''",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
@@ -7910,6 +8021,7 @@ class Reviews(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         await self.ensure_progress(guild)
+        accent = await member_accent(self.bot, target.id)
         xp = await self.get_profile_xp(guild, target.id)
         journal_entries = await self.load_journal(guild, target.id)
         review_count = len(journal_entries)
@@ -7936,6 +8048,7 @@ class Reviews(commands.Cog):
             affinities=affinities,
             viewer_id=interaction.user.id,
             star_skin=await self.star_skin_for(guild, target.id),
+            accent=accent,
         )
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
