@@ -5340,7 +5340,7 @@ class ServerHubView(ReviewsLayout):
         for index, (hit, avg, count) in enumerate(page_items, start=start + 1):
             year = f" ({hit.year})" if hit.year else ""
             lines.append(
-                f"**{index}.** {self.stars(avg)}  **{hit.title}**{year}  ·  "
+                f"**{index}.** {self.stars_compact(avg)}  **{hit.title}**{year}  ·  "
                 f"{type_label(hit.media_type)}  ·  {count} {count_label}{'s' if count > 1 else ''}"
             )
         body.append(discord.ui.TextDisplay("\n".join(lines)))
