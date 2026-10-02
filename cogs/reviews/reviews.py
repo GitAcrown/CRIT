@@ -2350,7 +2350,30 @@ class MyNoteDeleteButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        self._hub.menu = "confirm_delete"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class MyNoteDeleteConfirmButton(discord.ui.Button):
+    def __init__(self, parent: "MyNoteView"):
+        super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         await self._hub.delete_review(interaction)
+
+
+class MyNoteDeleteCancelButton(discord.ui.Button):
+    def __init__(self, parent: "MyNoteView"):
+        super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.menu = "browse"
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
 class MyNoteView(ReviewsLayout):
@@ -2380,6 +2403,7 @@ class MyNoteView(ReviewsLayout):
         self.star_skin = star_skin if star_skin is not None else resolve_star_skin(self.prefs.star_skin)
         self.on_watchlist = on_watchlist and not bool(my_review)
         self.from_published_modal = False
+        self.menu = "browse"
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self._build()
@@ -2428,6 +2452,8 @@ class MyNoteView(ReviewsLayout):
     def _build(self) -> None:
         hit = self.hit
         mine = self.my_review
+        if self.menu == "confirm_delete" and not mine:
+            self.menu = "browse"
         if mine:
             text = (
                 f"{_title_line(hit)}\n"
@@ -2451,12 +2477,24 @@ class MyNoteView(ReviewsLayout):
                 f"*Tu n'as pas encore noté cette œuvre.*\n"
                 f"-# {_meta_line(hit)}"
             )
-        actions: list[discord.ui.Item] = [MyNoteEditButton(self)]
-        if mine:
-            actions.append(MyNoteDeleteButton(self))
-        actions.append(WatchlistButton(self))
-        actions.append(AddToListButton(self))
-        self.set_layout([section_with_thumbnail(text, hit.poster_url)], discord.ui.ActionRow(*actions))
+        body: list[discord.ui.Item] = [section_with_thumbnail(text, hit.poster_url)]
+        if self.menu == "confirm_delete":
+            title = pretty.shorten_text(hit.title, 80) or "cette œuvre"
+            body.append(discord.ui.TextDisplay(
+                f"**Supprimer {title} ?**\n"
+                "-# Ta note et ton commentaire seront retirés."
+            ))
+            actions: list[discord.ui.Item] = [
+                MyNoteDeleteConfirmButton(self),
+                MyNoteDeleteCancelButton(self),
+            ]
+        else:
+            actions = [MyNoteEditButton(self)]
+            if mine:
+                actions.append(MyNoteDeleteButton(self))
+            actions.append(WatchlistButton(self))
+            actions.append(AddToListButton(self))
+        self.set_layout(body, discord.ui.ActionRow(*actions))
 
     async def save_review(
         self,
@@ -2498,6 +2536,7 @@ class MyNoteView(ReviewsLayout):
         await self.cog.delete_review(self.guild, self.author_id, self.hit)
         self.my_review = None
         self.on_watchlist = False
+        self.menu = "browse"
         self._build()
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
@@ -2737,6 +2776,7 @@ class MediaSelect(discord.ui.Select):
         self._hub.season = None
         self._hub.review_page = 0
         self._hub.tab = "fiche"
+        self._hub.confirm_delete = False
         await self._hub.show_selected(interaction)
 
 
@@ -2797,6 +2837,7 @@ class SeasonScopeSelect(discord.ui.Select):
         self._hub.review_page = 0
         self._hub.pending_rating = None
         self._hub.pending_comment = ""
+        self._hub.confirm_delete = False
         await interaction.response.defer()
         await self._hub.reload_stats()
         self._hub._build()
@@ -2949,13 +2990,30 @@ class DeleteReviewButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        await self._hub.cog.delete_review(self._hub.guild, interaction.user.id, self._hub.hit)
-        self._hub.my_review = None
-        await self._hub.reload_stats()
-        if self._hub.published_wid:
-            await sync_published_fiche(self._hub.cog, self._hub.guild, self._hub.published_wid, self._hub.hit)
-        await self._hub.refresh(interaction)
-        await interaction.followup.send("**Critique supprimée ·** Ta note a été retirée.", ephemeral=True)
+        self._hub.confirm_delete = True
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class DeleteReviewConfirmButton(discord.ui.Button):
+    def __init__(self, parent: "MediaSessionView"):
+        super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._hub.delete_review(interaction)
+
+
+class DeleteReviewCancelButton(discord.ui.Button):
+    def __init__(self, parent: "MediaSessionView"):
+        super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.confirm_delete = False
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
 def _share_button_kwargs() -> dict[str, Any]:
@@ -3678,6 +3736,7 @@ class MediaSessionView(ReviewsLayout):
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
         self.from_published_modal = False
+        self.confirm_delete = False
         self.prefs = UserPrefs()
         self._enriched: set[int] = set()
 
@@ -3763,6 +3822,7 @@ class MediaSessionView(ReviewsLayout):
         )
         await self.reload_stats()
         self.pending_rating = None
+        self.confirm_delete = False
         self.tab = "fiche"
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
@@ -3894,29 +3954,54 @@ class MediaSessionView(ReviewsLayout):
 
         season_rows = self._season_rows()
         actions.extend(season_rows)
+        if self.confirm_delete and not (self.ephemeral and self.my_review):
+            self.confirm_delete = False
         if not self.published_wid:
             if season_rows:
                 actions.append(sep_tight())
-            rate_label = "Noter"
-            if self.ephemeral and self.pending_rating is not None and self.my_review is None:
-                rate_label = f"Noter {int(round(self.pending_rating))}"
-            elif self.ephemeral and self.my_review:
-                rate_label = "Modifier ma note"
-            rate_btn = RateButton(self)
-            rate_btn.label = rate_label
-            page_actions: list[discord.ui.Item] = [rate_btn]
-            if self.ephemeral and self.my_review:
-                page_actions.append(DeleteReviewButton(self))
-            if self.ephemeral:
-                page_actions.append(WatchlistButton(self))
-                page_actions.append(AddToListButton(self))
-            actions.append(discord.ui.ActionRow(*page_actions[:5]))
+            if self.confirm_delete:
+                title = pretty.shorten_text(hit.title, 80) or "cette œuvre"
+                actions.append(discord.ui.TextDisplay(
+                    f"**Supprimer {title} ?**\n"
+                    "-# Ta note et ton commentaire seront retirés."
+                ))
+                actions.append(discord.ui.ActionRow(
+                    DeleteReviewConfirmButton(self),
+                    DeleteReviewCancelButton(self),
+                ))
+            else:
+                rate_label = "Noter"
+                if self.ephemeral and self.pending_rating is not None and self.my_review is None:
+                    rate_label = f"Noter {int(round(self.pending_rating))}"
+                elif self.ephemeral and self.my_review:
+                    rate_label = "Modifier ma note"
+                rate_btn = RateButton(self)
+                rate_btn.label = rate_label
+                page_actions: list[discord.ui.Item] = [rate_btn]
+                if self.ephemeral and self.my_review:
+                    page_actions.append(DeleteReviewButton(self))
+                if self.ephemeral:
+                    page_actions.append(WatchlistButton(self))
+                    page_actions.append(AddToListButton(self))
+                actions.append(discord.ui.ActionRow(*page_actions[:5]))
         self.set_layout(body, *actions, above=above, sticky_head=sticky_head)
         if not self.published_wid:
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
+    async def delete_review(self, interaction: discord.Interaction) -> None:
+        await self.cog.delete_review(self.guild, self.author_id, self.hit)
+        self.my_review = None
+        self.confirm_delete = False
+        await self.reload_stats()
+        if self.published_wid:
+            await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
+        await self.refresh(interaction)
+        await interaction.followup.send("**Critique supprimée ·** Ta note a été retirée.", ephemeral=True)
+
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         await self.reload_stats()
+        if self.confirm_delete and not self.my_review:
+            self.confirm_delete = False
         self._build()
         await self.push(interaction)
 
