@@ -807,6 +807,7 @@ class UserPrefs:
     stream_voice_status: bool = True
     star_skin: str = DEFAULT_STAR_SKIN
     show_media_id: bool = False
+    bookmark_notify: bool = True
     unlocked_skins: frozenset[str] = frozenset()
 
 
@@ -911,6 +912,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
         star_skin=resolve_star_skin(_row_field(row, "star_skin", DEFAULT_STAR_SKIN)).id,
         show_media_id=bool(int(_row_field(row, "show_media_id", 0) or 0)),
+        bookmark_notify=bool(int(_row_field(row, "bookmark_notify", 1) or 0)),
         unlocked_skins=parse_unlocked_skins(_row_field(row, "unlocked_skins", "")),
     )
 
@@ -3634,6 +3636,22 @@ def next_sort(current: str) -> str:
     return SORT_CYCLE[(index + 1) % len(SORT_CYCLE)]
 
 
+class JournalOngoingButton(discord.ui.Button):
+    def __init__(self, parent: "ProfileView"):
+        on = parent.journal_ongoing
+        super().__init__(
+            label="En cours",
+            style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary,
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.journal_ongoing = not self._hub.journal_ongoing
+        self._hub.journal_page = 0
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
 class CycleSortButton(discord.ui.Button):
     """Bouton entre les flèches : Récentes → Meilleures → Pires."""
 
@@ -4648,6 +4666,7 @@ class ProfileView(ReviewsLayout):
         self.watchlist_page = 0
         self.journal_type = "all"
         self.journal_sort = "recent"
+        self.journal_ongoing = False
         self._interaction: discord.Interaction | None = None
         self._build()
 
@@ -4720,6 +4739,8 @@ class ProfileView(ReviewsLayout):
         items = self.journal_entries
         if self.journal_type != "all":
             items = [(hit, row) for hit, row in items if hit.media_type == self.journal_type]
+        if self.journal_ongoing:
+            items = [(hit, row) for hit, row in items if is_ongoing(experienced_from_row(row))]
         if self.journal_sort == "best":
             items = sorted(
                 items,
@@ -4770,13 +4791,14 @@ class ProfileView(ReviewsLayout):
 
     def _journal_nav(self, max_page: int) -> discord.ui.ActionRow:
         sort = CycleSortButton(self, "journal_sort", "journal_page")
+        ongoing = JournalOngoingButton(self)
         if max_page <= 0:
-            return discord.ui.ActionRow(sort)
+            return discord.ui.ActionRow(sort, ongoing)
         prev_btn = HubPageButton(self, "journal_page", -1, "←", max_page)
         next_btn = HubPageButton(self, "journal_page", 1, "→", max_page)
         prev_btn.disabled = self.journal_page <= 0
         next_btn.disabled = self.journal_page >= max_page
-        return discord.ui.ActionRow(prev_btn, sort, next_btn)
+        return discord.ui.ActionRow(prev_btn, sort, ongoing, next_btn)
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
         entries = self._filtered_journal()
@@ -5271,6 +5293,12 @@ class PreferencesView(ReviewsLayout):
             ),
             sep_wide(),
             discord.ui.Section(
+                "**Signets notés**\n"
+                "-# MP quand quelqu'un note une œuvre qui est dans tes signets.",
+                accessory=PrefOnOffButton(self, "bookmark_notify", prefs.bookmark_notify),
+            ),
+            sep_wide(),
+            discord.ui.Section(
                 "**Rappel de stream**\n"
                 "-# MP quand tu lances un Go Live, pour lier une œuvre.",
                 accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
@@ -5739,14 +5767,14 @@ class HelpView(ReviewsLayout):
         extras = (
             f"### {XP} Autour des notes\n"
             f"{MOVIE} Films  ·  {TV} Séries  ·  {GAME} Jeux  ·  {ALBUM} Albums  ·  {MUSIC} Morceaux  ·  {BOOK} Livres\n"
-            "Le journal de `/carnet` se filtre par type et se trie (récentes, meilleures, pires). "
+            "Le journal de `/carnet` se filtre par type, par œuvres en cours, et se trie (récentes, meilleures, pires). "
             "Ton commentaire spoiler reste lisible dans ton journal, pas en public. "
             "Les `/listes` sont partagées : le créateur décide qui peut les éditer "
             "(lui seul, des membres, ou tout le serveur). "
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres) et permet d'y lier le tien. "
-            "Tes défauts (date, listes, recherche, annonces, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
+            "Tes défauts (date, listes, recherche, annonces, signets notés, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
             "Les skins d'étoiles se choisissent dans `/custom`. "
             "En octobre, noter un film ou une série d'horreur débloque les citrouilles, qui restent équipables ensuite. "
             "Une balise dans le salon poste une fiche compacte : "
@@ -5893,7 +5921,8 @@ class Reviews(commands.Cog):
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
                 star_skin TEXT NOT NULL DEFAULT 'classique',
                 show_media_id INTEGER NOT NULL DEFAULT 0,
-                unlocked_skins TEXT NOT NULL DEFAULT ''
+                unlocked_skins TEXT NOT NULL DEFAULT '',
+                bookmark_notify INTEGER NOT NULL DEFAULT 1
             )"""
         )
         stream_links_table = dataio.TableBuilder(
@@ -6169,6 +6198,8 @@ class Reviews(commands.Cog):
             cleaned["stream_voice_status"] = bool(updates["stream_voice_status"])
         if "show_media_id" in updates:
             cleaned["show_media_id"] = bool(updates["show_media_id"])
+        if "bookmark_notify" in updates:
+            cleaned["bookmark_notify"] = bool(updates["bookmark_notify"])
         if "star_skin" in updates:
             cleaned["star_skin"] = resolve_star_skin(
                 updates["star_skin"],
@@ -6180,8 +6211,8 @@ class Reviews(commands.Cog):
         await self._ensure_schema(guild)
         await self.data.get(guild).execute(
             """INSERT OR REPLACE INTO preferences
-               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin, show_media_id, unlocked_skins)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, default_date, default_list_edit, default_spoiler, default_search_type, announce_notes, stream_remind, stream_voice_status, star_skin, show_media_id, unlocked_skins, bookmark_notify)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             user_id,
             prefs.default_date,
             prefs.default_list_edit,
@@ -6193,6 +6224,7 @@ class Reviews(commands.Cog):
             prefs.star_skin,
             int(prefs.show_media_id),
             format_unlocked_skins(prefs.unlocked_skins),
+            int(prefs.bookmark_notify),
         )
         self._prefs[(guild.id, user_id)] = prefs
         return prefs
@@ -6340,7 +6372,8 @@ class Reviews(commands.Cog):
                 stream_voice_status INTEGER NOT NULL DEFAULT 1,
                 star_skin TEXT NOT NULL DEFAULT 'classique',
                 show_media_id INTEGER NOT NULL DEFAULT 0,
-                unlocked_skins TEXT NOT NULL DEFAULT ''
+                unlocked_skins TEXT NOT NULL DEFAULT '',
+                bookmark_notify INTEGER NOT NULL DEFAULT 1
             )"""
         )
         await db.execute(
@@ -6366,6 +6399,7 @@ class Reviews(commands.Cog):
             "star_skin": "TEXT NOT NULL DEFAULT 'classique'",
             "show_media_id": "INTEGER NOT NULL DEFAULT 0",
             "unlocked_skins": "TEXT NOT NULL DEFAULT ''",
+            "bookmark_notify": "INTEGER NOT NULL DEFAULT 1",
         }
         for name, spec in pref_alters.items():
             if name not in pref_columns:
@@ -7284,7 +7318,55 @@ class Reviews(commands.Cog):
             pioneer=pioneer,
             new_comment=new_comment,
         )
+        if created:
+            asyncio.create_task(
+                self.notify_bookmark_watchers(guild, user, hit, rating),
+                name="crit-bookmark-notify",
+            )
         return created, award
+
+    async def notify_bookmark_watchers(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        hit: MediaHit,
+        rating: float,
+    ) -> None:
+        """MP les membres qui ont cette œuvre en signet."""
+        try:
+            media_id = await self.lookup_media_id(guild, hit)
+            if not media_id:
+                return
+            rows = await self.data.get(guild).fetchall(
+                "SELECT user_id FROM watchlist WHERE media_id=?",
+                media_id,
+            )
+            skin = await self.star_skin_for(guild, user.id)
+            year = f" ({hit.year})" if hit.year else ""
+            text = (
+                f"**Signet ·** {user.display_name} a noté **{hit.title}**{year} "
+                f"sur **{guild.name}**.\n"
+                f"{format_stars(rating, skin)}  **{format_score(rating)}**"
+            )
+            for row in rows:
+                user_id = int(row["user_id"])
+                if user_id == user.id:
+                    continue
+                prefs = await self.get_user_prefs(guild, user_id)
+                if not prefs.bookmark_notify:
+                    continue
+                member = guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except discord.HTTPException:
+                        continue
+                try:
+                    await member.send(text, allowed_mentions=NO_PINGS)
+                except discord.HTTPException:
+                    logger.info("MP signet impossible pour %s", user_id)
+        except Exception:
+            logger.exception("Notification de signet impossible")
 
     async def delete_review(self, guild: discord.Guild, user_id: int, hit: MediaHit) -> None:
         media_id = await self.lookup_media_id(guild, hit)
