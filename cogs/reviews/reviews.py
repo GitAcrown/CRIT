@@ -1159,13 +1159,34 @@ def hit_from_row(row: Any) -> MediaHit:
     )
 
 
-async def member_accent(bot: commands.Bot, user_id: int) -> discord.Colour | None:
-    """Couleur d'accent du profil. Discord ne la donne qu'en allant chercher l'utilisateur."""
-    cached = bot.get_user(user_id)
+def _member_role_colour(
+    guild: discord.Guild,
+    user: discord.Member | discord.User,
+) -> discord.Colour | None:
+    """Couleur affichée du membre : le rôle coloré le plus haut."""
+    member = user if isinstance(user, discord.Member) else guild.get_member(user.id)
+    if member is None:
+        return None
+    colour = member.colour
+    if not colour.value:
+        return None
+    return colour
+
+
+async def member_accent(
+    bot: commands.Bot,
+    guild: discord.Guild,
+    user: discord.Member | discord.User,
+) -> discord.Colour | None:
+    """Couleur d'accent du carnet : celle du membre, sinon l'accent de profil."""
+    colour = _member_role_colour(guild, user)
+    if colour is not None:
+        return colour
+    cached = bot.get_user(user.id)
     if cached is not None and cached.accent_colour is not None:
         return cached.accent_colour
     try:
-        fetched = await bot.fetch_user(user_id)
+        fetched = await bot.fetch_user(user.id)
     except discord.HTTPException:
         return None
     return fetched.accent_colour
@@ -8752,7 +8773,7 @@ class Reviews(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         await self.ensure_progress(guild)
-        accent = await member_accent(self.bot, target.id)
+        accent = await member_accent(self.bot, guild, target)
         xp = await self.get_profile_xp(guild, target.id)
         journal_entries = await self.load_journal(guild, target.id)
         review_count = len(journal_entries)
