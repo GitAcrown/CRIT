@@ -3221,7 +3221,7 @@ class StreamPlanHitSelect(discord.ui.Select):
 
 class StreamPlanConfirmButton(discord.ui.Button):
     def __init__(self, parent: "StreamPlanPickView"):
-        super().__init__(label="Planifier", style=discord.ButtonStyle.primary, )
+        super().__init__(label="Planifier un stream", style=discord.ButtonStyle.primary, )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
