@@ -5197,7 +5197,7 @@ class PreferencesView(ReviewsLayout):
         prefs = self.prefs
         header = (
             f"## Préférences\n"
-            f"-# Tes défauts sur **{self.guild.name}** — notes, recherches, listes et stream."
+            f"-# Tes préférences sur **{self.guild.name}** — notes, recherches, listes et stream."
         )
         children: list[discord.ui.Item] = [
             section_with_thumbnail(header, self.user.display_avatar.url),
@@ -8373,7 +8373,7 @@ class Reviews(commands.Cog):
     @app_commands.command(name="preferences")
     @app_commands.guild_only()
     async def critique_preferences(self, interaction: discord.Interaction) -> None:
-        """Tes défauts : date, listes, recherche, annonces et stream."""
+        """Tes préférences : date, listes, recherche, annonces et stream."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
