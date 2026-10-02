@@ -267,8 +267,15 @@ class ReviewsLayout(discord.ui.LayoutView):
         except discord.HTTPException as exc:
             logger.warning("Impossible de rafraîchir %s : %s", type(self).__name__, exc)
 
-    def set_layout(self, body: list[discord.ui.Item], *rows: discord.ui.Item | None) -> None:
+    def set_layout(
+        self,
+        body: list[discord.ui.Item],
+        *rows: discord.ui.Item | None,
+        above: list[discord.ui.Item] | None = None,
+    ) -> None:
         self.clear_items()
+        for item in above or []:
+            self.add_item(item)
         children = list(body)
         for row in rows:
             if row is None:
@@ -3422,21 +3429,22 @@ class MediaSessionView(ReviewsLayout):
         hit = self.hit
         body: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
+        above: list[discord.ui.Item] = []
 
         if len(self.hits) > 1:
-            body.append(discord.ui.TextDisplay(f"### Résultats · {len(self.hits)} œuvre(s)"))
+            above.append(discord.ui.TextDisplay(f"### Résultats · {len(self.hits)} œuvre(s)"))
             if not any(item.source == "tmdb" for item in self.hits) and any(
                 item.source == "spotify" for item in self.hits
             ):
                 if self.cog.catalog is not None and not self.cog.catalog.tmdb.available:
-                    body.append(discord.ui.TextDisplay("-# Films et séries absents · clé TMDB manquante."))
+                    above.append(discord.ui.TextDisplay("-# Films et séries absents · clé TMDB manquante."))
                 else:
-                    body.append(discord.ui.TextDisplay(
+                    above.append(discord.ui.TextDisplay(
                         "-# Aucun film ou série trouvé — précise le type si besoin."
                     ))
-            body.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
+            above.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
 
-        body.append(self._tabs_row())
+        above.append(self._tabs_row())
         body.extend(stream_live_items(self.stream_channels))
         media_tag = fiche_tag(hit) if self.ephemeral and self.prefs.show_media_id else ""
 
@@ -3520,7 +3528,7 @@ class MediaSessionView(ReviewsLayout):
                 page_actions.append(WatchlistButton(self))
                 page_actions.append(AddToListButton(self))
             actions.append(discord.ui.ActionRow(*page_actions[:5]))
-        self.set_layout(body, *actions)
+        self.set_layout(body, *actions, above=above)
         if not self.published_wid:
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
@@ -4681,14 +4689,14 @@ class ProfileView(ReviewsLayout):
         filters: list[discord.ui.ActionRow] | None = None,
         actions: list[discord.ui.ActionRow] | None = None,
     ) -> None:
-        body: list[discord.ui.Item] = [header, sep_tight(), self._tabs_row()]
+        body: list[discord.ui.Item] = [header]
         for row in filters or []:
             body.append(sep_tight())
             body.append(row)
         if content:
             body.append(sep_wide())
             body.extend(content)
-        self.set_layout(body, *(actions or []))
+        self.set_layout(body, *(actions or []), above=[self._tabs_row()])
 
     def _filtered_journal(self) -> list[tuple[MediaHit, Any]]:
         items = self.journal_entries
@@ -5016,7 +5024,7 @@ class ServerHubView(ReviewsLayout):
                 items=self._sorted_catalog(),
                 page_attr="catalog_page",
             )
-        self.set_layout([self._tabs_row(), sep_tight(), *body], *rows)
+        self.set_layout(body, *rows, above=[self._tabs_row()])
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         self._build()
