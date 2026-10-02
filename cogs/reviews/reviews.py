@@ -1566,8 +1566,13 @@ def plan_banner_lines(plans: list[dict] | None) -> list[str]:
         starts = int(plan.get("starts_at") or 0)
         if starts <= now:
             continue
+        when = datetime.fromtimestamp(starts, _PARIS)
+        if when.date() == datetime.now(_PARIS).date():
+            moment = f"à <t:{starts}:t>"
+        else:
+            moment = f"le <t:{starts}:F>"
         lines.append(
-            f"{PLANNING} Stream planifié par <@{int(plan['user_id'])}> à <t:{starts}:t>"
+            f"{PLANNING} Stream planifié par <@{int(plan['user_id'])}> {moment}"
         )
     return lines
 
