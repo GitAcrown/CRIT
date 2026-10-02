@@ -1566,11 +1566,9 @@ def plan_banner_lines(plans: list[dict] | None) -> list[str]:
         starts = int(plan.get("starts_at") or 0)
         if starts <= now:
             continue
-        extra = ""
-        interest = int(plan.get("interest") or 0)
-        if interest:
-            extra = " · 1 intéressé" if interest == 1 else f" · {interest} intéressés"
-        lines.append(f"{PLANNING} <@{int(plan['user_id'])}> · <t:{starts}:F>{extra}")
+        lines.append(
+            f"{PLANNING} Stream planifié par <@{int(plan['user_id'])}> à <t:{starts}:t>"
+        )
     return lines
 
 
