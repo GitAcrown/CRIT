@@ -3295,9 +3295,11 @@ class StreamPlanModal(discord.ui.Modal, title="Planifier un stream"):
             min_length=2,
             max_length=80,
         )
+        today = datetime.now(_PARIS).strftime("%d/%m/%Y")
         self.date_input = discord.ui.TextInput(
             label="Date",
             placeholder="JJ/MM/AAAA",
+            default=today,
             min_length=6,
             max_length=10,
         )
