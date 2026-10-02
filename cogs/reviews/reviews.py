@@ -272,6 +272,7 @@ class ReviewsLayout(discord.ui.LayoutView):
         body: list[discord.ui.Item],
         *rows: discord.ui.Item | None,
         above: list[discord.ui.Item] | None = None,
+        sticky_head: int = 0,
     ) -> None:
         self.clear_items()
         for item in above or []:
@@ -281,7 +282,8 @@ class ReviewsLayout(discord.ui.LayoutView):
             if row is None:
                 continue
             children.append(row)
-        children = with_control_separators(children)
+        head = children[:sticky_head]
+        children = head + with_control_separators(children[sticky_head:])
         if children:
             self.add_item(discord.ui.Container(*children, accent_colour=self.accent_colour))
 
@@ -1526,13 +1528,25 @@ def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
     ]
 
 
-def fiche_intro(hit: MediaHit, *, backdrop: bool = True, media_tag: str = "") -> list[discord.ui.Item]:
+def fiche_intro(
+    hit: MediaHit,
+    *,
+    backdrop: bool = True,
+    media_tag: str = "",
+    replace_title: discord.ui.Item | None = None,
+) -> list[discord.ui.Item]:
     meta = _meta_line(hit)
     if media_tag:
         meta = f"{meta} · `{media_tag}`" if meta else f"`{media_tag}`"
-    items: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"{_title_line(hit)}\n-# {meta}"),
-    ]
+    if replace_title is not None:
+        items: list[discord.ui.Item] = [replace_title]
+        if meta:
+            items.append(discord.ui.TextDisplay(f"-# {meta}"))
+    else:
+        text = _title_line(hit)
+        if meta:
+            text += f"\n-# {meta}"
+        items = [discord.ui.TextDisplay(text)]
     if not backdrop:
         return items
     backdrop_url = hit.extra.get("backdrop_url")
@@ -2574,9 +2588,10 @@ class MediaSelect(discord.ui.Select):
     def __init__(self, parent: "MediaSessionView", hits: list[MediaHit], selected: int):
         options = []
         for index, hit in enumerate(hits[:25]):
+            label = f"{hit.title} · {hit.year}" if hit.year else hit.title
             options.append(
                 discord.SelectOption(
-                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                    label=pretty.shorten_text(label, 100) or "Sans titre",
                     value=str(index),
                     description=select_hit_description(hit),
                     emoji=select_emoji(hit.media_type),
@@ -3430,9 +3445,9 @@ class MediaSessionView(ReviewsLayout):
         body: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
         above: list[discord.ui.Item] = []
+        title_row: discord.ui.Item | None = None
 
         if len(self.hits) > 1:
-            above.append(discord.ui.TextDisplay(f"### Résultats · {len(self.hits)} œuvre(s)"))
             if not any(item.source == "tmdb" for item in self.hits) and any(
                 item.source == "spotify" for item in self.hits
             ):
@@ -3442,14 +3457,16 @@ class MediaSessionView(ReviewsLayout):
                     above.append(discord.ui.TextDisplay(
                         "-# Aucun film ou série trouvé — précise le type si besoin."
                     ))
-            above.append(discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected)))
+            title_row = discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected))
 
         above.append(self._tabs_row())
         body.extend(stream_live_items(self.stream_channels))
         media_tag = fiche_tag(hit) if self.ephemeral and self.prefs.show_media_id else ""
+        sticky_head = 0
 
         if self.tab == "fiche":
-            body.extend(fiche_intro(hit, media_tag=media_tag))
+            body.extend(fiche_intro(hit, media_tag=media_tag, replace_title=title_row))
+            sticky_head = len(body)
             append_fiche_sections(
                 body,
                 hit,
@@ -3464,7 +3481,8 @@ class MediaSessionView(ReviewsLayout):
             if footer:
                 body.append(discord.ui.TextDisplay(f"-# {footer}"))
         else:
-            body.extend(fiche_intro(hit, backdrop=False, media_tag=media_tag))
+            body.extend(fiche_intro(hit, backdrop=False, media_tag=media_tag, replace_title=title_row))
+            sticky_head = len(body)
             total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
             if self.reviews:
                 max_page = max(0, (len(self.reviews) - 1) // REVIEWS_PAGE)
@@ -3528,7 +3546,7 @@ class MediaSessionView(ReviewsLayout):
                 page_actions.append(WatchlistButton(self))
                 page_actions.append(AddToListButton(self))
             actions.append(discord.ui.ActionRow(*page_actions[:5]))
-        self.set_layout(body, *actions, above=above)
+        self.set_layout(body, *actions, above=above, sticky_head=sticky_head)
         if not self.published_wid:
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
