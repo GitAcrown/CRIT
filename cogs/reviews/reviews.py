@@ -10,7 +10,8 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import aiohttp
@@ -53,6 +54,7 @@ from .emojis import (
     MORE,
     MOVIE,
     MUSIC,
+    PLANNING,
     PLUS_SMALL,
     RIVAL,
     SALE,
@@ -413,6 +415,7 @@ _MONTHS_FR = (
 )
 _DATE_DMY = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$")
 _DATE_YMD = re.compile(r"^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$")
+_TIME_HM = re.compile(r"^(\d{1,2})(?:[:hH](\d{2}))?$")
 
 
 def experienced_verb(media_type: str) -> str:
@@ -493,6 +496,28 @@ def parse_experienced_date(raw: str) -> tuple[str | None, str | None]:
     except ValueError:
         return None, "Cette date n'existe pas."
     return f"{year:04d}-{month:02d}-{day:02d}", None
+
+
+def parse_plan_datetime(date_raw: str, time_raw: str) -> tuple[int | None, str | None]:
+    iso, err = parse_experienced_date(date_raw)
+    if err or not iso:
+        return None, err or "Indique une date du type `12/03/2026`."
+    match = _TIME_HM.match((time_raw or "").strip())
+    if match is None:
+        return None, "Indique une heure du type `21:30`."
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if hour > 23 or minute > 59:
+        return None, "Cette heure n'existe pas."
+    year, month, day = (int(part) for part in iso.split("-"))
+    when = datetime(year, month, day, hour, minute, tzinfo=_PARIS)
+    stamp = int(when.timestamp())
+    now = int(time.time())
+    if stamp <= now:
+        return None, "Cette date est déjà passée."
+    if stamp > now + STREAM_PLAN_HORIZON:
+        return None, "Tu peux planifier jusqu'à 90 jours à l'avance."
+    return stamp, None
 
 
 def experienced_to_input(raw: str) -> str:
@@ -985,6 +1010,9 @@ def member_voice_channel_id(member: discord.Member | discord.abc.User) -> int | 
 STREAM_START_GRACE = 5.0
 STREAM_END_GRACE = 60.0
 STREAM_LINK_MAX_AGE = 12 * 3600
+STREAM_PLAN_MAX = 3
+STREAM_PLAN_HORIZON = 90 * 86400
+_PARIS = ZoneInfo("Europe/Paris")
 
 
 def select_emoji(media_type: str) -> discord.PartialEmoji | None:
@@ -1520,14 +1548,44 @@ def stream_mini_items(hit: MediaHit) -> list[discord.ui.Item]:
     return [section_with_thumbnail(text, hit.poster_url)]
 
 
-def stream_live_items(channel_ids: list[int]) -> list[discord.ui.Item]:
-    if not channel_ids:
+def fiche_plan_payload(plans: list[dict] | None) -> list[dict]:
+    slim: list[dict] = []
+    for plan in plans or []:
+        slim.append({
+            "user_id": int(plan["user_id"]),
+            "starts_at": int(plan["starts_at"]),
+            "interest": int(plan.get("interest") or 0),
+        })
+    return slim
+
+
+def plan_banner_lines(plans: list[dict] | None) -> list[str]:
+    now = int(time.time())
+    lines: list[str] = []
+    for plan in plans or []:
+        starts = int(plan.get("starts_at") or 0)
+        if starts <= now:
+            continue
+        extra = ""
+        interest = int(plan.get("interest") or 0)
+        if interest:
+            extra = " · 1 intéressé" if interest == 1 else f" · {interest} intéressés"
+        lines.append(f"{PLANNING} <@{int(plan['user_id'])}> · <t:{starts}:F>{extra}")
+    return lines
+
+
+def stream_live_items(
+    channel_ids: list[int] | None = None,
+    plans: list[dict] | None = None,
+) -> list[discord.ui.Item]:
+    lines: list[str] = []
+    if channel_ids:
+        salons = " · ".join(f"<#{cid}>" for cid in channel_ids)
+        lines.append(f"{STREAMING} Actuellement en stream sur {salons}")
+    lines.extend(plan_banner_lines(plans))
+    if not lines:
         return []
-    salons = " · ".join(f"<#{cid}>" for cid in channel_ids)
-    return [
-        discord.ui.TextDisplay(f"{STREAMING} Actuellement en stream sur {salons}"),
-        sep_tight(),
-    ]
+    return [discord.ui.TextDisplay("\n".join(lines)), sep_tight()]
 
 
 def fiche_intro(
@@ -1574,11 +1632,12 @@ def render_published_fiche(
     live: bool,
     banner: str = "",
     stream_channels: list[int] | None = None,
+    plans: list[dict] | None = None,
     guild_name: str = "",
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
-    body.extend(stream_live_items(stream_channels or []))
+    body.extend(stream_live_items(stream_channels or [], plans))
     if banner:
         body.append(discord.ui.TextDisplay(banner))
         body.append(sep_tight())
@@ -1609,6 +1668,7 @@ def render_published_record(rec: FicheRecord, *, live: bool) -> discord.ui.Layou
         social=str(rec.payload.get("social") or ""),
         wid=rec.id,
         live=live,
+        plans=list(rec.payload.get("plans") or []),
         guild_name=str(rec.payload.get("guild_name") or ""),
     )
 
@@ -1630,6 +1690,7 @@ async def prepare_published_fiche(
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = await cog.public_fiche_line(guild, hit, reviews, media_id)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
+    plans = fiche_plan_payload(await cog.plans_for_hit(guild, hit))
     wid = create_record({
         "kind": "fiche",
         "guild_id": guild.id,
@@ -1638,6 +1699,7 @@ async def prepare_published_fiche(
         "avg": avg,
         "count": count,
         "social": social,
+        "plans": plans,
     })
     view = render_published_fiche(
         hit,
@@ -1648,6 +1710,7 @@ async def prepare_published_fiche(
         live=True,
         banner=banner,
         stream_channels=stream_channels,
+        plans=plans,
         guild_name=guild.name,
     )
     return view, wid
@@ -1710,13 +1773,14 @@ def render_compact_fiche(
     count: int,
     social: str,
     stream_channels: list[int] | None = None,
+    plans: list[dict] | None = None,
     guild_name: str = "",
     wid: str | None = None,
 ) -> discord.ui.LayoutView:
     """Fiche de balise : sans image large, avec le bouton Actions."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
-    body.extend(stream_live_items(stream_channels or []))
+    body.extend(stream_live_items(stream_channels or [], plans))
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
@@ -1747,6 +1811,7 @@ async def post_compact_fiche(
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = await cog.public_fiche_line(guild, hit, reviews, media_id)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
+    plans = fiche_plan_payload(await cog.plans_for_hit(guild, hit))
     wid = create_record({
         "kind": "compact",
         "guild_id": guild.id,
@@ -1756,6 +1821,7 @@ async def post_compact_fiche(
         "count": count,
         "social": social,
         "stream_channels": stream_channels,
+        "plans": plans,
     })
     view = render_compact_fiche(
         hit,
@@ -1763,6 +1829,7 @@ async def post_compact_fiche(
         count=count,
         social=social,
         stream_channels=stream_channels,
+        plans=plans,
         guild_name=guild.name,
         wid=wid,
     )
@@ -1788,12 +1855,14 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
     social = await cog.public_fiche_line(guild, hit, reviews, media_id)
+    plans = fiche_plan_payload(await cog.plans_for_hit(guild, hit))
     rec.payload.update({
         "hit": hit_to_dict(hit),
         "avg": avg,
         "count": count,
         "social": social,
         "guild_name": guild.name,
+        "plans": plans,
     })
     update_payload(wid, rec.payload)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
@@ -1805,6 +1874,7 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         wid=wid,
         live=True,
         stream_channels=stream_channels,
+        plans=plans,
         guild_name=guild.name,
     )
     if not rec.channel_id or not rec.message_id:
@@ -2066,6 +2136,7 @@ def render_compact_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutV
         count=int(rec.payload.get("count") or 0),
         social=str(rec.payload.get("social") or ""),
         stream_channels=[int(channel_id) for channel_id in channels if channel_id],
+        plans=list(rec.payload.get("plans") or []),
         guild_name=str(rec.payload.get("guild_name") or ""),
         wid=rec.id if live else None,
     )
@@ -2414,6 +2485,7 @@ class PublicFichePeekView(ReviewsLayout):
         count: int,
         social: str,
         stream_channels: list[int] | None = None,
+        plans: list[dict] | None = None,
         guild_name: str = "",
         star_skin: StarSkin | None = None,
         show_media_id: bool = False,
@@ -2422,7 +2494,7 @@ class PublicFichePeekView(ReviewsLayout):
         self.star_skin = star_skin
         self._interaction: discord.Interaction | None = None
         body: list[discord.ui.Item] = []
-        body.extend(stream_live_items(stream_channels or []))
+        body.extend(stream_live_items(stream_channels or [], plans))
         body.extend(fiche_intro(hit, media_tag=fiche_tag(hit) if show_media_id else ""))
         append_fiche_sections(
             body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
@@ -2442,12 +2514,14 @@ class PublicFichePeekView(ReviewsLayout):
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
         social = await cog.public_fiche_line(guild, hit, reviews, media_id)
         stream_channels = await cog.stream_channels_for_hit(guild, hit)
+        plans = fiche_plan_payload(await cog.plans_for_hit(guild, hit))
         return cls(
             hit,
             avg=avg,
             count=count,
             social=social,
             stream_channels=stream_channels,
+            plans=plans,
             guild_name=guild.name,
             star_skin=await cog.star_skin_for(guild, viewer_id),
             show_media_id=(await cog.get_user_prefs(guild, viewer_id)).show_media_id,
@@ -2480,6 +2554,7 @@ class PublicCritiquesView(ReviewsLayout):
         avg: float | None,
         count: int,
         stream_channels: list[int] | None = None,
+        plans: list[dict] | None = None,
         star_skin: StarSkin | None = None,
     ):
         super().__init__()
@@ -2491,6 +2566,7 @@ class PublicCritiquesView(ReviewsLayout):
         self.avg = avg
         self.count = count
         self.stream_channels = stream_channels or []
+        self.stream_plans = plans or []
         self.star_skin = star_skin
         self.page = 0
         self._interaction: discord.Interaction | None = None
@@ -2508,6 +2584,7 @@ class PublicCritiquesView(ReviewsLayout):
         avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
         reviews = await cog.list_reviews(guild, media_id) if media_id else []
         stream_channels = await cog.stream_channels_for_hit(guild, hit)
+        plans = fiche_plan_payload(await cog.plans_for_hit(guild, hit))
         return cls(
             cog,
             guild,
@@ -2517,6 +2594,7 @@ class PublicCritiquesView(ReviewsLayout):
             avg=avg,
             count=count,
             stream_channels=stream_channels,
+            plans=plans,
             star_skin=await cog.star_skin_for(guild, author_id),
         )
 
@@ -2533,7 +2611,7 @@ class PublicCritiquesView(ReviewsLayout):
     def _build(self) -> None:
         hit = self.hit
         body: list[discord.ui.Item] = []
-        body.extend(stream_live_items(self.stream_channels))
+        body.extend(stream_live_items(self.stream_channels, self.stream_plans))
         body.extend(fiche_intro(hit, backdrop=False))
         rows: list[discord.ui.ActionRow] = []
         total_pages = max(1, (len(self.reviews) + REVIEWS_PAGE - 1) // REVIEWS_PAGE) if self.reviews else 1
@@ -3119,8 +3197,201 @@ class StreamHubOpenSelect(discord.ui.Select):
         )
 
 
+class StreamPlanHitSelect(discord.ui.Select):
+    def __init__(self, parent: "StreamPlanPickView", hits: list[MediaHit], selected: int):
+        options = []
+        for index, hit in enumerate(hits[:25]):
+            options.append(
+                discord.SelectOption(
+                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
+                    value=str(index),
+                    description=select_hit_description(hit),
+                    emoji=select_emoji(hit.media_type),
+                    default=index == selected,
+                )
+            )
+        super().__init__(placeholder="Choisir une œuvre", options=options)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.selected = int(self.values[0])
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class StreamPlanConfirmButton(discord.ui.Button):
+    def __init__(self, parent: "StreamPlanPickView"):
+        super().__init__(label="Planifier", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(PLANNING))
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        err = await self._hub.cog.create_stream_plan(
+            self._hub.guild,
+            interaction.user.id,
+            self._hub.hit,
+            self._hub.starts_at,
+        )
+        if err:
+            await interaction.followup.send(f"**Stream ·** {err}", ephemeral=True)
+            return
+        view = await StreamHubView.create(self._hub.cog, self._hub.guild, interaction.user.id)
+        await apply_view(interaction, view)
+
+
+class StreamPlanPickView(ReviewsLayout):
+    """Plusieurs résultats : choisir l'œuvre à planifier."""
+
+    def __init__(
+        self,
+        cog: "Reviews",
+        guild: discord.Guild,
+        hits: list[MediaHit],
+        *,
+        author_id: int,
+        starts_at: int,
+    ):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.hits = hits
+        self.author_id = author_id
+        self.starts_at = starts_at
+        self.selected = 0
+        self._build()
+
+    @property
+    def hit(self) -> MediaHit:
+        return self.hits[self.selected]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "**Action impossible ·** Seul l'auteur de la commande peut utiliser ce menu.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return False
+        return True
+
+    def _build(self) -> None:
+        body: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(f"### Planifier\n-# <t:{self.starts_at}:F>"),
+        ]
+        if len(self.hits) > 1:
+            body.append(discord.ui.ActionRow(StreamPlanHitSelect(self, self.hits, self.selected)))
+        body.extend(stream_mini_items(self.hit))
+        self.set_layout(body, discord.ui.ActionRow(StreamPlanConfirmButton(self)))
+
+
+class StreamPlanModal(discord.ui.Modal, title="Planifier un stream"):
+    def __init__(self, cog: "Reviews", guild: discord.Guild):
+        super().__init__()
+        self.cog = cog
+        self.guild = guild
+        self.query_input = discord.ui.TextInput(
+            label="Titre de l'œuvre",
+            placeholder="Ex. Dune 2021, Hades, Blonde…",
+            min_length=2,
+            max_length=80,
+        )
+        self.date_input = discord.ui.TextInput(
+            label="Date",
+            placeholder="JJ/MM/AAAA",
+            min_length=6,
+            max_length=10,
+        )
+        self.time_input = discord.ui.TextInput(
+            label="Heure (Paris)",
+            placeholder="21:30",
+            min_length=1,
+            max_length=5,
+        )
+        self.add_item(self.query_input)
+        self.add_item(self.date_input)
+        self.add_item(self.time_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        stamp, err = parse_plan_datetime(str(self.date_input.value), str(self.time_input.value))
+        if err or stamp is None:
+            await interaction.followup.send(f"**Stream ·** {err or 'Date invalide.'}", ephemeral=True)
+            return
+        resolved_type = await self.cog._resolve_search_type(self.guild, interaction.user.id, None)
+        hits = await self.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
+        if not hits:
+            return
+        if len(hits) == 1:
+            save_err = await self.cog.create_stream_plan(self.guild, interaction.user.id, hits[0], stamp)
+            if save_err:
+                await interaction.followup.send(f"**Stream ·** {save_err}", ephemeral=True)
+                return
+            view = await StreamHubView.create(self.cog, self.guild, interaction.user.id)
+            await apply_view(interaction, view)
+            return
+        view = StreamPlanPickView(
+            self.cog,
+            self.guild,
+            hits,
+            author_id=interaction.user.id,
+            starts_at=stamp,
+        )
+        await apply_view(interaction, view)
+
+
+class StreamHubPlanButton(discord.ui.Button):
+    def __init__(self, parent: "StreamHubView"):
+        super().__init__(
+            label="Planifier",
+            style=discord.ButtonStyle.primary,
+            emoji=discord.PartialEmoji.from_str(PLANNING),
+        )
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        count = await self._hub.cog.count_upcoming_plans(self._hub.guild, interaction.user.id)
+        if count >= STREAM_PLAN_MAX:
+            await interaction.response.send_message(
+                "**Stream ·** Tu as déjà 3 streams planifiés. Annule-en un pour en ajouter.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(StreamPlanModal(self._hub.cog, self._hub.guild))
+
+
+class StreamPlanInterestButton(discord.ui.Button):
+    def __init__(self, parent: "StreamHubView", plan: dict[str, Any]):
+        owner = int(plan["user_id"]) == parent.viewer_id
+        interested = bool(plan.get("mine"))
+        if owner:
+            label, style = "Annuler", discord.ButtonStyle.danger
+        elif interested:
+            label, style = "Intéressé", discord.ButtonStyle.primary
+        else:
+            label, style = "Ça m'intéresse", discord.ButtonStyle.secondary
+        super().__init__(label=label, style=style)
+        self._hub = parent
+        self._plan_id = int(plan["id"])
+        self._owner = owner
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if self._owner:
+            await self._hub.cog.cancel_stream_plan(self._hub.guild, self._plan_id, interaction.user.id)
+        else:
+            saved = await self._hub.cog.toggle_plan_interest(
+                self._hub.guild, self._plan_id, interaction.user.id,
+            )
+            if saved is None:
+                await interaction.followup.send(
+                    "**Stream ·** Ce stream n'est plus planifié.",
+                    ephemeral=True,
+                )
+        await self._hub.reload(interaction)
+
+
 class StreamHubView(ReviewsLayout):
-    """Lives en cours sur le serveur : fiches liées + lier le sien."""
+    """Lives en cours et streams planifiés sur le serveur."""
 
     def __init__(
         self,
@@ -3129,6 +3400,7 @@ class StreamHubView(ReviewsLayout):
         *,
         viewer_id: int,
         links: list[dict[str, Any]],
+        plans: list[dict[str, Any]],
         mine: dict[str, Any] | None,
         live: bool,
     ):
@@ -3137,6 +3409,7 @@ class StreamHubView(ReviewsLayout):
         self.guild = guild
         self.viewer_id = viewer_id
         self.links = links
+        self.plans = plans
         self.mine = mine
         self.live = live
         self._build()
@@ -3149,30 +3422,54 @@ class StreamHubView(ReviewsLayout):
             guild,
             viewer_id=viewer_id,
             links=await cog.list_active_stream_links(guild),
+            plans=await cog.list_upcoming_plans(guild, viewer_id),
             mine=await cog.get_stream_link(guild, viewer_id),
             live=member_stream_source(member) is not None if member else False,
         )
 
     async def reload(self, interaction: discord.Interaction) -> None:
         self.links = await self.cog.list_active_stream_links(self.guild)
+        self.plans = await self.cog.list_upcoming_plans(self.guild, self.viewer_id)
         self.mine = await self.cog.get_stream_link(self.guild, self.viewer_id)
         member = self.guild.get_member(self.viewer_id)
         self.live = member_stream_source(member) is not None if member else False
         self._build()
         await apply_view(interaction, self)
 
+    def _plan_block(self, plan: dict[str, Any]) -> discord.ui.Item:
+        hit: MediaHit = plan["hit"]
+        year = f" ({hit.year})" if hit.year else ""
+        mention = _mention(self.guild, self.cog.bot, plan["user_id"])
+        interest = int(plan.get("interest") or 0)
+        if interest == 1:
+            people = "  ·  1 intéressé"
+        elif interest:
+            people = f"  ·  {interest} intéressés"
+        else:
+            people = ""
+        text = (
+            f"{PLANNING} {mention}\n"
+            f"{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
+            f"-# {type_label(hit.media_type)}  ·  <t:{int(plan['starts_at'])}:F>{people}"
+        )
+        button = StreamPlanInterestButton(self, plan)
+        try:
+            return discord.ui.Section(discord.ui.TextDisplay(text), accessory=button)
+        except Exception:
+            return discord.ui.TextDisplay(text)
+
     def _build(self) -> None:
         body: list[discord.ui.Item] = [
             discord.ui.TextDisplay(
-                f"### Streams en cours\n-# {len(self.links)} live(s) lié(s) sur ce serveur"
+                f"### Streams\n-# {len(self.links)} live(s) · {len(self.plans)} planifié(s)"
             )
         ]
         actions: list[discord.ui.ActionRow] = []
-        if not self.links:
-            body.append(discord.ui.TextDisplay(
-                "*Aucun live lié pour le moment. Passe en Go Live, puis **Lier mon stream**.*"
-            ))
-        else:
+        if self.plans:
+            for plan in self.plans[:8]:
+                body.append(sep_tight())
+                body.append(self._plan_block(plan))
+        if self.links:
             for link in self.links[:8]:
                 hit: MediaHit = link["hit"]
                 year = f" ({hit.year})" if hit.year else ""
@@ -3185,13 +3482,17 @@ class StreamHubView(ReviewsLayout):
                 body.append(sep_tight())
                 body.append(section_with_thumbnail(text, hit.poster_url))
             actions.append(discord.ui.ActionRow(StreamHubOpenSelect(self, self.links)))
-        row: list[discord.ui.Item] = []
+        elif not self.plans:
+            body.append(discord.ui.TextDisplay(
+                "*Aucun live ni stream planifié. **Planifier** une date, "
+                "ou passe en Go Live puis **Lier mon stream**.*"
+            ))
+        row: list[discord.ui.Item] = [StreamHubPlanButton(self)]
         if self.mine:
             row.append(StreamUnlinkButton(self))
         else:
             row.append(StreamHubBindButton(self))
-        if row:
-            actions.append(discord.ui.ActionRow(*row))
+        actions.append(discord.ui.ActionRow(*row))
         self.set_layout(body, *actions)
 
 
@@ -3216,6 +3517,23 @@ class StreamRemindView(ReviewsLayout):
                 discord.ui.TextDisplay(
                     f"{STREAMING} **Stream en cours{salon}**\n"
                     f"-# Lance `/stream` sur **{guild.name}** pour lier une œuvre."
+                )
+            ]
+        )
+
+
+class StreamPlanDueView(ReviewsLayout):
+    """MP à l'heure d'un stream planifié, si la personne n'est pas déjà en live."""
+
+    def __init__(self, guild: discord.Guild, hit: MediaHit):
+        super().__init__(timeout=None)
+        year = f" ({hit.year})" if hit.year else ""
+        self.set_layout(
+            [
+                discord.ui.TextDisplay(
+                    f"{PLANNING} **C'est l'heure**\n"
+                    f"{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
+                    f"-# Sur **{guild.name}**. Lance un Go Live, puis `/stream` pour lier l'œuvre."
                 )
             ]
         )
@@ -3312,6 +3630,7 @@ class MediaSessionView(ReviewsLayout):
         self.reviews: list[Any] = []
         self.social_line = ""
         self.stream_channels: list[int] = []
+        self.stream_plans: list[dict] = []
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.published_wid: str | None = None
@@ -3380,6 +3699,7 @@ class MediaSessionView(ReviewsLayout):
                 viewer_id=None,
             )
         self.stream_channels = await self.cog.stream_channels_for_hit(self.guild, self.show_hit)
+        self.stream_plans = fiche_plan_payload(await self.cog.plans_for_hit(self.guild, self.show_hit))
 
     async def save_review(
         self,
@@ -3462,7 +3782,7 @@ class MediaSessionView(ReviewsLayout):
             title_row = discord.ui.ActionRow(MediaSelect(self, self.hits, self.selected))
 
         above.append(self._tabs_row())
-        body.extend(stream_live_items(self.stream_channels))
+        body.extend(stream_live_items(self.stream_channels, self.stream_plans))
         media_tag = fiche_tag(hit) if self.ephemeral and self.prefs.show_media_id else ""
         sticky_head = 0
 
@@ -5300,7 +5620,7 @@ class PreferencesView(ReviewsLayout):
             sep_wide(),
             discord.ui.Section(
                 "**Rappel de stream**\n"
-                "-# MP quand tu lances un Go Live, pour lier une œuvre.",
+                "-# MP quand tu lances un Go Live, et à l'heure d'un stream que tu as planifié.",
                 accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
             ),
             sep_wide(),
@@ -5752,7 +6072,7 @@ class HelpView(ReviewsLayout):
         commandes = (
             "### Commandes\n"
             "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou signet\n"
-            "`/stream` — lives en cours : voir la fiche liée, ou lier le tien\n"
+            "`/stream` — lives en cours et streams planifiés : voir, s'intéresser, lier ou planifier\n"
             "`/carnet` — page d'un membre : profil, journal, signets, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
             "`/explore` — catalogue du serveur (récentes, meilleures, pires) et pour toi\n"
@@ -5773,7 +6093,8 @@ class HelpView(ReviewsLayout):
             "(lui seul, des membres, ou tout le serveur). "
             "`/config` peut poster les notes dans un salon différent selon le type. "
             "`/stream` affiche les œuvres liées aux Go Live en cours "
-            "(y compris ceux des autres) et permet d'y lier le tien. "
+            "(y compris ceux des autres), les streams planifiés, et permet d'y lier le tien "
+            "ou d'en planifier un. "
             "Tes défauts (date, listes, recherche, annonces, signets notés, identifiant de fiche, rappel et statut vocal) se règlent dans `/preferences`. "
             "Les skins d'étoiles se choisissent dans `/custom`. "
             "En octobre, noter un film ou une série d'horreur débloque les citrouilles, qui restent équipables ensuite. "
@@ -5936,6 +6257,23 @@ class Reviews(commands.Cog):
                 voice_status INTEGER NOT NULL DEFAULT 0
             )"""
         )
+        stream_plans_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS stream_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                hit_json TEXT NOT NULL,
+                starts_at INTEGER NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        stream_plan_interest_table = dataio.TableBuilder(
+            """CREATE TABLE IF NOT EXISTS stream_plan_interest (
+                plan_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (plan_id, user_id)
+            )"""
+        )
         self.data.link(
             discord.Guild,
             settings,
@@ -5949,6 +6287,8 @@ class Reviews(commands.Cog):
             shared_list_items_table,
             preferences_table,
             stream_links_table,
+            stream_plans_table,
+            stream_plan_interest_table,
         )
 
     async def cog_load(self) -> None:
@@ -6007,6 +6347,10 @@ class Reviews(commands.Cog):
             await sweep_expired(self.bot, render_dyn_record)
         except Exception:
             logger.exception("sweep fiches publiées")
+        try:
+            await self._sweep_stream_plans()
+        except Exception:
+            logger.exception("sweep streams planifiés")
 
     @_sweep_fiches.before_loop
     async def _before_sweep_fiches(self) -> None:
@@ -6385,6 +6729,23 @@ class Reviews(commands.Cog):
                 created_at INTEGER NOT NULL,
                 post_channel_id INTEGER NOT NULL DEFAULT 0,
                 voice_status INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS stream_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                hit_json TEXT NOT NULL,
+                starts_at INTEGER NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS stream_plan_interest (
+                plan_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (plan_id, user_id)
             )"""
         )
         pref_columns = await db.column_names("preferences")
@@ -7683,6 +8044,191 @@ class Reviews(commands.Cog):
             seen.add(channel_id)
             channels.append(channel_id)
         return channels
+
+    async def count_upcoming_plans(self, guild: discord.Guild, user_id: int) -> int:
+        await self._ensure_schema(guild)
+        row = await self.data.get(guild).fetchone(
+            """SELECT COUNT(*) AS n FROM stream_plans
+               WHERE user_id=? AND notified=0 AND starts_at>?""",
+            user_id,
+            int(time.time()),
+        )
+        return int(row["n"] or 0) if row else 0
+
+    async def list_upcoming_plans(self, guild: discord.Guild, viewer_id: int) -> list[dict[str, Any]]:
+        await self._ensure_schema(guild)
+        rows = await self.data.get(guild).fetchall(
+            """SELECT p.id, p.user_id, p.hit_json, p.starts_at,
+                      (SELECT COUNT(*) FROM stream_plan_interest i WHERE i.plan_id = p.id) AS interest,
+                      EXISTS(
+                          SELECT 1 FROM stream_plan_interest i
+                          WHERE i.plan_id = p.id AND i.user_id = ?
+                      ) AS mine
+               FROM stream_plans p
+               WHERE p.notified = 0 AND p.starts_at > ?
+               ORDER BY p.starts_at ASC""",
+            viewer_id,
+            int(time.time()),
+        )
+        plans: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                raw = json.loads(row["hit_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            plans.append({
+                "id": int(row["id"]),
+                "user_id": int(row["user_id"]),
+                "hit": hit_from_dict(raw),
+                "starts_at": int(row["starts_at"] or 0),
+                "interest": int(row["interest"] or 0),
+                "mine": bool(int(row["mine"] or 0)),
+            })
+        return plans
+
+    async def plans_for_hit(self, guild: discord.Guild, hit: MediaHit) -> list[dict[str, Any]]:
+        key = hit_identity(hit)
+        return [
+            plan for plan in await self.list_upcoming_plans(guild, 0)
+            if hit_identity(plan["hit"]) == key
+        ]
+
+    async def create_stream_plan(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        hit: MediaHit,
+        starts_at: int,
+    ) -> str | None:
+        await self._ensure_schema(guild)
+        now = int(time.time())
+        if starts_at <= now:
+            return "Cette date est déjà passée."
+        if starts_at > now + STREAM_PLAN_HORIZON:
+            return "Tu peux planifier jusqu'à 90 jours à l'avance."
+        if await self.count_upcoming_plans(guild, user_id) >= STREAM_PLAN_MAX:
+            return "Tu as déjà 3 streams planifiés. Annule-en un pour en ajouter."
+        upcoming = await self.list_upcoming_plans(guild, user_id)
+        if any(hit_identity(plan["hit"]) == hit_identity(hit) and int(plan["user_id"]) == user_id for plan in upcoming):
+            return "Tu as déjà planifié cette œuvre."
+        if self.catalog is not None:
+            try:
+                hit = await self.catalog.enrich(hit)
+            except Exception:
+                logger.exception("Enrichissement du stream planifié impossible")
+        await self.data.get(guild).execute(
+            """INSERT INTO stream_plans (user_id, hit_json, starts_at, notified, created_at)
+               VALUES (?, ?, ?, 0, ?)""",
+            user_id,
+            json.dumps(hit_to_dict(hit), ensure_ascii=False),
+            int(starts_at),
+            now,
+        )
+        return None
+
+    async def cancel_stream_plan(self, guild: discord.Guild, plan_id: int, user_id: int) -> None:
+        await self._ensure_schema(guild)
+        db = self.data.get(guild)
+        await db.execute("DELETE FROM stream_plan_interest WHERE plan_id=?", plan_id)
+        await db.execute(
+            "DELETE FROM stream_plans WHERE id=? AND user_id=? AND notified=0",
+            plan_id,
+            user_id,
+        )
+
+    async def toggle_plan_interest(
+        self,
+        guild: discord.Guild,
+        plan_id: int,
+        user_id: int,
+    ) -> bool | None:
+        await self._ensure_schema(guild)
+        db = self.data.get(guild)
+        row = await db.fetchone(
+            "SELECT user_id, starts_at, notified FROM stream_plans WHERE id=?",
+            plan_id,
+        )
+        now = int(time.time())
+        if row is None or int(row["notified"] or 0) or int(row["starts_at"] or 0) <= now:
+            return None
+        if int(row["user_id"]) == user_id:
+            return None
+        existing = await db.fetchone(
+            "SELECT 1 AS ok FROM stream_plan_interest WHERE plan_id=? AND user_id=?",
+            plan_id,
+            user_id,
+        )
+        if existing is not None:
+            await db.execute(
+                "DELETE FROM stream_plan_interest WHERE plan_id=? AND user_id=?",
+                plan_id,
+                user_id,
+            )
+            return False
+        await db.execute(
+            "INSERT OR IGNORE INTO stream_plan_interest (plan_id, user_id) VALUES (?, ?)",
+            plan_id,
+            user_id,
+        )
+        return True
+
+    async def _sweep_stream_plans(self) -> None:
+        folder = self.data.cog_folder / "data"
+        if not folder.is_dir():
+            return
+        now = int(time.time())
+        for path in folder.glob("guild_*.db"):
+            try:
+                guild_id = int(path.stem.removeprefix("guild_"))
+            except ValueError:
+                continue
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            try:
+                await self._notify_due_plans(guild, now)
+            except Exception:
+                logger.exception("notif stream planifié %s", guild_id)
+
+    async def _notify_due_plans(self, guild: discord.Guild, now: int) -> None:
+        await self._ensure_schema(guild)
+        db = self.data.get(guild)
+        rows = await db.fetchall(
+            """SELECT id, user_id, hit_json FROM stream_plans
+               WHERE notified=0 AND starts_at<=?""",
+            now,
+        )
+        for row in rows:
+            plan_id = int(row["id"])
+            await self._deliver_plan_notice(guild, int(row["user_id"]), str(row["hit_json"] or ""))
+            await db.execute("DELETE FROM stream_plan_interest WHERE plan_id=?", plan_id)
+            await db.execute("UPDATE stream_plans SET notified=1 WHERE id=?", plan_id)
+
+    async def _deliver_plan_notice(self, guild: discord.Guild, user_id: int, hit_json: str) -> None:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return
+        if member_stream_source(member) is not None:
+            return
+        if not (await self.get_user_prefs(guild, user_id)).stream_remind:
+            return
+        try:
+            raw = json.loads(hit_json or "{}")
+        except json.JSONDecodeError:
+            return
+        if not isinstance(raw, dict):
+            return
+        view = StreamPlanDueView(guild, hit_from_dict(raw))
+        try:
+            message = await member.send(view=view, allowed_mentions=NO_PINGS)
+            bind_view_message(view, message)
+        except discord.HTTPException as exc:
+            logger.info("Notif stream planifié impossible (%s) : %s", user_id, exc)
 
     async def _voice_channel_for_status(
         self,
