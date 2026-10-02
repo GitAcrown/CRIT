@@ -5539,6 +5539,7 @@ class PreferencesView(ReviewsLayout):
     def _tabs_row(self) -> discord.ui.ActionRow:
         return discord.ui.ActionRow(
             HubTabButton(self, "fiches", "Fiches"),
+            HubTabButton(self, "listes", "Listes"),
             HubTabButton(self, "stream", "Stream"),
         )
 
@@ -5588,10 +5589,48 @@ class PreferencesView(ReviewsLayout):
                     accessory=PrefOnOffButton(self, "stream_voice_status", prefs.stream_voice_status),
                 ),
             ]
+        elif self.tab == "listes":
+            header = (
+                f"## Préférences\n"
+                f"-# Listes sur **{self.guild.name}**"
+            )
+            children = [
+                section_with_thumbnail(header, self.user.display_avatar.url),
+                sep_wide(),
+                *self._section(
+                    "Édition des nouvelles listes",
+                    "Qui peut modifier une liste que tu viens de créer.",
+                    PrefFieldSelect(
+                        self,
+                        field="default_list_edit",
+                        placeholder=list_edit_label(prefs.default_list_edit),
+                        options=[
+                            discord.SelectOption(
+                                label="Créateur seul",
+                                value="owner",
+                                description="Toi seul peux modifier une liste que tu crées",
+                                default=prefs.default_list_edit == "owner",
+                            ),
+                            discord.SelectOption(
+                                label="Membres choisis",
+                                value="members",
+                                description="Tu pourras ajouter des éditeurs ensuite",
+                                default=prefs.default_list_edit == "members",
+                            ),
+                            discord.SelectOption(
+                                label="Tout le serveur",
+                                value="public",
+                                description="N'importe qui pourra modifier tes nouvelles listes",
+                                default=prefs.default_list_edit == "public",
+                            ),
+                        ],
+                    ),
+                ),
+            ]
         else:
             header = (
                 f"## Préférences\n"
-                f"-# Fiches et listes sur **{self.guild.name}**"
+                f"-# Fiches sur **{self.guild.name}**"
             )
             children = [
                 section_with_thumbnail(header, self.user.display_avatar.url),
@@ -5660,36 +5699,6 @@ class PreferencesView(ReviewsLayout):
                     "**Signets notés**\n"
                     "-# MP quand quelqu'un note une œuvre qui est dans tes signets.",
                     accessory=PrefOnOffButton(self, "bookmark_notify", prefs.bookmark_notify),
-                ),
-                sep_wide(),
-                *self._section(
-                    "Édition des nouvelles listes",
-                    "Qui peut modifier une liste que tu viens de créer.",
-                    PrefFieldSelect(
-                        self,
-                        field="default_list_edit",
-                        placeholder=list_edit_label(prefs.default_list_edit),
-                        options=[
-                            discord.SelectOption(
-                                label="Créateur seul",
-                                value="owner",
-                                description="Toi seul peux modifier une liste que tu crées",
-                                default=prefs.default_list_edit == "owner",
-                            ),
-                            discord.SelectOption(
-                                label="Membres choisis",
-                                value="members",
-                                description="Tu pourras ajouter des éditeurs ensuite",
-                                default=prefs.default_list_edit == "members",
-                            ),
-                            discord.SelectOption(
-                                label="Tout le serveur",
-                                value="public",
-                                description="N'importe qui pourra modifier tes nouvelles listes",
-                                default=prefs.default_list_edit == "public",
-                            ),
-                        ],
-                    ),
                 ),
             ]
         self.clear_items()
