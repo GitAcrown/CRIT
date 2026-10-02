@@ -3446,7 +3446,7 @@ class StreamHubView(ReviewsLayout):
         else:
             people = ""
         text = (
-            f"{PLANNING} {mention}\n"
+            f"{mention}\n"
             f"{type_emoji(hit.media_type)} **{hit.title}**{year}\n"
             f"-# {type_label(hit.media_type)}  ·  <t:{int(plan['starts_at'])}:F>{people}"
         )
