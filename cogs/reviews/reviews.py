@@ -3508,7 +3508,7 @@ class MediaSessionView(ReviewsLayout):
                 actions.append(sep_tight())
             rate_label = "Noter"
             if self.ephemeral and self.pending_rating is not None and self.my_review is None:
-                rate_label = f"Noter {self.stars_compact(self.pending_rating)}"
+                rate_label = f"Noter {int(round(self.pending_rating))}"
             elif self.ephemeral and self.my_review:
                 rate_label = "Modifier ma note"
             rate_btn = RateButton(self)
