@@ -820,6 +820,10 @@ def list_type_select(raw: str | None) -> discord.ui.Select:
 
 
 DATE_PREF_VALUES = ("empty", "today")
+STREAM_REMIND_OFF = 0
+STREAM_REMIND_PLANNED = 1
+STREAM_REMIND_BOTH = 2
+STREAM_REMIND_MODES = (STREAM_REMIND_OFF, STREAM_REMIND_PLANNED, STREAM_REMIND_BOTH)
 
 
 @dataclass(frozen=True)
@@ -828,7 +832,7 @@ class UserPrefs:
     default_list_edit: str = "owner"
     default_search_type: str = "all"
     announce_notes: bool = True
-    stream_remind: bool = False
+    stream_remind: int = STREAM_REMIND_OFF
     stream_voice_status: bool = True
     star_skin: str = DEFAULT_STAR_SKIN
     show_media_id: bool = False
@@ -914,6 +918,23 @@ def announce_pref_label(value: bool) -> str:
     return "Publier" if value else "Ne pas annoncer"
 
 
+def normalize_stream_remind(value: object) -> int:
+    try:
+        mode = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return STREAM_REMIND_OFF
+    return mode if mode in STREAM_REMIND_MODES else STREAM_REMIND_OFF
+
+
+def stream_remind_label(mode: int) -> str:
+    labels = {
+        STREAM_REMIND_OFF: "Désactivé",
+        STREAM_REMIND_PLANNED: "Activé seulement pour les streams planifiés",
+        STREAM_REMIND_BOTH: "Activé pour les streams planifiés et les streams en cours",
+    }
+    return labels.get(normalize_stream_remind(mode), labels[STREAM_REMIND_OFF])
+
+
 def _row_field(row: Any, key: str, default: Any = None) -> Any:
     try:
         value = row[key]
@@ -933,7 +954,7 @@ def prefs_from_row(row: Any | None) -> UserPrefs:
         default_list_edit=edit_value if edit_value in LIST_EDIT_MODES else "owner",
         default_search_type=search_value,
         announce_notes=bool(int(_row_field(row, "announce_notes", 1) or 0)),
-        stream_remind=bool(int(_row_field(row, "stream_remind", 0) or 0)),
+        stream_remind=normalize_stream_remind(_row_field(row, "stream_remind", 0)),
         stream_voice_status=bool(int(_row_field(row, "stream_voice_status", 1) or 0)),
         star_skin=resolve_star_skin(_row_field(row, "star_skin", DEFAULT_STAR_SKIN)).id,
         show_media_id=bool(int(_row_field(row, "show_media_id", 0) or 0)),
@@ -5496,6 +5517,7 @@ class PreferencesView(ReviewsLayout):
         self.user = user
         self.user_id = user.id
         self.prefs = prefs
+        self.tab = "fiches"
         self._build()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -5514,125 +5536,165 @@ class PreferencesView(ReviewsLayout):
             discord.ui.ActionRow(select),
         ]
 
+    def _tabs_row(self) -> discord.ui.ActionRow:
+        return discord.ui.ActionRow(
+            HubTabButton(self, "fiches", "Fiches"),
+            HubTabButton(self, "stream", "Stream"),
+        )
+
     def _build(self) -> None:
         prefs = self.prefs
-        header = (
-            f"## Préférences\n"
-            f"-# Tes préférences sur **{self.guild.name}** — notes, recherches, listes et stream."
-        )
-        children: list[discord.ui.Item] = [
-            section_with_thumbnail(header, self.user.display_avatar.url),
-            sep_wide(),
-            *self._section(
-                "Date vu / joué / lu",
-                "Préremplit le formulaire Noter, ou laisse le champ vide.",
-                PrefFieldSelect(
-                    self,
-                    field="default_date",
-                    placeholder=date_pref_label(prefs.default_date),
-                    options=[
-                        discord.SelectOption(
-                            label="Aujourd'hui",
-                            value="today",
-                            description="Préremplit le formulaire Noter avec la date du jour",
-                            default=prefs.default_date == "today",
-                        ),
-                        discord.SelectOption(
-                            label="Vide",
-                            value="empty",
-                            description="Laisse le champ date vide",
-                            default=prefs.default_date == "empty",
-                        ),
-                    ],
+        if self.tab == "stream":
+            header = (
+                f"## Préférences\n"
+                f"-# Stream sur **{self.guild.name}**"
+            )
+            children: list[discord.ui.Item] = [
+                section_with_thumbnail(header, self.user.display_avatar.url),
+                sep_wide(),
+                *self._section(
+                    "Rappel de stream",
+                    "Aucun rappel, seulement à l'heure d'un stream planifié, ou aussi quand tu lances un Go Live.",
+                    PrefFieldSelect(
+                        self,
+                        field="stream_remind",
+                        placeholder=stream_remind_label(prefs.stream_remind),
+                        options=[
+                            discord.SelectOption(
+                                label="Désactivé",
+                                value="0",
+                                description="Aucun rappel",
+                                default=prefs.stream_remind == STREAM_REMIND_OFF,
+                            ),
+                            discord.SelectOption(
+                                label="Activé seulement pour les streams planifiés",
+                                value="1",
+                                description="MP à l'heure d'un stream que tu as planifié",
+                                default=prefs.stream_remind == STREAM_REMIND_PLANNED,
+                            ),
+                            discord.SelectOption(
+                                label="Activé pour les streams planifiés et les streams en cours",
+                                value="2",
+                                description="MP aussi quand tu lances un Go Live",
+                                default=prefs.stream_remind == STREAM_REMIND_BOTH,
+                            ),
+                        ],
+                    ),
                 ),
-            ),
-            sep_wide(),
-            *self._section(
-                "Édition des nouvelles listes",
-                "Qui peut modifier une liste que tu viens de créer.",
-                PrefFieldSelect(
-                    self,
-                    field="default_list_edit",
-                    placeholder=list_edit_label(prefs.default_list_edit),
-                    options=[
-                        discord.SelectOption(
-                            label="Créateur seul",
-                            value="owner",
-                            description="Toi seul peux modifier une liste que tu crées",
-                            default=prefs.default_list_edit == "owner",
-                        ),
-                        discord.SelectOption(
-                            label="Membres choisis",
-                            value="members",
-                            description="Tu pourras ajouter des éditeurs ensuite",
-                            default=prefs.default_list_edit == "members",
-                        ),
-                        discord.SelectOption(
-                            label="Tout le serveur",
-                            value="public",
-                            description="N'importe qui pourra modifier tes nouvelles listes",
-                            default=prefs.default_list_edit == "public",
-                        ),
-                    ],
+                sep_wide(),
+                discord.ui.Section(
+                    "**Statut du salon vocal**\n"
+                    "-# Ajoute/retire automatiquement le nom de l'œuvre en statut du vocal (ex. \"Dune (2021)\").",
+                    accessory=PrefOnOffButton(self, "stream_voice_status", prefs.stream_voice_status),
                 ),
-            ),
-            sep_wide(),
-            *self._section(
-                "Types de recherche",
-                "Un ou plusieurs types pour /search. « Tous les types » ignore les autres choix.",
-                PrefSearchTypeSelect(self),
-            ),
-            sep_wide(),
-            *self._section(
-                "Annonces de tes notes",
-                "Si tes notes apparaissent dans le salon d'annonces.",
-                PrefFieldSelect(
-                    self,
-                    field="announce_notes",
-                    placeholder=announce_pref_label(prefs.announce_notes),
-                    options=[
-                        discord.SelectOption(
-                            label="Publier",
-                            value="1",
-                            description="Tes notes apparaissent dans le salon d'annonces",
-                            default=prefs.announce_notes,
-                        ),
-                        discord.SelectOption(
-                            label="Ne pas annoncer",
-                            value="0",
-                            description="Tes notes restent dans ton carnet seulement",
-                            default=not prefs.announce_notes,
-                        ),
-                    ],
+            ]
+        else:
+            header = (
+                f"## Préférences\n"
+                f"-# Fiches et listes sur **{self.guild.name}**"
+            )
+            children = [
+                section_with_thumbnail(header, self.user.display_avatar.url),
+                sep_wide(),
+                *self._section(
+                    "Types de recherche",
+                    "Un ou plusieurs types pour /search. « Tous les types » ignore les autres choix.",
+                    PrefSearchTypeSelect(self),
                 ),
-            ),
-            sep_wide(),
-            discord.ui.Section(
-                "**Identifiant sur la fiche**\n"
-                "-# Affiche la balise `<tmdb:…>` sur tes fiches éphémères, pas sur celles publiées.",
-                accessory=PrefOnOffButton(self, "show_media_id", prefs.show_media_id),
-            ),
-            sep_wide(),
-            discord.ui.Section(
-                "**Signets notés**\n"
-                "-# MP quand quelqu'un note une œuvre qui est dans tes signets.",
-                accessory=PrefOnOffButton(self, "bookmark_notify", prefs.bookmark_notify),
-            ),
-            sep_wide(),
-            discord.ui.Section(
-                "**Rappel de stream**\n"
-                "-# MP quand tu lances un Go Live, et à l'heure d'un stream que tu as planifié.",
-                accessory=PrefOnOffButton(self, "stream_remind", prefs.stream_remind),
-            ),
-            sep_wide(),
-            discord.ui.Section(
-                "**Statut du salon vocal**\n"
-                "-# Ajoute/retire automatiquement le nom de l'œuvre en statut du vocal (ex. \"Dune (2021)\").",
-                accessory=PrefOnOffButton(self, "stream_voice_status", prefs.stream_voice_status),
-            ),
-        ]
+                sep_wide(),
+                *self._section(
+                    "Date vu / joué / lu",
+                    "Préremplit le formulaire Noter, ou laisse le champ vide.",
+                    PrefFieldSelect(
+                        self,
+                        field="default_date",
+                        placeholder=date_pref_label(prefs.default_date),
+                        options=[
+                            discord.SelectOption(
+                                label="Aujourd'hui",
+                                value="today",
+                                description="Préremplit le formulaire Noter avec la date du jour",
+                                default=prefs.default_date == "today",
+                            ),
+                            discord.SelectOption(
+                                label="Vide",
+                                value="empty",
+                                description="Laisse le champ date vide",
+                                default=prefs.default_date == "empty",
+                            ),
+                        ],
+                    ),
+                ),
+                sep_wide(),
+                *self._section(
+                    "Annonces de tes notes",
+                    "Si tes notes apparaissent dans le salon d'annonces.",
+                    PrefFieldSelect(
+                        self,
+                        field="announce_notes",
+                        placeholder=announce_pref_label(prefs.announce_notes),
+                        options=[
+                            discord.SelectOption(
+                                label="Publier",
+                                value="1",
+                                description="Tes notes apparaissent dans le salon d'annonces",
+                                default=prefs.announce_notes,
+                            ),
+                            discord.SelectOption(
+                                label="Ne pas annoncer",
+                                value="0",
+                                description="Tes notes restent dans ton carnet seulement",
+                                default=not prefs.announce_notes,
+                            ),
+                        ],
+                    ),
+                ),
+                sep_wide(),
+                discord.ui.Section(
+                    "**Identifiant sur la fiche**\n"
+                    "-# Affiche la balise `<tmdb:…>` sur tes fiches éphémères, pas sur celles publiées.",
+                    accessory=PrefOnOffButton(self, "show_media_id", prefs.show_media_id),
+                ),
+                sep_wide(),
+                discord.ui.Section(
+                    "**Signets notés**\n"
+                    "-# MP quand quelqu'un note une œuvre qui est dans tes signets.",
+                    accessory=PrefOnOffButton(self, "bookmark_notify", prefs.bookmark_notify),
+                ),
+                sep_wide(),
+                *self._section(
+                    "Édition des nouvelles listes",
+                    "Qui peut modifier une liste que tu viens de créer.",
+                    PrefFieldSelect(
+                        self,
+                        field="default_list_edit",
+                        placeholder=list_edit_label(prefs.default_list_edit),
+                        options=[
+                            discord.SelectOption(
+                                label="Créateur seul",
+                                value="owner",
+                                description="Toi seul peux modifier une liste que tu crées",
+                                default=prefs.default_list_edit == "owner",
+                            ),
+                            discord.SelectOption(
+                                label="Membres choisis",
+                                value="members",
+                                description="Tu pourras ajouter des éditeurs ensuite",
+                                default=prefs.default_list_edit == "members",
+                            ),
+                            discord.SelectOption(
+                                label="Tout le serveur",
+                                value="public",
+                                description="N'importe qui pourra modifier tes nouvelles listes",
+                                default=prefs.default_list_edit == "public",
+                            ),
+                        ],
+                    ),
+                ),
+            ]
         self.clear_items()
-        self.add_item(discord.ui.Container(*children))
+        self.add_item(self._tabs_row())
+        self.add_item(discord.ui.Container(*children, accent_colour=self.accent_colour))
 
     async def start(self, interaction: discord.Interaction) -> None:
         self._interaction = interaction
@@ -6145,6 +6207,7 @@ class Reviews(commands.Cog):
                 "MaxCommentLength": DEFAULT_COMMENT_MAX,
                 "BackfilledXP": "0",
                 "RatingsOnTen": "0",
+                "StreamRemindMode": "0",
             },
         )
         media_table = dataio.TableBuilder(
@@ -6538,7 +6601,7 @@ class Reviews(commands.Cog):
         if "announce_notes" in updates:
             cleaned["announce_notes"] = bool(updates["announce_notes"])
         if "stream_remind" in updates:
-            cleaned["stream_remind"] = bool(updates["stream_remind"])
+            cleaned["stream_remind"] = normalize_stream_remind(updates["stream_remind"])
         if "stream_voice_status" in updates:
             cleaned["stream_voice_status"] = bool(updates["stream_voice_status"])
         if "show_media_id" in updates:
@@ -6787,6 +6850,10 @@ class Reviews(commands.Cog):
             if 0 < max_rating <= 5:
                 await db.execute("UPDATE reviews SET rating = rating * 2")
             await db.set_dict_value("settings", "RatingsOnTen", "1")
+        migrated = await db.get_dict_value("settings", "StreamRemindMode")
+        if migrated != "1":
+            await db.execute("UPDATE preferences SET stream_remind = 2 WHERE stream_remind = 1")
+            await db.set_dict_value("settings", "StreamRemindMode", "1")
         self._schema_ready.add(guild.id)
 
     async def get_favorites(
@@ -7909,7 +7976,7 @@ class Reviews(commands.Cog):
             self._stream_session_reminded.add(key)
             return
         prefs = await self.get_user_prefs(guild, user_id)
-        if not prefs.stream_remind:
+        if prefs.stream_remind != STREAM_REMIND_BOTH:
             return
         self._cancel_stream_remind(guild.id, user_id)
         task = asyncio.create_task(self._confirm_stream_remind(guild.id, user_id))
@@ -7928,7 +7995,7 @@ class Reviews(commands.Cog):
                 self._stream_session_reminded.add((guild_id, user_id))
                 return
             prefs = await self.get_user_prefs(guild, user_id)
-            if not prefs.stream_remind:
+            if prefs.stream_remind != STREAM_REMIND_BOTH:
                 return
             if await self._send_stream_remind(guild, member):
                 self._stream_session_reminded.add((guild_id, user_id))
@@ -8216,7 +8283,7 @@ class Reviews(commands.Cog):
                 return
         if member_stream_source(member) is not None:
             return
-        if not (await self.get_user_prefs(guild, user_id)).stream_remind:
+        if (await self.get_user_prefs(guild, user_id)).stream_remind == STREAM_REMIND_OFF:
             return
         try:
             raw = json.loads(hit_json or "{}")
