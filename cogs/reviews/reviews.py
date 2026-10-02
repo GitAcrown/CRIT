@@ -3341,11 +3341,7 @@ class StreamPlanModal(discord.ui.Modal, title="Planifier un stream"):
 
 class StreamHubPlanButton(discord.ui.Button):
     def __init__(self, parent: "StreamHubView"):
-        super().__init__(
-            label="Planifier",
-            style=discord.ButtonStyle.primary,
-            emoji=discord.PartialEmoji.from_str(PLANNING),
-        )
+        super().__init__(label="Planifier", style=discord.ButtonStyle.primary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -3490,7 +3486,7 @@ class StreamHubView(ReviewsLayout):
         row: list[discord.ui.Item] = [StreamHubPlanButton(self)]
         if self.mine:
             row.append(StreamUnlinkButton(self))
-        else:
+        elif self.live:
             row.append(StreamHubBindButton(self))
         actions.append(discord.ui.ActionRow(*row))
         self.set_layout(body, *actions)
