@@ -1029,7 +1029,7 @@ def member_voice_channel_id(member: discord.Member | discord.abc.User) -> int | 
 
 
 STREAM_START_GRACE = 5.0
-STREAM_END_GRACE = 60.0
+STREAM_END_GRACE = 30.0
 STREAM_LINK_MAX_AGE = 12 * 3600
 STREAM_PLAN_MAX = 3
 STREAM_PLAN_HORIZON = 90 * 86400
