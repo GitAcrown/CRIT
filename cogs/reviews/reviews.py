@@ -3091,6 +3091,7 @@ class StreamMiniBindButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
+        old = await self._hub.cog.get_stream_link(guild, interaction.user.id)
         await self._hub.cog.set_stream_link(
             guild,
             interaction.user.id,
@@ -3102,6 +3103,10 @@ class StreamMiniBindButton(discord.ui.Button):
         hub = await StreamHubView.create(self._hub.cog, guild, interaction.user.id)
         self._hub.stop()
         await apply_view(interaction, hub)
+        if old is None or hit_identity(old["hit"]) != hit_identity(self._hub.hit):
+            await self._hub.cog.announce_stream_link(
+                guild, interaction.user.id, self._hub.hit, int(interaction.channel_id or 0),
+            )
 
 
 class StreamMiniUnlinkButton(discord.ui.Button):
@@ -8624,6 +8629,33 @@ class Reviews(commands.Cog):
         voice_id = member_voice_channel_id(member) if member else None
         add(await self._fetch_messageable(guild, voice_id or int(link.get("channel_id") or 0)))
         return dests
+
+    async def announce_stream_link(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        hit: MediaHit,
+        post_channel_id: int,
+    ) -> None:
+        """Publie la fiche dès qu'un live en cours est lié à une œuvre."""
+        dests: list[discord.abc.Messageable] = []
+        for channel in (
+            await self._fetch_messageable(guild, post_channel_id),
+            await self.get_announce_channel(guild, hit.media_type),
+        ):
+            if channel is not None and all(getattr(d, "id", None) != getattr(channel, "id", None) for d in dests):
+                dests.append(channel)
+        mention = _mention(guild, self.bot, user_id)
+        banner = f"{mention} · en stream"
+        for channel in dests:
+            try:
+                message = await post_published_fiche(self, guild, hit, channel, banner=banner)
+            except Exception:
+                logger.exception("Publication fiche stream impossible")
+                continue
+            if message is not None:
+                return
+        logger.info("Fiche de début de stream : envoi impossible (%s)", user_id)
 
     async def finish_stream_link(self, guild: discord.Guild, user_id: int) -> None:
         self._stream_session_reminded.discard((guild.id, user_id))
