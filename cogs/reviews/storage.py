@@ -1104,6 +1104,19 @@ class StorageMixin:
         )
         return int(row["id"]) if row else None
 
+    async def rated_on_server(self, guild: discord.Guild, identity: tuple[str, str, str]) -> bool:
+        """L'œuvre (source, source_id, media_type) a au moins une note d'un membre du serveur."""
+        row = await self.db.fetchone(
+            f"""SELECT 1 AS n FROM media m
+                JOIN reviews r ON r.media_id = m.id
+                {ON_SERVER.format("r")}
+                WHERE m.source=? AND m.source_id=? AND m.media_type=?
+                LIMIT 1""",
+            guild.id,
+            *identity,
+        )
+        return row is not None
+
     async def media_stats(self, guild: discord.Guild, media_id: int | None) -> tuple[float | None, int]:
         """Moyenne et nombre de notes des membres du serveur."""
         if not media_id:

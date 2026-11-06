@@ -10,7 +10,7 @@ Noter (0 à 10, entier ; une étoile = 2 points) films et séries (TMDB), jeux (
 
 Notes, XP, signets, favoris et préférences suivent le membre sur tous les serveurs où est CRIT. Les vues « serveur » (catalogue, top, moyennes, critiques d'une fiche, recommandations, annonces) ne comptent que les membres présents sur ce serveur ; réglages, listes communes et streams planifiés restent propres au serveur.
 
-Un message qui n'est qu'un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open Library reçoit la fiche de l'œuvre en réponse. Dans une phrase, clic droit sur le message → **Ouvrir la fiche**.
+Un message qui n'est qu'un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open Library reçoit la fiche de l'œuvre en réponse, si au moins un membre du serveur l'a déjà notée. Sinon, ou dans une phrase, clic droit sur le message → **Ouvrir la fiche**.
 
 ## Commandes
 

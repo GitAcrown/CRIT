@@ -38,7 +38,7 @@ from .formatting import (
     skip_note_autocomplete,
     type_label,
 )
-from .links import find_media_links, message_is_only_links, pick_fiche_hit
+from .links import MediaLink, find_media_links, message_is_only_links, pick_fiche_hit
 from .live import LiveMixin
 from .prefs import UserPrefs, search_pref_includes
 from .progress import resolve_star_skin, title_for_level
@@ -213,34 +213,48 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         if interaction.guild_id and not interaction.user.bot:
             await self.remember_member(interaction.guild_id, interaction.user.id)
 
-    async def resolve_links(self, content: str) -> list[MediaHit]:
-        """Œuvres des liens d'un message, enrichies (saison comprise pour un lien TMDB)."""
+    async def resolve_link(self, link: MediaLink) -> MediaHit | None:
+        """Œuvre d'un lien, enrichie (saison comprise pour un lien TMDB)."""
         if self.catalog is None:
-            return []
+            return None
+        try:
+            hit = pick_fiche_hit(await self.catalog.search(link.query, "all"))
+            if hit is None:
+                return None
+            hit = await self.catalog.enrich(hit)
+        except Exception:
+            logger.exception("Lien d'œuvre %s", link.query)
+            return None
+        if link.season is not None and hit.media_type == "tv":
+            hit = season_media(hit, link.season)
+        return hit
+
+    async def resolve_links(self, content: str) -> list[MediaHit]:
         hits: list[MediaHit] = []
         for link in find_media_links(content):
-            try:
-                hit = pick_fiche_hit(await self.catalog.search(link.query, "all"))
-                if hit is None:
-                    continue
-                hit = await self.catalog.enrich(hit)
-            except Exception:
-                logger.exception("Lien d'œuvre %s", link.query)
-                continue
-            if link.season is not None and hit.media_type == "tv":
-                hit = season_media(hit, link.season)
-            if all(hit_identity(hit) != hit_identity(other) for other in hits):
+            hit = await self.resolve_link(link)
+            if hit is not None and all(hit_identity(hit) != hit_identity(other) for other in hits):
                 hits.append(hit)
         return hits
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        # Un message qui n'est qu'un lien d'œuvre est un partage : on y répond par la fiche.
-        # Dans une phrase, le lien reste accessible par clic droit → Ouvrir la fiche.
-        if message.author.bot or message.guild is None or not message_is_only_links(message.content):
+        # Un message qui n'est qu'un lien d'œuvre est un partage : on y répond par la fiche,
+        # seulement si l'œuvre a déjà été notée sur ce serveur. Sinon (ou dans une phrase),
+        # le lien reste accessible par clic droit → Ouvrir la fiche.
+        guild = message.guild
+        if message.author.bot or guild is None or not message_is_only_links(message.content):
             return
-        for hit in await self.resolve_links(message.content):
-            await post_compact_fiche(self, message.guild, hit, message.channel, reference=message)
+        posted: set[tuple[str, str, str]] = set()
+        for link in find_media_links(message.content):
+            # Lien avec id : on vérifie la base avant tout appel au catalogue.
+            if link.identity is not None and not await self.rated_on_server(guild, link.identity):
+                continue
+            hit = await self.resolve_link(link)
+            if hit is None or hit.identity in posted or not await self.rated_on_server(guild, hit.identity):
+                continue
+            posted.add(hit.identity)
+            await post_compact_fiche(self, guild, hit, message.channel, reference=message)
 
     @app_commands.guild_only()
     async def open_message_fiche(self, interaction: discord.Interaction, message: discord.Message) -> None:

@@ -16,6 +16,9 @@ from .providers import MediaHit
 class MediaLink:
     query: str
     season: int | None = None
+    # (source, source_id, media_type) quand le lien donne l'id : on peut chercher
+    # l'œuvre dans la base sans appeler le catalogue. Absent pour IMDb et Letterboxd.
+    identity: tuple[str, str, str] | None = None
 
 
 _TMDB_LINK = re.compile(
@@ -44,19 +47,23 @@ def _letterboxd_query(slug: str) -> str:
 
 def _parse_link(token: str) -> MediaLink | None:
     if match := _TMDB_LINK.search(token):
+        kind, tmdb_id = match.group(1).lower(), match.group(2)
         season = int(match.group(3)) if match.group(3) else None
-        return MediaLink(f"tmdb:{match.group(1).lower()}/{match.group(2)}", season)
+        source_id = f"{tmdb_id}:s{season}" if season is not None else tmdb_id
+        return MediaLink(f"tmdb:{kind}/{tmdb_id}", season, ("tmdb", source_id, kind))
     if match := _IMDB_LINK.search(token):
         return MediaLink(f"imdb:{match.group(1)}")
     if match := _LETTERBOXD_LINK.search(token):
         return MediaLink(_letterboxd_query(match.group(1).lower()))
     if match := _STEAM_LINK.search(token):
-        return MediaLink(f"steam:{match.group(1)}")
+        return MediaLink(f"steam:{match.group(1)}", identity=("steam", match.group(1), "game"))
     if match := _SPOTIFY_LINK.search(token):
         kind = (match.group(1) or match.group(3)).lower()
-        return MediaLink(f"spotify:{kind}/{match.group(2) or match.group(4)}")
+        spotify_id = match.group(2) or match.group(4)
+        return MediaLink(f"spotify:{kind}/{spotify_id}", identity=("spotify", spotify_id, kind))
     if match := _OPENLIBRARY_LINK.search(token):
-        return MediaLink(f"ol:{match.group(1).upper()}")
+        key = match.group(1).upper()
+        return MediaLink(f"ol:{key}", identity=("openlibrary", f"/works/{key}", "book"))
     return None
 
 

@@ -803,7 +803,8 @@ class HelpView(ReviewsLayout):
             "Les skins d'étoiles se choisissent dans `/custom`. "
             "En octobre, noter un film ou une série d'horreur débloque les citrouilles, qui restent équipables ensuite. "
             "Colle seul dans un message un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open Library : "
-            "CRIT répond avec la fiche. Dans une phrase, clic droit sur le message → **Ouvrir la fiche**. "
+            "si l'œuvre a déjà été notée ici, CRIT répond avec la fiche. "
+            "Sinon, ou dans une phrase, clic droit sur le message → **Ouvrir la fiche**. "
             "Tes notes, ton XP et tes signets te suivent sur tous les serveurs où est CRIT.\n"
             "-# Chaque note rapporte de l'XP (avec plafond quotidien)"
         )
