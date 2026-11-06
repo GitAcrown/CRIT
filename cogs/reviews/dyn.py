@@ -325,7 +325,7 @@ class FicheDynButton(
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        from .reviews import handle_published_fiche_click
+        from .ui.navigation import handle_published_fiche_click
 
         await handle_published_fiche_click(interaction, self.wid, self.action)
 
@@ -371,7 +371,7 @@ class AnnounceDynButton(
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        from .reviews import handle_announce_click
+        from .ui.navigation import handle_announce_click
 
         await handle_announce_click(interaction, self.wid, self.action)
 
