@@ -26,7 +26,6 @@ from .constants import (
     ANNOUNCE_ROUTE_ALL,
     BAD_RATING,
     DEFAULT_COMMENT_MAX,
-    FAVORITE_LABELS,
     FOR_YOU_LIMIT,
     FOR_YOU_MAX_GAP,
     LIKE_RATING,
@@ -538,46 +537,8 @@ class StorageMixin:
         return self._affinity(right_id, pairs)
 
     # ------------------------------------------------------------------
-    # Favoris / signets
+    # Signets
     # ------------------------------------------------------------------
-
-    async def get_favorites(
-        self, guild: discord.Guild | None, user_id: int
-    ) -> list[tuple[MediaHit, float | None] | None]:
-        rows = await self.db.fetchall(
-            """SELECT f.slot, m.*, r.rating AS fav_rating
-               FROM favorites f
-               JOIN media m ON m.id = f.media_id
-               LEFT JOIN reviews r ON r.media_id = f.media_id AND r.user_id = f.user_id
-               WHERE f.user_id=?""",
-            user_id,
-        )
-        slots: list[tuple[MediaHit, float | None] | None] = [None, None, None]
-        for row in rows:
-            slot = int(row["slot"])
-            if slot < 1 or slot > 3:
-                continue
-            rating = row["fav_rating"]
-            slots[slot - 1] = (hit_from_row(row), float(rating) if rating is not None else None)
-        return slots
-
-    async def set_favorite(
-        self, guild: discord.Guild | None, user_id: int, slot: int, hit: MediaHit
-    ) -> None:
-        if slot not in FAVORITE_LABELS:
-            return
-        media_id = await self.upsert_media(guild, hit)
-        await self.db.execute("DELETE FROM favorites WHERE user_id=? AND media_id=?", user_id, media_id, commit=False)
-        await self.db.execute(
-            """INSERT INTO favorites (user_id, slot, media_id) VALUES (?, ?, ?)
-               ON CONFLICT(user_id, slot) DO UPDATE SET media_id=excluded.media_id""",
-            user_id,
-            slot,
-            media_id,
-        )
-
-    async def clear_favorite(self, guild: discord.Guild | None, user_id: int, slot: int) -> None:
-        await self.db.execute("DELETE FROM favorites WHERE user_id=? AND slot=?", user_id, slot)
 
     async def add_watchlist(self, guild: discord.Guild | None, user_id: int, hit: MediaHit) -> None:
         media_id = await self.upsert_media(guild, hit)
@@ -800,6 +761,21 @@ class StorageMixin:
             int(time.time()),
         )
         return None
+
+    async def load_favorite_ids(self, user_id: int) -> list[int]:
+        """Œuvres préférées du carnet, dans l'ordre choisi."""
+        rows = await self.db.fetchall(
+            "SELECT media_id FROM favorites WHERE user_id=? ORDER BY slot", user_id
+        )
+        return [int(row["media_id"]) for row in rows]
+
+    async def set_favorites(self, user_id: int, media_ids: list[int]) -> None:
+        await self.db.execute("DELETE FROM favorites WHERE user_id=?", user_id, commit=not media_ids)
+        if media_ids:
+            await self.db.executemany(
+                "INSERT INTO favorites (user_id, slot, media_id) VALUES (?, ?, ?)",
+                [(user_id, slot, media_id) for slot, media_id in enumerate(media_ids, start=1)],
+            )
 
     async def shared_lists_with_media(self, media_id: int, list_ids: list[int]) -> set[int]:
         """Parmi `list_ids`, celles qui contiennent déjà l'œuvre."""

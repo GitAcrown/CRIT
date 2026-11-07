@@ -8,8 +8,8 @@ import discord
 
 from utils import pretty
 
-from ..constants import JOURNAL_PAGE, TYPE_CHOICES
-from ..emojis import AFFINITY, BOOKMARK_ON, HOUSE, JOURNAL, RIVAL, TWIN, XP
+from ..constants import JOURNAL_PAGE, MAX_FAVORITES, TYPE_CHOICES
+from ..emojis import AFFINITY, BOOKMARK_ON, EDIT_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -21,10 +21,9 @@ from ..formatting import (
     is_ongoing,
     journal_stats_line,
     mention_of,
-    pick_rating_highlights,
     row_spoiler,
+    select_emoji,
     titled,
-    type_emoji,
     type_label,
     user_display,
 )
@@ -284,6 +283,63 @@ class AffinityCompareView(ReviewsLayout):
         self.add_item(discord.ui.ActionRow(AffinityShareButton(self)))
 
 
+class FavoritesModal(discord.ui.Modal, title="Œuvres préférées"):
+    """Jusqu'à MAX_FAVORITES œuvres notées, affichées en galerie dans le carnet."""
+
+    def __init__(self, parent: "ProfileView"):
+        super().__init__()
+        self._hub = parent
+        by_id = {int(row["media_id"]): (hit, row) for hit, row in parent.journal_entries}
+        current = [media_id for media_id in parent.favorite_ids if media_id in by_id]
+        order = current + [
+            int(row["media_id"]) for _hit, row in parent.rated_by_rank()
+            if int(row["media_id"]) not in current
+        ]
+        options = []
+        for media_id in order[:25]:
+            hit, row = by_id[media_id]
+            label = f"{hit.title} · {hit.year}" if hit.year else hit.title
+            options.append(discord.SelectOption(
+                label=pretty.shorten_text(label, 100) or "Sans titre",
+                value=str(media_id),
+                description=f"{format_score(float(row['rating']))} · {type_label(hit.media_type)}",
+                emoji=select_emoji(hit.media_type),
+                default=media_id in current,
+            ))
+        self.favorites_select = discord.ui.Select(
+            placeholder="Tes mieux notées, par défaut",
+            options=options,
+            min_values=0,
+            max_values=min(MAX_FAVORITES, len(options)),
+            required=False,
+        )
+        self.add_item(discord.ui.Label(
+            text="Favoris",
+            description=f"Jusqu'à {MAX_FAVORITES}. Rien de coché : tes mieux notées.",
+            component=self.favorites_select,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        rank = {int(option.value): index for index, option in enumerate(self.favorites_select.options)}
+        ids = sorted((int(value) for value in self.favorites_select.values), key=lambda m: rank.get(m, 99))
+        hub = self._hub
+        await hub.cog.set_favorites(hub.member.id, ids)
+        hub.favorite_ids = ids
+        hub.notice = "**Favoris ·** enregistrés." if ids else "**Favoris ·** retirés : tes mieux notées s'affichent."
+        hub._build()
+        await hub.push(interaction)
+
+
+class EditFavoritesButton(discord.ui.Button):
+    def __init__(self, parent: "ProfileView"):
+        super().__init__(style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(EDIT_LIST))
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(FavoritesModal(self._hub))
+
+
 class ProfileView(ReviewsLayout):
     """Carnet : Profil · Journal · Signets · Affinités."""
 
@@ -312,7 +368,7 @@ class ProfileView(ReviewsLayout):
         self.journal_entries: list[tuple[MediaHit, Any]] = []
         self.watchlist_entries: list[tuple[MediaHit, Any]] = []
         self.affinities: list[Affinity] = []
-        self._highlights: list[tuple[str, MediaHit, float | None]] = []
+        self.favorite_ids: list[int] = []
         self.journal_page = 0
         self.watchlist_page = 0
         self.journal_type = "all"
@@ -343,7 +399,7 @@ class ProfileView(ReviewsLayout):
             sum(float(row["rating"]) for _hit, row in self.journal_entries) / self.review_count
             if self.journal_entries else None
         )
-        self._highlights = pick_rating_highlights(self.journal_entries)
+        self.favorite_ids = await cog.load_favorite_ids(member_id)
         self.watchlist_entries = await cog.load_watchlist(guild, member_id)
         affinities = await cog.list_affinities(guild, member_id)
         self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
@@ -441,24 +497,39 @@ class ProfileView(ReviewsLayout):
             )
         return items
 
-    def _highlight_block(self, label: str, hit: MediaHit, rating: float | None) -> discord.ui.Item:
-        year = f"  ·  {hit.year}" if hit.year else ""
-        lines = [
-            f"### {label}",
-            f"{type_emoji(hit.media_type)} **{hit.title}**{year}",
-            f"-# {type_label(hit.media_type)}"
-            + (f"  ·  {hit.subtitle}" if hit.subtitle else ""),
-        ]
-        if rating is not None:
-            lines.append(f"{self.stars(rating)}  **{format_score(rating)}**")
-        return section_with_thumbnail("\n".join(lines), hit.poster_url)
+    def rated_by_rank(self) -> list[tuple[MediaHit, Any]]:
+        """Notes de la plus haute à la plus basse, la plus récente d'abord à égalité."""
+        return sorted(
+            self.journal_entries,
+            key=lambda item: (-float(item[1]["rating"]), -int(item[1]["updated_at"] or 0)),
+        )
 
-    def _profil_content(self) -> list[discord.ui.Item]:
+    def favorites(self) -> tuple[list[tuple[MediaHit, Any]], bool]:
+        """Favoris choisis, sinon les mieux notées ; le booléen dit s'ils sont choisis."""
+        by_id = {int(row["media_id"]): (hit, row) for hit, row in self.journal_entries}
+        chosen = [by_id[media_id] for media_id in self.favorite_ids if media_id in by_id]
+        if chosen:
+            return chosen[:MAX_FAVORITES], True
+        return self.rated_by_rank()[:MAX_FAVORITES], False
+
+    def _profil_content(self, *, editable: bool = False) -> list[discord.ui.Item]:
+        """Galerie des favoris puis répartition. `editable` : crayon pour les choisir (son propre carnet)."""
         content: list[discord.ui.Item] = []
-        for index, (label, hit, rating) in enumerate(self._highlights):
-            if index:
-                content.append(sep_tight())
-            content.append(self._highlight_block(label, hit, rating))
+        picks, chosen = self.favorites()
+        shown = [(hit, row) for hit, row in picks if hit.poster_url]
+        if shown:
+            title = "### Favoris" if chosen else "### Mieux notées"
+            if editable:
+                content.append(discord.ui.Section(title, accessory=EditFavoritesButton(self)))
+            else:
+                content.append(discord.ui.TextDisplay(title))
+            content.append(discord.ui.MediaGallery(*[
+                discord.MediaGalleryItem(
+                    hit.poster_url,
+                    description=pretty.shorten_text(f"{hit.title} · {format_score(float(row['rating']))}", 250),
+                )
+                for hit, row in shown
+            ]))
         graph = format_rating_graph(self.journal_entries)
         if graph:
             if content:
@@ -582,5 +653,5 @@ class ProfileView(ReviewsLayout):
             content, actions = self._affinites_layout()
             self._assemble(self._header_item(avatar=True), content, actions=actions)
         else:
-            self._assemble(self._header_item(avatar=True), self._profil_content())
+            self._assemble(self._header_item(avatar=True), self._profil_content(editable=self.editable))
         self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))

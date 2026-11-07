@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import json
-import random
 import re
 import time
 from typing import Any
@@ -263,13 +262,7 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-GRAPH_BAR_WIDTH = 8
-
-
-GRAPH_FILL = "━"
-
-
-GRAPH_BASE = "─"
+GRAPH_LEVELS = "▁▂▃▄▅▆▇█"
 
 
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
@@ -281,49 +274,25 @@ def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
 
 
 def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
+    """Répartition des notes sur une ligne : un bloc par note, de 0 à 10."""
     if not entries:
         return ""
     counts = rating_counts(entries)
     peak = max(counts)
-    lines = [
-        "### Répartition",
-    ]
-    for score in range(RATING_MAX, -1, -1):
-        n = counts[score]
-        filled = 0 if peak <= 0 or n <= 0 else max(1, round(GRAPH_BAR_WIDTH * n / peak))
-        bar = GRAPH_FILL * min(GRAPH_BAR_WIDTH, filled)
-        if n:
-            lines.append(f"{score}  {bar}  **{n}**")
-        else:
-            lines.append(f"-# {score}  {GRAPH_BASE}  0")
-    return "\n".join(lines)
-
-
-def pick_rating_highlights(
-    entries: list[tuple[MediaHit, Any]],
-) -> list[tuple[str, MediaHit, float]]:
-    """Une mieux notée et une pire, au hasard parmi les notes extrêmes."""
-    if not entries:
-        return []
-    scored = [(hit, float(row["rating"])) for hit, row in entries]
-    best_score = max(rating for _hit, rating in scored)
-    worst_score = min(rating for _hit, rating in scored)
-    best_hit, best_rating = random.choice(
-        [(hit, rating) for hit, rating in scored if rating == best_score]
+    steps = len(GRAPH_LEVELS)  # 8 crans par rangée, 2 rangées
+    upper, lower = [], []
+    for n in counts:
+        height = 0 if not n else max(1, round(2 * steps * n / peak))
+        lower.append(GRAPH_LEVELS[min(height, steps) - 1] * 2 if height else "  ")
+        upper.append(GRAPH_LEVELS[height - steps - 1] * 2 if height > steps else "  ")
+    scale = "0" + " " * 9 + "5" + " " * 9 + "10"
+    most = max(range(RATING_MAX + 1), key=lambda score: (counts[score], score))
+    graph = "\n".join(["".join(upper).rstrip(), "".join(lower).rstrip(), scale])
+    return (
+        "**Répartition**\n"
+        f"```\n{graph}\n```\n"
+        f"-# Le plus souvent **{most}/{RATING_MAX}** ({counts[most]} fois)"
     )
-    picks = [("Mieux notée", best_hit, best_rating)]
-    if best_score == worst_score:
-        return picks
-    worst_pool = [
-        (hit, rating)
-        for hit, rating in scored
-        if rating == worst_score and hit.identity != best_hit.identity
-    ]
-    if not worst_pool:
-        return picks
-    worst_hit, worst_rating = random.choice(worst_pool)
-    picks.append(("Pire note", worst_hit, worst_rating))
-    return picks
 
 
 def skip_note_autocomplete(raw: str) -> bool:

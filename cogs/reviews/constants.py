@@ -75,6 +75,7 @@ MAX_SHARED_LISTS = 20
 
 
 MAX_LIST_ITEMS = 100
+MAX_FAVORITES = 6  # galerie du carnet
 
 
 LIST_TITLE_MAX = 80
@@ -126,11 +127,6 @@ TYPE_STATS = (
 )
 
 
-FAVORITE_LABELS = {
-    1: "Fétiche",
-    2: "Coup de cœur",
-    3: "Pépite",
-}
 
 
 STREAM_START_GRACE = 5.0
