@@ -513,11 +513,16 @@ class ProfileView(ReviewsLayout):
         return self.rated_by_rank()[:MAX_FAVORITES], False
 
     def _profil_content(self, *, editable: bool = False) -> list[discord.ui.Item]:
-        """Galerie des favoris puis répartition. `editable` : crayon pour les choisir (son propre carnet)."""
+        """Répartition puis galerie des favoris. `editable` : crayon pour les choisir (son propre carnet)."""
         content: list[discord.ui.Item] = []
+        graph = format_rating_graph(self.journal_entries)
+        if graph:
+            content.append(discord.ui.TextDisplay(graph))
         picks, chosen = self.favorites()
         shown = [(hit, row) for hit, row in picks if hit.poster_url]
         if shown:
+            if content:
+                content.append(sep_wide())
             title = "### Favoris" if chosen else "### Mieux notées"
             if editable:
                 content.append(discord.ui.Section(title, accessory=EditFavoritesButton(self)))
@@ -530,11 +535,6 @@ class ProfileView(ReviewsLayout):
                 )
                 for hit, row in shown
             ]))
-        graph = format_rating_graph(self.journal_entries)
-        if graph:
-            if content:
-                content.append(sep_wide())
-            content.append(discord.ui.TextDisplay(graph))
         return content
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
