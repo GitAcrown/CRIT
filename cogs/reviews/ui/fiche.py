@@ -272,7 +272,7 @@ def append_fiche_sections(
         mine = f"**Ta note**  {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
         comment = format_comment(my_review.get("comment") or "", spoiler=row_spoiler(my_review), hide=False, limit=180)
         if comment:
-            mine += f"\n{comment}"
+            mine += f"  —  {comment}"
         seen = experienced_line(hit.media_type, experienced_from_row(my_review))
         if seen:
             mine += f"\n{seen}"
