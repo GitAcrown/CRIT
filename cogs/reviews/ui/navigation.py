@@ -41,7 +41,7 @@ async def open_private_fiche(
     *,
     published_wid: str | None,
 ) -> None:
-    """Anciens boutons « Actions » / « Ouvrir » encore actifs sur des messages déjà postés."""
+    """Fiche perso éphémère : bouton « Ouvrir la fiche », ou Noter quand on a déjà noté."""
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True, thinking=True)
     view = FicheView(cog, guild, [hit], author_id=interaction.user.id, published_wid=published_wid)
@@ -56,11 +56,17 @@ async def rate_from_public(
     *,
     published_wid: str | None,
 ) -> None:
-    """Formulaire Noter direct ; la confirmation arrive en message privé."""
+    """Formulaire Noter direct ; la confirmation arrive en message privé.
+
+    Déjà noté : la fiche perso s'ouvre à la place, pour modifier ou supprimer sa note.
+    """
     view = FicheView(cog, guild, [hit], author_id=interaction.user.id, published_wid=published_wid)
     view.from_published_modal = True
     await view.load_member()
     await view.load_my_review()
+    if view.my_review:
+        await open_private_fiche(interaction, cog, guild, hit, published_wid=published_wid)
+        return
     await interaction.response.send_modal(rate_modal_for(view, interaction.user.id))
 
 
