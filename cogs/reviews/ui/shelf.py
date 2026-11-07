@@ -13,7 +13,7 @@ import discord
 
 from utils import pretty
 
-from ..emojis import BOOKMARK_OFF, BOOKMARK_ON
+from ..emojis import SHELF
 from ..formatting import list_accepts_type
 from ..providers import MediaHit
 
@@ -172,13 +172,13 @@ async def public_shelf_done(interaction: discord.Interaction, text: str) -> None
 
 
 class ShelfButton(discord.ui.Button):
-    """Fiche perso : signet allumé si l'œuvre est en signet."""
+    """Fiche perso : bouton Ranger, en bleu si l'œuvre est en signet."""
 
     def __init__(self, parent: "FicheView"):
         on = bool(parent.on_watchlist) and not parent.my_review
         super().__init__(
             style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(BOOKMARK_ON if on else BOOKMARK_OFF),
+            emoji=discord.PartialEmoji.from_str(SHELF),
         )
         self._hub = parent
 

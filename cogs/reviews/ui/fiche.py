@@ -24,7 +24,7 @@ from ..dyn import (
     mark_stripped,
     update_payload,
 )
-from ..emojis import BOOKMARK_OFF, EXPLICIT, OPEN, PLANNING, SALE, STREAMING
+from ..emojis import EXPLICIT, OPEN, PLANNING, SALE, SHELF, STREAMING
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -419,7 +419,7 @@ def public_fiche_buttons(
     critiques = f"Critiques ({count})" if count is not None else "Critiques"
     row = [rate_dyn_button(wid, button)] if with_rate else []
     row += [
-        button(wid, "shelf", emoji=BOOKMARK_OFF),
+        button(wid, "shelf", emoji=SHELF),
         button(wid, "critiques", label=critiques),
     ]
     return discord.ui.ActionRow(*row)

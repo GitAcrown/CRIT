@@ -59,6 +59,7 @@ MINUS_SMALL = "<:minussmall:1553496865624817865>"
 SETTINGS = "<:settings:1568616643456798811>"
 SHUFFLE = "🔀"  # remplacé par assets/emojis/shuffle.png à la synchro
 OPEN = "↗️"  # remplacé par assets/emojis/open.png à la synchro
+SHELF = "🗂️"  # bouton Ranger (signet + listes), remplacé par assets/emojis/shelf.png
 
 
 # ---------------------------------------------------------------------------
