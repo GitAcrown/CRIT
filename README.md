@@ -22,7 +22,7 @@ Un message qui n'est qu'un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open L
 - `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
 
-Chaque commande ouvre un seul message privé : choisir une œuvre y affiche sa fiche, **Retour** ramène au menu précédent, et **Au hasard** tire une œuvre dans les signets, une liste ou le catalogue. Sur une fiche publiée dans le salon, utilisable par tous, **Noter** ouvre directement le formulaire de la personne qui clique et **Ouvrir** lui affiche la fiche en privé.
+Chaque commande ouvre un seul message privé : choisir une œuvre y affiche sa fiche, la flèche **←** en haut ramène au menu précédent, et **Au hasard** tire une œuvre dans les signets, une liste ou le catalogue. Sur une fiche publiée dans le salon, utilisable par tous, **Noter** ouvre directement le formulaire de la personne qui clique et **Ouvrir** lui affiche la fiche en privé.
 
 ## Administration
 

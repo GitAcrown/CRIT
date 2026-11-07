@@ -147,7 +147,7 @@ def page_nav(parent: Any, attr: str, max_page: int, *middle: discord.ui.Item) ->
 
 class BackButton(discord.ui.Button):
     def __init__(self, parent: "ReviewsLayout"):
-        super().__init__(label="Retour", emoji="↩️", style=discord.ButtonStyle.secondary)
+        super().__init__(label="←", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:

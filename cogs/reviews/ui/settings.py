@@ -335,7 +335,7 @@ class HelpView(ReviewsLayout):
             "`/stream` affiche les œuvres liées aux Go Live en cours "
             "(y compris ceux des autres), les streams planifiés, et permet d'y lier le tien "
             "ou d'en planifier un. "
-            "Tout s'ouvre dans le même message : choisir une œuvre affiche sa fiche, **Retour** ramène où tu étais. "
+            "Tout s'ouvre dans le même message : choisir une œuvre affiche sa fiche, la flèche **←** en haut ramène où tu étais. "
             "**Au hasard** tire une œuvre dans tes signets, une liste ou le catalogue. "
             "Tes défauts (date, listes, recherche, annonces, signets notés, rappel et statut vocal) "
             "et tes skins d'étoiles se règlent dans `/carnet` → **Réglages**. "
