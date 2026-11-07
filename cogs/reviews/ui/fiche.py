@@ -707,27 +707,26 @@ def build_announce_view(
     live: bool = False,
     skin: StarSkin | str | None = None,
 ) -> discord.ui.LayoutView:
+    # Annonce compacte : un seul bloc à côté de l'affiche, le détail est dans la fiche.
     view = discord.ui.LayoutView(timeout=None)
-    container = discord.ui.Container()
-    verb = "a mis à jour sa note" if updated else "a noté"
-    stamped = f"<t:{int(posted_at or time.time())}:f>"
-    profile = f"{mention} · _{title}_ · le {stamped} · {verb}"
-    film = f"{fiche_title_line(hit)}\n{format_stars(rating, skin)}  **{format_score(rating)}**"
-    shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
+    verb = "a mis à jour sa note de" if updated else "a noté"
+    year = f" · {hit.year}" if hit.year else ""
+    lines = [
+        f"{mention} {verb} {type_emoji(hit.media_type)} **{hit.title}**{year}",
+        f"{format_stars(rating, skin)}  **{format_score(rating)}**",
+    ]
+    shown = format_comment(comment, spoiler=spoiler, hide=True, limit=140)
     if shown:
-        film += f"\n{shown}"
-    seen = experienced_line(hit.media_type, experienced_at)
+        lines.append(shown)
+    footer = [f"_{title}_", f"<t:{int(posted_at or time.time())}:R>"]
+    seen = experienced_line(hit.media_type, experienced_at).removeprefix("-# ")
     if seen:
-        film += f"\n{seen}"
-    container.add_item(discord.ui.TextDisplay(profile))
-    container.add_item(discord.ui.Separator())
-    container.add_item(section_with_thumbnail(film, hit.poster_url))
-    container.add_item(discord.ui.TextDisplay(f"-# {fiche_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
+        footer.append(seen)
+    lines.append("-# " + " · ".join(footer))
+    view.add_item(discord.ui.Container(section_with_thumbnail("\n".join(lines), hit.poster_url)))
     if live and wid:
-        # Boutons dans la carte, comme sur les fiches.
-        container.add_item(sep_tight())
-        container.add_item(public_fiche_buttons(wid, AnnounceDynButton))
-    view.add_item(container)
+        # Un seul petit bouton sous la carte : il ouvre la fiche perso de qui clique.
+        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, "open", label="Ouvrir la fiche")))
     return view
 
 
