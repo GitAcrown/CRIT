@@ -50,7 +50,7 @@ from .formatting import (
     hit_from_row,
     list_accepts_type,
     list_types_label,
-    mention_silent,
+    user_display,
     parse_list_types,
     row_spoiler,
 )
@@ -471,7 +471,9 @@ class StorageMixin:
             tail = ""
         shown = user_ids[:3]
         extra = max(0, len(user_ids) - 3)
-        people = format_people_fr([mention_silent(uid) for uid in shown], extra)
+        # Noms en gras plutôt que des mentions : plus lisible qu'une rangée de pastilles.
+        names = [f"**{user_display(guild, self.bot, uid)[0]}**" for uid in shown]
+        people = format_people_fr(names, extra)
         return f"{people} {verb}{tail}"
 
     @staticmethod

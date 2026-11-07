@@ -69,7 +69,7 @@ def format_stars_select(rating: float) -> str:
 
 def format_score(rating: float, *, average: bool = False) -> str:
     if average:
-        return f"{rating:.1f}/{RATING_MAX}"
+        return f"{rating:.1f}".replace(".", ",") + f"/{RATING_MAX}"
     return f"{int(round(rating))}/{RATING_MAX}"
 
 

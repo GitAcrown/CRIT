@@ -57,7 +57,6 @@ from .fiche import (
     also_liked_line,
     append_fiche_sections,
     critiques_summary_line,
-    fiche_footer_line,
     fiche_intro,
     fiche_plan_payload,
     section_with_thumbnail,
@@ -411,9 +410,6 @@ class FicheView(ReviewsLayout):
                 guild_name=self.guild.name,
                 skin=self.star_skin,
             )
-            footer = fiche_footer_line(hit)
-            if footer:
-                body.append(discord.ui.TextDisplay(f"-# {footer}"))
         actions.extend(self._season_rows())
         actions.extend(self._action_rows())
         self.set_layout(body, *actions, above=[self._tabs_row()], sticky_head=sticky_head)

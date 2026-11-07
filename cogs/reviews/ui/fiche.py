@@ -105,27 +105,42 @@ def _source_name(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, hit.source)
 
 
+LANGUAGES = {
+    "en": "anglaise", "ja": "japonaise", "ko": "coréenne", "es": "espagnole", "it": "italienne",
+    "de": "allemande", "zh": "chinoise", "pt": "portugaise", "ru": "russe", "hi": "hindi",
+    "sv": "suédoise", "da": "danoise", "no": "norvégienne", "nl": "néerlandaise", "pl": "polonaise",
+}
+
+
+def _decimal(value: float) -> str:
+    return f"{value:.1f}".replace(".", ",")
+
+
 def _official_line(hit: MediaHit, skin: StarSkin | str | None = None) -> str:
+    """Note de la source (TMDB, Steam, Spotify), en second plan sous celle du serveur."""
     source = _source_name(hit)
     if hit.source == "tmdb":
         rating = float(hit.extra.get("vote_average") or 0)
         count = int(hit.extra.get("vote_count") or 0)
         if rating:
-            stars = format_stars(rating, skin)
             votes = f"  ·  {fmt_int(count)} votes" if count else ""
-            return f"**{source}** · {stars}  **{rating:.1f}/10**{votes}"
+            return f"**{source}**  {format_stars(rating, skin)}  {_decimal(rating)}/10{votes}"
     if hit.source == "steam":
         label = hit.extra.get("review_label") or ""
         emoji = hit.extra.get("review_emoji") or ""
         if label:
-            return f"**{source}** · {f'{emoji} {label}'.strip()}"
+            return f"**{source}**  {f'{emoji} {label}'.strip()}"
     popularity = hit.extra.get("popularity")
     if hit.media_type == "track" and popularity:
-        return f"**{source}** · Popularité **{popularity}/100**"
+        return f"**{source}**  popularité {popularity}/100"
     return ""
 
 
-def _price_line(hit: MediaHit) -> str:
+def _euros(cents: int) -> str:
+    return f"{cents / 100:.2f} €".replace(".", ",")
+
+
+def _price_label(hit: MediaHit) -> str:
     if hit.media_type != "game":
         return ""
     if hit.extra.get("is_free"):
@@ -133,11 +148,11 @@ def _price_line(hit: MediaHit) -> str:
     final = hit.extra.get("price_final")
     if not isinstance(final, int):
         return ""
-    text = f"**{final / 100:.2f} €**"
+    text = f"**{_euros(final)}**"
     discount = hit.extra.get("discount") or 0
     initial = hit.extra.get("price_initial")
     if discount and isinstance(initial, int):
-        text += f"  ~~{initial / 100:.2f} €~~  {SALE} **-{discount}%**"
+        text += f" ~~{_euros(initial)}~~ {SALE} -{discount} %"
     return text
 
 
@@ -153,17 +168,12 @@ def fiche_title_line(hit: MediaHit) -> str:
     return line
 
 
-def fiche_meta_line(hit: MediaHit) -> str:
-    parts = [type_label(hit.media_type)]
-    if hit.subtitle:
-        parts.append(hit.subtitle)
-    parts.extend(hit.genres[:3])
-    return "  ·  ".join(parts)
-
-
-def fiche_footer_line(hit: MediaHit) -> str:
-    parts: list[str] = []
+def fiche_info_line(hit: MediaHit) -> str:
+    """Type · durée (ou saisons, pistes) · prix : l'essentiel, sous le titre."""
     extra = hit.extra
+    parts = [type_label(hit.media_type)]
+    if hit.year:
+        parts.append(str(hit.year))
     if extra.get("runtime"):
         parts.append(_runtime_label(extra["runtime"]))
     if extra.get("season") is not None:
@@ -173,33 +183,65 @@ def fiche_footer_line(hit: MediaHit) -> str:
     elif extra.get("seasons"):
         seasons = extra["seasons"]
         parts.append(f"{seasons} saison{'s' if seasons > 1 else ''}")
-    if extra.get("director"):
-        parts.append(extra["director"])
-    created = extra.get("created_by") or []
-    if created and not extra.get("director"):
-        parts.append(", ".join(created[:2]))
-    cast = extra.get("cast") or []
-    if cast:
-        parts.append(", ".join(cast))
-    if extra.get("album"):
-        parts.append(extra["album"])
+    if extra.get("total_tracks"):
+        tracks = extra["total_tracks"]
+        parts.append(f"{tracks} piste{'s' if tracks > 1 else ''}")
     if extra.get("duration"):
         parts.append(extra["duration"])
     if extra.get("explicit"):
         parts.append(EXPLICIT)
-    if extra.get("total_tracks"):
-        tracks = extra["total_tracks"]
-        parts.append(f"{tracks} piste{'s' if tracks > 1 else ''}")
+    price = _price_label(hit)
+    if price:
+        parts.append(price)
+    return "  ·  ".join(parts)
+
+
+def fiche_meta_line(hit: MediaHit) -> str:
+    """Auteur (réalisation, studio, artiste…) et genres."""
+    parts: list[str] = []
+    if hit.subtitle:
+        parts.append(hit.subtitle)
+    elif hit.extra.get("director"):
+        parts.append(hit.extra["director"])
+    elif hit.extra.get("created_by"):
+        parts.append(", ".join(hit.extra["created_by"][:2]))
+    if hit.genres:
+        parts.append(", ".join(hit.genres[:3]))
+    return "  ·  ".join(parts)
+
+
+def fiche_footer_line(hit: MediaHit) -> str:
+    """Détails secondaires et liens, en petit sous le résumé."""
+    extra = hit.extra
+    parts: list[str] = []
+    cast = extra.get("cast") or []
+    if cast:
+        parts.append("Avec " + ", ".join(cast[:3]))
+    if extra.get("album"):
+        parts.append(extra["album"])
     lang = extra.get("original_language") or ""
     if lang and lang != "fr":
-        parts.append(lang.upper())
+        parts.append(f"VO {LANGUAGES.get(lang, lang.upper())}")
+    links: list[str] = []
     if extra.get("trailer"):
-        parts.append(f"[Bande-annonce]({extra['trailer']})")
+        links.append(f"[Bande-annonce]({extra['trailer']})")
     if hit.url:
-        parts.append(f"[{_source_name(hit)}]({hit.url})")
-    elif hit.source:
-        parts.append(_source_name(hit))
+        links.append(f"[{_source_name(hit)}]({hit.url})")
+    if links:
+        parts.append("  ·  ".join(links))
     return "  ·  ".join(parts)
+
+
+def excerpt(text: str, limit: int = 300) -> str:
+    """Résumé coupé proprement : à la fin d'une phrase si possible, sinon entre deux mots."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sentence = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if sentence >= limit * 0.55:
+        return cut[: sentence + 1]
+    return cut[: cut.rfind(" ")].rstrip(" ,;:—-") + "…"
 
 
 def append_fiche_sections(
@@ -212,69 +254,42 @@ def append_fiche_sections(
     social_line: str = "",
     guild_name: str = "",
     skin: StarSkin | str | None = None,
-    pack_with_poster: bool = False,
 ) -> None:
-    head: list[str] = []
-    official = _official_line(hit, skin)
-    if official:
-        head.append(official)
+    """Notes (serveur en premier, source ensuite, puis la tienne), résumé, détails."""
+    notes: list[str] = []
+    server = pretty.shorten_text((guild_name or "Ce serveur").strip() or "Ce serveur", 32)
     if count:
-        stars = format_stars(avg or 0, skin)
-        label = pretty.shorten_text((guild_name or "Serveur").strip() or "Serveur", 40)
-        head.append(
-            f"**{label}** · {stars}  **{format_score(avg or 0, average=True)}**  ·  "
-            f"{count} critique{'s' if count > 1 else ''}"
+        notes.append(
+            f"**{server}**  {format_stars(avg or 0, skin)}  **{format_score(avg or 0, average=True)}**"
+            f"  ·  {count} critique{'s' if count > 1 else ''}"
         )
     else:
-        head.append("*Aucune note sur ce serveur pour l'instant.*")
+        notes.append(f"**{server}**  *pas encore noté*")
+    official = _official_line(hit, skin)
+    if official:
+        notes.append(official)
     if my_review:
-        comment = format_comment(
-            my_review.get("comment") or "",
-            spoiler=row_spoiler(my_review),
-            hide=False,
-            limit=180,
-        )
-        mine = f"__**Ta note**__ · {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
+        mine = f"**Ta note**  {format_stars(my_review['rating'], skin)}  **{format_score(my_review['rating'])}**"
+        comment = format_comment(my_review.get("comment") or "", spoiler=row_spoiler(my_review), hide=False, limit=180)
         if comment:
             mine += f"\n{comment}"
         seen = experienced_line(hit.media_type, experienced_from_row(my_review))
         if seen:
             mine += f"\n{seen}"
-        head.append(mine)
+        notes.append(mine)
     if social_line:
-        head.append(f"-# {social_line}")
-    price = _price_line(hit)
-    if price:
-        head.append(price)
+        notes.append(f"-# {social_line}")
+    body.append(sep_tight())
+    body.append(discord.ui.TextDisplay("\n".join(notes)))
 
-    tail: list[str] = []
-    overview = pretty.shorten_text(hit.overview, 380) if hit.overview else ""
-    if overview:
-        quoted = "\n".join(
-            f"> *{line}*" if line.strip() else ">"
-            for line in overview.splitlines()
-        )
-        tail.append(quoted)
-    elif not official and not count:
-        tail.append("-# Aucune description disponible.")
-
-    if pack_with_poster and hit.poster_url and (head or tail):
-        blocks = []
-        if head:
-            blocks.append("\n".join(head))
-        blocks.extend(tail)
-        try:
-            body.append(discord.ui.Section(
-                *blocks[:3],
-                accessory=discord.ui.Thumbnail(hit.poster_url),
-            ))
-            return
-        except Exception:
-            pass
-
-    body.append(section_with_thumbnail("\n".join(head), hit.poster_url))
-    if tail:
-        body.append(discord.ui.TextDisplay("\n".join(tail)))
+    summary = excerpt(hit.overview)
+    footer = fiche_footer_line(hit)
+    if summary or footer:
+        body.append(sep_tight())
+    if summary:
+        body.append(discord.ui.TextDisplay(f"> {summary}"))
+    if footer:
+        body.append(discord.ui.TextDisplay(f"-# {footer}"))
 
 
 def also_liked_line(hit: MediaHit, items: list[tuple[MediaHit, float, int]]) -> str:
@@ -356,19 +371,17 @@ def fiche_intro(
     backdrop: bool = True,
     replace_title: discord.ui.Item | None = None,
 ) -> list[discord.ui.Item]:
+    """En-tête : titre, l'essentiel (type, année, durée, prix), auteur et genres, avec l'affiche."""
+    lines: list[str] = []
+    if replace_title is None:
+        lines.append(f"## {type_emoji(hit.media_type)} {hit.title}")
+    lines.append(fiche_info_line(hit))
     meta = fiche_meta_line(hit)
-    if replace_title is not None:
-        items: list[discord.ui.Item] = [replace_title]
-        if meta:
-            items.append(discord.ui.TextDisplay(f"-# {meta}"))
-    else:
-        text = fiche_title_line(hit)
-        if meta:
-            text += f"\n-# {meta}"
-        items = [discord.ui.TextDisplay(text)]
-    if not backdrop:
-        return items
-    backdrop_url = hit.extra.get("backdrop_url")
+    if meta:
+        lines.append(f"-# {meta}")
+    items: list[discord.ui.Item] = [replace_title] if replace_title is not None else []
+    items.append(section_with_thumbnail("\n".join(lines), hit.poster_url))
+    backdrop_url = hit.extra.get("backdrop_url") if backdrop else None
     if backdrop_url:
         try:
             items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(backdrop_url)))
@@ -416,9 +429,6 @@ def render_published_fiche(
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
     )
-    footer = fiche_footer_line(hit)
-    if footer:
-        body.append(discord.ui.TextDisplay(f"-# {footer}"))
     if live:
         body.append(public_fiche_buttons(wid, FicheDynButton))
     view.add_item(discord.ui.Container(*with_control_separators(body)))
@@ -552,11 +562,7 @@ def render_compact_fiche(
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
-        pack_with_poster=True,
     )
-    footer = fiche_footer_line(hit)
-    if footer:
-        body.append(discord.ui.TextDisplay(f"-# {footer}"))
     if body:
         view.add_item(discord.ui.Container(*body))
     if wid:
