@@ -57,6 +57,7 @@ TRASH = "<:trash:1553496864538628196>"
 PLUS_SMALL = "<:plussmall:1553496866845360159>"
 MINUS_SMALL = "<:minussmall:1553496865624817865>"
 SETTINGS = "<:settings:1568616643456798811>"
+SHUFFLE = "🔀"  # remplacé par assets/emojis/shuffle.png à la synchro
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,9 @@ SETTINGS = "<:settings:1568616643456798811>"
 # ---------------------------------------------------------------------------
 # Chaque `assets/emojis/<nom>.png` est envoyé comme émoji d'application du bot
 # (visible partout, hors quota des serveurs). Le nom du fichier correspond au
-# nom dans les tags ci-dessus : `movie.png` remplace `<:movie:…>`.
+# nom dans les tags ci-dessus : `movie.png` remplace `<:movie:…>`. Pour un
+# émoji sans tag (valeur Unicode de secours), le nom de la constante en
+# minuscules : `SHUFFLE` ↔ `shuffle.png`.
 # Un PNG modifié est ré-envoyé au démarrage suivant (empreinte dans .sync.json).
 # Les constantes sans PNG gardent leur valeur ci-dessus.
 
@@ -131,6 +134,7 @@ async def sync_app_emojis(bot: discord.Client) -> None:
     for const, value in list(g.items()):
         if const.isupper() and isinstance(value, str):
             m = _TAG.fullmatch(value)
-            if m and m[1] in resolved:
-                g[const] = resolved[m[1]]
+            name = m[1] if m else const.lower()  # nouvel émoji : `SHUFFLE` ↔ shuffle.png
+            if name in resolved:
+                g[const] = resolved[name]
     _log.info(f"Émojis : {len(resolved)} synchronisé(s), dont {created} envoyé(s).")

@@ -15,6 +15,7 @@ import discord
 from utils import pretty
 
 from ..constants import NO_PINGS, REVIEWS_PAGE, logger
+from ..emojis import SHUFFLE
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -464,7 +465,9 @@ class RandomFicheButton(discord.ui.Button):
     """Ouvre une œuvre tirée au hasard dans `pool`."""
 
     def __init__(self, parent: ReviewsLayout, pool: list[MediaHit]):
-        super().__init__(label="Au hasard", emoji="🎲", style=discord.ButtonStyle.secondary, disabled=not pool)
+        super().__init__(
+            emoji=discord.PartialEmoji.from_str(SHUFFLE), style=discord.ButtonStyle.secondary, disabled=not pool
+        )
         self._hub = parent
         self._pool = pool
 
