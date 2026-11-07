@@ -380,8 +380,6 @@ class FicheView(ReviewsLayout):
             row.append(DeleteReviewButton(self))
         row.append(WatchlistButton(self))
         row.append(AddToListButton(self))
-        if not self.published_wid:  # déjà publique : pas de second partage
-            row.append(FicheShareButton(self))
         return [discord.ui.ActionRow(*row)]
 
     def _build(self) -> None:
@@ -413,6 +411,10 @@ class FicheView(ReviewsLayout):
         actions.extend(self._season_rows())
         actions.extend(self._action_rows())
         self.set_layout(body, *actions, above=[self._tabs_row()], sticky_head=sticky_head)
+        # Partager sous la carte, comme dans le carnet ; pas de second partage
+        # d'une fiche déjà publique, ni pendant une confirmation ou un choix de liste.
+        if not self.published_wid and not self.confirm_delete and not self.picking_list:
+            self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
 
 async def open_fiche(

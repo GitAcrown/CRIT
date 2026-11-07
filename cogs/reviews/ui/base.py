@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import discord
@@ -10,6 +11,8 @@ from discord.ext import commands
 from ..constants import MENU_TIMEOUT, NO_PINGS, logger
 from ..formatting import format_stars, format_stars_compact
 from ..progress import StarSkin
+
+NOTICE_TTL = 10  # secondes d'affichage d'un avis (« Critique enregistrée », « Ajouté »…)
 
 
 def _disable_interactive(item: discord.ui.Item) -> None:
@@ -171,6 +174,8 @@ class ReviewsLayout(discord.ui.LayoutView):
         self.parent: ReviewsLayout | None = None
         self.notice: str | None = None
         self._covered = False
+        self._layout_version = 0
+        self._notice_tasks: set[asyncio.Task] = set()
 
     def _build(self) -> None:
         """Construit le contenu ; chaque menu le redéfinit."""
@@ -275,6 +280,44 @@ class ReviewsLayout(discord.ui.LayoutView):
         except discord.HTTPException as exc:
             logger.warning("Impossible de rafraîchir %s : %s", type(self).__name__, exc)
 
+    def _schedule_notice_clear(
+        self,
+        version: int,
+        container: discord.ui.Container,
+        notice_items: tuple[discord.ui.Item, ...],
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._clear_notice_later(version, container, notice_items))
+        self._notice_tasks.add(task)
+        task.add_done_callback(self._notice_tasks.discard)
+
+    async def _clear_notice_later(
+        self,
+        version: int,
+        container: discord.ui.Container,
+        notice_items: tuple[discord.ui.Item, ...],
+    ) -> None:
+        await asyncio.sleep(NOTICE_TTL)
+        # Menu redessiné entre-temps (l'avis est déjà parti), fermé ou recouvert : rien à faire.
+        if version != self._layout_version or self.is_finished() or self._covered:
+            return
+        kept: list[discord.ui.Item] = []
+        for item in container.children:
+            if any(item is n for n in notice_items):
+                continue
+            if _is_separator(item) and (not kept or _is_separator(kept[-1])):
+                continue
+            kept.append(item)
+        while kept and _is_separator(kept[-1]):
+            kept.pop()
+        container.clear_items()
+        for item in kept:
+            container.add_item(item)
+        await self.push()
+
     def set_layout(
         self,
         body: list[discord.ui.Item],
@@ -296,8 +339,12 @@ class ReviewsLayout(discord.ui.LayoutView):
         for item in above:
             self.add_item(item)
         children = list(body)
+        self._layout_version += 1
+        notice_items: tuple[discord.ui.Item, ...] = ()
         if self.notice:
-            children.append(discord.ui.TextDisplay(self.notice))
+            # Avis séparé de la fiche, puis effacé au bout de NOTICE_TTL secondes.
+            notice_items = (sep_tight(), discord.ui.TextDisplay(self.notice))
+            children.extend(notice_items)
             self.notice = None
         for row in rows:
             if row is None:
@@ -307,7 +354,10 @@ class ReviewsLayout(discord.ui.LayoutView):
             head = children[:sticky_head]
             children = head + with_control_separators(children[sticky_head:])
         if children:
-            self.add_item(discord.ui.Container(*children, accent_colour=self.accent_colour))
+            container = discord.ui.Container(*children, accent_colour=self.accent_colour)
+            self.add_item(container)
+            if notice_items:
+                self._schedule_notice_clear(self._layout_version, container, notice_items)
 
 
 def sep_tight() -> discord.ui.Separator:
