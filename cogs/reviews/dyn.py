@@ -21,7 +21,6 @@ from typing import Any, Iterator
 
 import discord
 
-from .emojis import MORE
 from .providers import MediaHit
 
 logger = logging.getLogger("CRIT.Reviews.Dyn")
@@ -279,7 +278,7 @@ async def sweep_expired(bot: Any, render) -> None:
 
 class FicheDynButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"ack:rev:(?P<wid>[0-9a-f]{8}):(?P<act>fiche|critiques|noter|voir)",
+    template=r"ack:rev:(?P<wid>[0-9a-f]{8}):(?P<act>fiche|critiques|noter|voir|rate|open)",
 ):
     def __init__(
         self,
@@ -332,7 +331,7 @@ class FicheDynButton(
 
 class AnnounceDynButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"ack:ann:(?P<wid>[0-9a-f]{8}):(?P<act>noter)",
+    template=r"ack:ann:(?P<wid>[0-9a-f]{8}):(?P<act>noter|rate|open)",
 ):
     def __init__(
         self,
@@ -347,7 +346,7 @@ class AnnounceDynButton(
             discord.ui.Button(
                 style=style,
                 label=(label[:80] if label else None),
-                emoji=emoji or discord.PartialEmoji.from_str(MORE),
+                emoji=emoji or None,
                 custom_id=f"ack:ann:{wid}:{action}",
             )
         )

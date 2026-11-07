@@ -24,7 +24,7 @@ from ..dyn import (
     mark_stripped,
     update_payload,
 )
-from ..emojis import EXPLICIT, MORE, PLANNING, SALE, STREAMING
+from ..emojis import EXPLICIT, PLANNING, SALE, STREAMING
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -381,6 +381,18 @@ def _link_label(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, "Fiche")
 
 
+def public_fiche_buttons(wid: str, button: type) -> discord.ui.ActionRow:
+    """Boutons d'un message public, utilisables par tout le monde.
+
+    Chacun agit pour la personne qui clique, jamais sur le message public :
+    Noter ouvre son formulaire, Ouvrir lui affiche la fiche en privé.
+    """
+    return discord.ui.ActionRow(
+        button(wid, "rate", label="Noter", style=discord.ButtonStyle.green),
+        button(wid, "open", label="Ouvrir", style=discord.ButtonStyle.secondary),
+    )
+
+
 def render_published_fiche(
     hit: MediaHit,
     *,
@@ -408,10 +420,7 @@ def render_published_fiche(
     if footer:
         body.append(discord.ui.TextDisplay(f"-# {footer}"))
     if live:
-        body.append(discord.ui.ActionRow(
-            FicheDynButton(wid, "critiques", label=f"Critiques ({count})"),
-            FicheDynButton(wid, "noter", label="Actions", emoji=MORE, style=discord.ButtonStyle.green),
-        ))
+        body.append(public_fiche_buttons(wid, FicheDynButton))
     view.add_item(discord.ui.Container(*with_control_separators(body)))
     return view
 
@@ -536,7 +545,7 @@ def render_compact_fiche(
     guild_name: str = "",
     wid: str | None = None,
 ) -> discord.ui.LayoutView:
-    """Fiche postée en réponse à un lien : sans image large, avec le bouton Actions."""
+    """Fiche postée en réponse à un lien : sans image large, avec les boutons Noter et Ouvrir."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
     body.extend(stream_live_items(stream_channels or [], plans))
@@ -551,9 +560,7 @@ def render_compact_fiche(
     if body:
         view.add_item(discord.ui.Container(*body))
     if wid:
-        view.add_item(discord.ui.ActionRow(
-            FicheDynButton(wid, "noter", label="Actions", emoji=MORE),
-        ))
+        view.add_item(public_fiche_buttons(wid, FicheDynButton))
     return view
 
 
@@ -683,7 +690,7 @@ def build_announce_view(
     container.add_item(discord.ui.TextDisplay(f"-# {fiche_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
     view.add_item(container)
     if live and wid:
-        view.add_item(discord.ui.ActionRow(AnnounceDynButton(wid, label="Actions")))
+        view.add_item(public_fiche_buttons(wid, AnnounceDynButton))
     return view
 
 

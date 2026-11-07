@@ -24,7 +24,7 @@ from ..providers import MediaHit
 from ..streaming import member_stream_source, member_voice_channel_id
 from .base import apply_view, replace_ephemeral_layout, ReviewsLayout, sep_tight
 from .fiche import section_with_thumbnail, stream_mini_items
-from .navigation import open_session_followup
+from .session import OpenFicheSelect
 
 if TYPE_CHECKING:
     from ..reviews import Reviews
@@ -88,9 +88,7 @@ class StreamMiniBindButton(discord.ui.Button):
             source=source,
             post_channel_id=int(interaction.channel_id or 0),
         )
-        hub = await StreamHubView.create(self._hub.cog, guild, interaction.user.id)
-        self._hub.stop()
-        await apply_view(interaction, hub)
+        await go_to_stream_hub(self._hub, interaction, f"**Stream ·** {self._hub.hit.title} est lié à ton live.")
         if old is None or hit_identity(old["hit"]) != hit_identity(self._hub.hit):
             await self._hub.cog.announce_stream_link(
                 guild, interaction.user.id, self._hub.hit, int(interaction.channel_id or 0),
@@ -211,10 +209,11 @@ class StreamUnlinkButton(discord.ui.Button):
 
 
 class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
-    def __init__(self, cog: "Reviews", guild: discord.Guild):
+    def __init__(self, hub: "StreamHubView"):
         super().__init__()
-        self.cog = cog
-        self.guild = guild
+        self.hub = hub
+        self.cog = hub.cog
+        self.guild = hub.guild
         self.query_input = discord.ui.TextInput(
             label="Titre de l'œuvre",
             placeholder="Ex. Dune 2021, Hades, Blonde…",
@@ -228,22 +227,16 @@ class StreamSearchModal(discord.ui.Modal, title="Lier mon stream"):
         guild = self.guild
         member = guild.get_member(interaction.user.id)
         if member_stream_source(member or interaction.user) is None:
-            await interaction.followup.send(
-                "**Stream ·** Tu n'es plus en live. Relance un Go Live, puis réessaie.",
-                ephemeral=True,
-            )
+            await self.hub.reload(interaction, "**Stream ·** Tu n'es plus en live. Relance un Go Live, puis réessaie.")
             return
         resolved_type = await self.cog._resolve_search_type(guild, interaction.user.id, None)
-        hits = await self.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
-        if not hits:
+        hits, error = await self.cog.search_hits(str(self.query_input.value), resolved_type)
+        if error:
+            await self.hub.reload(interaction, error)
             return
-        view = StreamBindView(
-            self.cog,
-            guild,
-            hits,
-            author_id=interaction.user.id,
-        )
-        await view.start(interaction, deferred=True)
+        view = StreamBindView(self.cog, guild, hits, author_id=interaction.user.id)
+        await view.prepare()
+        await self.hub.open(interaction, view)
 
 
 class StreamHubBindButton(discord.ui.Button):
@@ -259,38 +252,19 @@ class StreamHubBindButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(StreamSearchModal(self._hub.cog, self._hub.guild))
+        await interaction.response.send_modal(StreamSearchModal(self._hub))
 
 
-class StreamHubOpenSelect(discord.ui.Select):
-    def __init__(self, parent: "StreamHubView", links: list[dict[str, Any]]):
-        options = []
-        for index, link in enumerate(links[:25]):
-            hit: MediaHit = link["hit"]
-            member = parent.guild.get_member(link["user_id"])
-            who = member.display_name if member else "Membre"
-            year = f" · {hit.year}" if hit.year else ""
-            options.append(
-                discord.SelectOption(
-                    label=pretty.shorten_text(hit.title, 95) or "Sans titre",
-                    value=str(index),
-                    description=pretty.shorten_text(
-                        f"{who} · {type_label(hit.media_type)}{year}",
-                        95,
-                    ),
-                    emoji=select_emoji(hit.media_type),
-                )
-            )
-        super().__init__(placeholder="Ouvrir une fiche", options=options)
-        self._hub = parent
-        self._links = links
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        hit = self._links[int(self.values[0])]["hit"]
-        await interaction.response.defer()
-        await open_session_followup(
-            self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
-        )
+def live_fiche_select(parent: "StreamHubView") -> OpenFicheSelect:
+    links = parent.links[:25]
+    descriptions = []
+    for link in links:
+        hit: MediaHit = link["hit"]
+        member = parent.guild.get_member(link["user_id"])
+        who = member.display_name if member else "Membre"
+        year = f" · {hit.year}" if hit.year else ""
+        descriptions.append(f"{who} · {type_label(hit.media_type)}{year}")
+    return OpenFicheSelect(parent, [link["hit"] for link in links], descriptions=descriptions)
 
 
 class StreamPlanHitSelect(discord.ui.Select):
@@ -329,10 +303,13 @@ class StreamPlanConfirmButton(discord.ui.Button):
             self._hub.starts_at,
         )
         if err:
-            await interaction.followup.send(f"**Stream ·** {err}", ephemeral=True)
+            self._hub.notice = f"**Stream ·** {err}"
+            self._hub._build()
+            await self._hub.push(interaction)
             return
-        view = await StreamHubView.create(self._hub.cog, self._hub.guild, interaction.user.id)
-        await apply_view(interaction, view)
+        await go_to_stream_hub(
+            self._hub, interaction, f"**Planifié ·** {self._hub.hit.title}, <t:{self._hub.starts_at}:f>."
+        )
 
 
 class StreamPlanPickView(ReviewsLayout):
@@ -381,10 +358,11 @@ class StreamPlanPickView(ReviewsLayout):
 
 
 class StreamPlanModal(discord.ui.Modal, title="Planifier un stream"):
-    def __init__(self, cog: "Reviews", guild: discord.Guild):
+    def __init__(self, hub: "StreamHubView"):
         super().__init__()
-        self.cog = cog
-        self.guild = guild
+        self.hub = hub
+        self.cog = hub.cog
+        self.guild = hub.guild
         self.query_input = discord.ui.TextInput(
             label="Titre de l'œuvre",
             placeholder="Ex. Dune 2021, Hades, Blonde…",
@@ -413,28 +391,20 @@ class StreamPlanModal(discord.ui.Modal, title="Planifier un stream"):
         await interaction.response.defer()
         stamp, err = parse_plan_datetime(str(self.date_input.value), str(self.time_input.value))
         if err or stamp is None:
-            await interaction.followup.send(f"**Stream ·** {err or 'Date invalide.'}", ephemeral=True)
+            await self.hub.reload(interaction, f"**Stream ·** {err or 'Date invalide.'}")
             return
         resolved_type = await self.cog._resolve_search_type(self.guild, interaction.user.id, None)
-        hits = await self.cog._search_or_reply(interaction, str(self.query_input.value), resolved_type)
-        if not hits:
+        hits, error = await self.cog.search_hits(str(self.query_input.value), resolved_type)
+        if error:
+            await self.hub.reload(interaction, error)
             return
         if len(hits) == 1:
             save_err = await self.cog.create_stream_plan(self.guild, interaction.user.id, hits[0], stamp)
-            if save_err:
-                await interaction.followup.send(f"**Stream ·** {save_err}", ephemeral=True)
-                return
-            view = await StreamHubView.create(self.cog, self.guild, interaction.user.id)
-            await apply_view(interaction, view)
+            notice = f"**Stream ·** {save_err}" if save_err else f"**Planifié ·** {hits[0].title}, <t:{stamp}:f>."
+            await self.hub.reload(interaction, notice)
             return
-        view = StreamPlanPickView(
-            self.cog,
-            self.guild,
-            hits,
-            author_id=interaction.user.id,
-            starts_at=stamp,
-        )
-        await apply_view(interaction, view)
+        view = StreamPlanPickView(self.cog, self.guild, hits, author_id=interaction.user.id, starts_at=stamp)
+        await self.hub.open(interaction, view)
 
 
 class StreamHubPlanButton(discord.ui.Button):
@@ -450,7 +420,7 @@ class StreamHubPlanButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(StreamPlanModal(self._hub.cog, self._hub.guild))
+        await interaction.response.send_modal(StreamPlanModal(self._hub))
 
 
 class StreamPlanInterestButton(discord.ui.Button):
@@ -521,14 +491,18 @@ class StreamHubView(ReviewsLayout):
             live=member_stream_source(member) is not None if member else False,
         )
 
-    async def reload(self, interaction: discord.Interaction) -> None:
+    async def reload(self, interaction: discord.Interaction, notice: str | None = None) -> None:
         self.links = await self.cog.list_active_stream_links(self.guild)
         self.plans = await self.cog.list_upcoming_plans(self.guild, self.viewer_id)
         self.mine = await self.cog.get_stream_link(self.guild, self.viewer_id)
         member = self.guild.get_member(self.viewer_id)
         self.live = member_stream_source(member) is not None if member else False
+        self.notice = notice or self.notice
         self._build()
-        await apply_view(interaction, self)
+        await self.push(interaction)
+
+    async def on_return(self, interaction: discord.Interaction) -> None:
+        await self.reload(interaction)
 
     def _plan_block(self, plan: dict[str, Any]) -> discord.ui.Item:
         hit: MediaHit = plan["hit"]
@@ -575,7 +549,7 @@ class StreamHubView(ReviewsLayout):
                 )
                 body.append(sep_tight())
                 body.append(section_with_thumbnail(text, hit.poster_url))
-            actions.append(discord.ui.ActionRow(StreamHubOpenSelect(self, self.links)))
+            actions.append(discord.ui.ActionRow(live_fiche_select(self)))
         elif not self.plans:
             body.append(discord.ui.TextDisplay(
                 "*Aucun live ni stream planifié. **Planifier** une date, "
@@ -588,6 +562,19 @@ class StreamHubView(ReviewsLayout):
             row.append(StreamHubBindButton(self))
         actions.append(discord.ui.ActionRow(*row))
         self.set_layout(body, *actions)
+
+
+async def go_to_stream_hub(view: ReviewsLayout, interaction: discord.Interaction, notice: str) -> None:
+    """Retour aux lives après avoir lié ou planifié ; crée le menu s'il n'existait pas (`/stream titre`)."""
+    view.notice = notice
+    if view.parent is not None:
+        await view.go_back(interaction)
+        return
+    hub = await StreamHubView.create(view.cog, view.guild, interaction.user.id)  # type: ignore[attr-defined]
+    hub.notice = notice
+    hub._build()
+    view.stop()
+    await hub.push(interaction)
 
 
 class StreamRemindView(ReviewsLayout):

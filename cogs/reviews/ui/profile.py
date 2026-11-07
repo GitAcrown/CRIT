@@ -8,7 +8,7 @@ import discord
 
 from utils import pretty
 
-from ..constants import JOURNAL_PAGE, NO_PINGS, TYPE_CHOICES
+from ..constants import JOURNAL_PAGE, TYPE_CHOICES
 from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
 from ..formatting import (
     experienced_from_row,
@@ -23,7 +23,6 @@ from ..formatting import (
     mention_of,
     pick_rating_highlights,
     row_spoiler,
-    select_emoji,
     titled,
     type_emoji,
     type_label,
@@ -40,16 +39,17 @@ from ..providers import MediaHit
 from .actions import share_button_kwargs
 from .base import (
     apply_view,
-    bind_view_message,
     discard_ephemeral_menu,
+    page_nav,
     publish_layout_message,
     ReviewsLayout,
     sep_tight,
     sep_wide,
+    TabButton,
 )
 from .fiche import section_with_thumbnail
-from .navigation import open_public_fiche, open_session_followup
-from .session import HubPageButton, HubTabButton, ProfileShareButton
+from .preferences import PreferencesView
+from .session import OpenFicheSelect, RandomFicheButton
 
 if TYPE_CHECKING:
     from ..reviews import Reviews
@@ -140,30 +140,39 @@ class CycleSortButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
-class WatchlistOpenSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView", page_items: list[tuple[MediaHit, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(hit.title, 95) or "Sans titre",
-                value=str(index),
-                description=pretty.shorten_text(f"{type_label(hit.media_type)} · {hit.year or '—'}", 95),
-                emoji=select_emoji(hit.media_type),
-            )
-            for index, (hit, _row) in enumerate(page_items)
-        ]
-        super().__init__(placeholder="Ouvrir une fiche", options=options)
+class ProfileShareButton(discord.ui.Button):
+    def __init__(self, parent: "ProfileView"):
+        super().__init__(**share_button_kwargs())
         self._hub = parent
-        self._items = page_items
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        hit, _row = self._items[int(self.values[0])]
         await interaction.response.defer()
-        if self._hub.editable:
-            await open_session_followup(
-                self._hub.cog, self._hub.guild, interaction, hit, author_id=interaction.user.id,
-            )
+        body: list[discord.ui.Item] = [self._hub._header_item(avatar=True)]
+        content = self._hub._profil_content()
+        if content:
+            body.append(sep_wide())
+            body.extend(content)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(*body, accent_colour=self._hub.accent_colour))
+        message = await publish_layout_message(interaction, view)
+        if message is None:
+            await interaction.followup.send("**Erreur ·** Impossible de publier ce profil.", ephemeral=True)
             return
-        await open_public_fiche(self._hub.cog, self._hub.guild, interaction, hit)
+        self._hub.stop()
+        await discard_ephemeral_menu(interaction)
+
+
+class SettingsTabButton(discord.ui.Button):
+    """Onglet Réglages de son propre carnet : préférences et skins d'étoiles."""
+
+    def __init__(self, parent: "ProfileView"):
+        super().__init__(label="Réglages", emoji="⚙️", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        view = await PreferencesView.create(self._hub.cog, self._hub.guild, self._hub.member)
+        await self._hub.open(interaction, view)
 
 
 class AffinityCompareSelect(discord.ui.Select):
@@ -197,11 +206,7 @@ class AffinityCompareSelect(discord.ui.Select):
             left_skin=await cog.star_skin_for(guild, self._hub.member.id),
             right_skin=await cog.star_skin_for(guild, other_id),
         )
-        view._interaction = interaction
-        bind_view_message(
-            view,
-            await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_PINGS),
-        )
+        await self._hub.open(interaction, view)
 
 
 class AffinityShareButton(discord.ui.Button):
@@ -222,8 +227,9 @@ class AffinityShareButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        self._hub.stop()
-        await discard_ephemeral_menu(interaction)
+        self._hub.notice = f"**Partagé ·** {message.jump_url}"
+        self._hub._build()
+        await self._hub.push(interaction)
 
 
 class AffinityCompareView(ReviewsLayout):
@@ -293,24 +299,16 @@ class AffinityCompareView(ReviewsLayout):
 
 
 class ProfileView(ReviewsLayout):
+    """Carnet : Profil · Journal · Signets · Affinités (+ Réglages sur son propre carnet)."""
+
     def __init__(
         self,
         cog: "Reviews",
         guild: discord.Guild,
         member: discord.Member | discord.User,
         *,
-        xp: int,
-        review_count: int,
-        average: float | None,
-        twin: Affinity | None,
-        rival: Affinity | None,
-        titles: dict[int, str],
-        journal_entries: list[tuple[MediaHit, Any]],
-        watchlist_entries: list[tuple[MediaHit, Any]],
-        affinities: list[Affinity],
         viewer_id: int,
         tab: str = "profil",
-        star_skin: StarSkin | None = None,
         accent: discord.Colour | None = None,
     ):
         super().__init__()
@@ -318,32 +316,64 @@ class ProfileView(ReviewsLayout):
         self.guild = guild
         self.member = member
         self.accent_colour = accent
-        self.xp = xp
-        self.review_count = review_count
-        self.average = average
-        self.twin = twin
-        self.rival = rival
-        self.titles = titles
-        self.journal_entries = journal_entries
-        self.watchlist_entries = watchlist_entries
-        self._highlights = pick_rating_highlights(journal_entries)
-        self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
         self.viewer_id = viewer_id
         self.editable = viewer_id == member.id
         self.tab = tab
-        self.star_skin = star_skin
+        self.xp = 0
+        self.review_count = 0
+        self.average: float | None = None
+        self.titles: dict[int, str] = {}
+        self.journal_entries: list[tuple[MediaHit, Any]] = []
+        self.watchlist_entries: list[tuple[MediaHit, Any]] = []
+        self.affinities: list[Affinity] = []
+        self._highlights: list[tuple[str, MediaHit, float | None]] = []
         self.journal_page = 0
         self.watchlist_page = 0
         self.journal_type = "all"
         self.journal_sort = "recent"
         self.journal_ongoing = False
-        self._interaction: discord.Interaction | None = None
+
+    @classmethod
+    async def create(
+        cls,
+        cog: "Reviews",
+        guild: discord.Guild,
+        member: discord.Member | discord.User,
+        *,
+        viewer_id: int,
+        accent: discord.Colour | None = None,
+    ) -> "ProfileView":
+        view = cls(cog, guild, member, viewer_id=viewer_id, accent=accent)
+        await view.load()
+        view._build()
+        return view
+
+    async def load(self) -> None:
+        cog, guild, member_id = self.cog, self.guild, self.member.id
+        self.xp = await cog.get_profile_xp(guild, member_id)
+        self.journal_entries = await cog.load_journal(guild, member_id)
+        self.review_count = len(self.journal_entries)
+        self.average = (
+            sum(float(row["rating"]) for _hit, row in self.journal_entries) / self.review_count
+            if self.journal_entries else None
+        )
+        self._highlights = pick_rating_highlights(self.journal_entries)
+        self.watchlist_entries = await cog.load_watchlist(guild, member_id)
+        affinities = await cog.list_affinities(guild, member_id)
+        self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
+        self.titles = await cog.get_titles(guild, [member_id, *[item.user_id for item in self.affinities]])
+        self.star_skin = await cog.star_skin_for(guild, member_id)
+
+    async def on_return(self, interaction: discord.Interaction) -> None:
+        # Une note, un signet ou un skin a pu changer depuis la fiche ou les réglages.
+        await self.load()
         self._build()
+        await self.push(interaction)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.viewer_id:
             await interaction.response.send_message(
-                "**Action impossible ·** Ce profil ne s'affiche que pour toi.",
+                "**Action impossible ·** Ce carnet ne s'affiche que pour toi.",
                 ephemeral=True,
                 delete_after=10,
             )
@@ -381,12 +411,15 @@ class ProfileView(ReviewsLayout):
         return discord.ui.TextDisplay(self._profile_header())
 
     def _tabs_row(self) -> discord.ui.ActionRow:
-        return discord.ui.ActionRow(
-            HubTabButton(self, "profil", None, emoji=HOUSE),
-            HubTabButton(self, "journal", str(self.review_count), emoji=JOURNAL),
-            HubTabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_LIST),
-            HubTabButton(self, "affinites", str(len(self.affinities)), emoji=AFFINITY),
-        )
+        tabs: list[discord.ui.Item] = [
+            TabButton(self, "profil", None, emoji=HOUSE),
+            TabButton(self, "journal", str(self.review_count), emoji=JOURNAL),
+            TabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_LIST),
+            TabButton(self, "affinites", str(len(self.affinities)), emoji=AFFINITY),
+        ]
+        if self.editable and self.parent is None:
+            tabs.append(SettingsTabButton(self))
+        return discord.ui.ActionRow(*tabs)
 
     def _assemble(
         self,
@@ -424,16 +457,6 @@ class ProfileView(ReviewsLayout):
             )
         return items
 
-    def _page_nav(self, attr: str, max_page: int) -> discord.ui.ActionRow | None:
-        if max_page <= 0:
-            return None
-        page = getattr(self, attr)
-        prev_btn = HubPageButton(self, attr, -1, "←", max_page)
-        next_btn = HubPageButton(self, attr, 1, "→", max_page)
-        prev_btn.disabled = page <= 0
-        next_btn.disabled = page >= max_page
-        return discord.ui.ActionRow(prev_btn, next_btn)
-
     def _highlight_block(self, label: str, hit: MediaHit, rating: float | None) -> discord.ui.Item:
         year = f"  ·  {hit.year}" if hit.year else ""
         lines = [
@@ -459,28 +482,18 @@ class ProfileView(ReviewsLayout):
             content.append(discord.ui.TextDisplay(graph))
         return content
 
-    def _journal_nav(self, max_page: int) -> discord.ui.ActionRow:
-        sort = CycleSortButton(self, "journal_sort", "journal_page")
-        ongoing = JournalOngoingButton(self)
-        if max_page <= 0:
-            return discord.ui.ActionRow(sort, ongoing)
-        prev_btn = HubPageButton(self, "journal_page", -1, "←", max_page)
-        next_btn = HubPageButton(self, "journal_page", 1, "→", max_page)
-        prev_btn.disabled = self.journal_page <= 0
-        next_btn.disabled = self.journal_page >= max_page
-        return discord.ui.ActionRow(prev_btn, sort, ongoing, next_btn)
-
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
         entries = self._filtered_journal()
         filters = [discord.ui.ActionRow(JournalTypeSelect(self))]
         content: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
+        controls = (CycleSortButton(self, "journal_sort", "journal_page"), JournalOngoingButton(self))
         if not self.journal_entries:
             content.append(discord.ui.TextDisplay("*Aucune œuvre notée pour l'instant.*"))
             return content, filters, actions
         if not entries:
             content.append(discord.ui.TextDisplay("*Aucune œuvre pour ce filtre.*"))
-            actions.append(self._journal_nav(0))
+            actions.append(discord.ui.ActionRow(*controls))
             return content, filters, actions
         max_page = max(0, (len(entries) - 1) // JOURNAL_PAGE)
         self.journal_page = min(self.journal_page, max_page)
@@ -492,19 +505,19 @@ class ProfileView(ReviewsLayout):
                 content.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
             text = f"{self.stars(row['rating'])}  **{hit.title}**{year}\n-# {type_label(hit.media_type)}"
-            shown = format_comment(
-                row["comment"] or "",
-                spoiler=row_spoiler(row),
-                hide=hide,
-                limit=180,
-            )
+            shown = format_comment(row["comment"] or "", spoiler=row_spoiler(row), hide=hide, limit=180)
             if shown:
                 text += f"\n{shown}"
             seen = experienced_line(hit.media_type, experienced_from_row(row))
             if seen:
                 text += f"\n{seen}"
             content.append(section_with_thumbnail(text, hit.poster_url))
-        actions.append(self._journal_nav(max_page))
+        actions.append(discord.ui.ActionRow(OpenFicheSelect(
+            self,
+            [hit for hit, _row in page_items],
+            descriptions=[f"{type_label(hit.media_type)} · {format_score(row['rating'])}" for hit, row in page_items],
+        )))
+        actions.append(page_nav(self, "journal_page", max_page, *controls))
         return content, filters, actions
 
     def _watchlist_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow]]:
@@ -512,7 +525,7 @@ class ProfileView(ReviewsLayout):
         actions: list[discord.ui.ActionRow] = []
         if not self.watchlist_entries:
             empty = (
-                "*Aucun signet pour l'instant.*"
+                "*Aucun signet pour l'instant. Ajoute-en depuis une fiche avec le bouton Signet.*"
                 if self.editable
                 else "*Pas de signet.*"
             )
@@ -526,19 +539,17 @@ class ProfileView(ReviewsLayout):
             if index:
                 content.append(sep_tight())
             year = f" ({hit.year})" if hit.year else ""
-            added = 0
-            try:
-                added = int(row["added_at"] or 0)
-            except (KeyError, IndexError, TypeError):
-                if isinstance(row, dict):
-                    added = int(row.get("added_at") or 0)
+            added = int(row["added_at"] or 0)
             when = f" · ajouté <t:{added}:R>" if added else ""
             text = f"**{hit.title}**{year}\n-# {type_label(hit.media_type)}{when}"
             content.append(section_with_thumbnail(text, hit.poster_url))
-        actions.append(discord.ui.ActionRow(WatchlistOpenSelect(self, page_items)))
-        nav = self._page_nav("watchlist_page", max_page)
-        if nav:
-            actions.append(nav)
+        actions.append(discord.ui.ActionRow(OpenFicheSelect(
+            self,
+            [hit for hit, _row in page_items],
+            descriptions=[f"{type_label(hit.media_type)} · {hit.year or '—'}" for hit, _row in page_items],
+        )))
+        random_btn = RandomFicheButton(self, [hit for hit, _row in self.watchlist_entries])
+        actions.append(page_nav(self, "watchlist_page", max_page, random_btn))
         return content, actions
 
     def _affinity_line(self, item: Affinity) -> str:
@@ -589,8 +600,3 @@ class ProfileView(ReviewsLayout):
         else:
             self._assemble(self._header_item(avatar=True), self._profil_content())
         self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))
-
-    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
-        self.watchlist_entries = await self.cog.load_watchlist(self.guild, self.member.id)
-        self._build()
-        await self.push(interaction)

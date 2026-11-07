@@ -14,15 +14,15 @@ Un message qui n'est qu'un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open L
 
 ## Commandes
 
-- `/search` — catalogues externes : fiche, noter ou signet (autocomplete dès 2 lettres)
-- `/stream` — lives en cours (fiches liées) ; lie le tien pour poster la fiche à la fin
-- `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet)
-- `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue et top
-- `/listes` — listes communes : titre, description, droits d'édition, tirage (autocomplete pour ouvrir une liste)
-- `/tirage` — tire une œuvre au hasard (tes signets, ceux d'un membre, ou une liste commune)
-- `/preferences` — tes défauts : date vu/joué/lu, édition des nouvelles listes, types de recherche, annonces
+- `/search` — catalogues externes : fiche, noter, signet ou liste (autocomplete dès 2 lettres)
+- `/stream` — lives en cours (fiches liées) ; lie le tien ou planifie un stream
+- `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet) ; sur ton carnet, **Réglages** regroupe préférences et skins d'étoiles
+- `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue, top et pour toi
+- `/listes` — listes communes : titre, description, droits d'édition (autocomplete pour ouvrir une liste)
 - `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
+
+Chaque commande ouvre un seul message privé : choisir une œuvre y affiche sa fiche, **Retour** ramène au menu précédent, et **Au hasard** tire une œuvre dans les signets, une liste ou le catalogue. Sur une fiche publiée dans le salon, utilisable par tous, **Noter** ouvre directement le formulaire de la personne qui clique et **Ouvrir** lui affiche la fiche en privé.
 
 ## Administration
 
@@ -37,7 +37,7 @@ Commandes propriétaire (préfixe `&`) : `ping`, `restart`, `update` (git pull +
 - `database.py` — schéma de `data/carnet.db` et fusion des anciennes bases par serveur
 - `providers.py` — catalogues externes ; `links.py` — reconnaissance des liens
 - `constants.py`, `formatting.py`, `prefs.py`, `progress.py`, `streaming.py` — briques sans Discord
-- `ui/` — les menus : `base` (socle), `fiche`, `actions`, `note`, `session`, `navigation`, `streams`, `profile`, `lists`, `server`, `settings`
+- `ui/` — les menus : `base` (socle, onglets, Retour), `fiche` (rendu et messages publics), `session` (fiche privée unique), `actions` (ses boutons), `navigation` (clics sur les messages publics), `streams`, `profile`, `preferences`, `lists`, `server`, `settings` (config et aide)
 
 Au premier démarrage, les anciennes bases `data/guild_<id>.db` sont fusionnées dans `data/carnet.db` puis rangées dans `data/legacy/` (jamais supprimées). Une même œuvre notée sur deux serveurs garde la note la plus récente ; l'XP des serveurs s'additionne.
 

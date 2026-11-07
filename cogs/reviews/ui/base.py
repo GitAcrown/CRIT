@@ -12,10 +12,6 @@ from ..formatting import format_stars, format_stars_compact
 from ..progress import StarSkin
 
 
-def labeled_tabs(*labels: str) -> tuple[str, ...]:
-    return labels
-
-
 def _disable_interactive(item: discord.ui.Item) -> None:
     if getattr(item, "disabled", None) is False:
         item.disabled = True  # type: ignore[attr-defined]
@@ -83,17 +79,6 @@ async def discard_ephemeral_menu(interaction: discord.Interaction) -> None:
         pass
 
 
-async def send_ephemeral_notice(interaction: discord.Interaction, content: str, *, delay: float = 10) -> None:
-    """Court message éphémère, retiré tout seul."""
-    message = await interaction.followup.send(content, ephemeral=True)
-    if message is None:
-        return
-    try:
-        await message.delete(delay=delay)
-    except discord.HTTPException:
-        pass
-
-
 async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutView) -> None:
     """Met à jour le message cliqué, pas le defer d'origine."""
     kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
@@ -113,8 +98,69 @@ async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutVi
     bind_view_message(view, message)
 
 
+class TabButton(discord.ui.Button):
+    """Onglet : `parent.tab` prend la valeur `tab`, l'onglet actif est en bleu."""
+
+    def __init__(self, parent: Any, tab: str, label: str | None, *, emoji: str | None = None):
+        super().__init__(
+            label=label,
+            emoji=discord.PartialEmoji.from_str(emoji) if emoji else None,
+            style=discord.ButtonStyle.primary if parent.tab == tab else discord.ButtonStyle.secondary,
+        )
+        self._hub = parent
+        self._tab = tab
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.tab = self._tab
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class PageButton(discord.ui.Button):
+    """Flèche de pagination sur l'attribut `attr` du menu, grisée en bout de course."""
+
+    def __init__(self, parent: Any, attr: str, delta: int, label: str, max_page: int):
+        target = getattr(parent, attr) + delta
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, disabled=not 0 <= target <= max_page)
+        self._hub = parent
+        self._attr = attr
+        self._delta = delta
+        self._max_page = max_page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        current = getattr(self._hub, self._attr)
+        setattr(self._hub, self._attr, max(0, min(self._max_page, current + self._delta)))
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+def page_nav(parent: Any, attr: str, max_page: int, *middle: discord.ui.Item) -> discord.ui.ActionRow | None:
+    """← [contrôles du milieu] → ; seulement les contrôles s'il n'y a qu'une page."""
+    if max_page <= 0:
+        return discord.ui.ActionRow(*middle) if middle else None
+    return discord.ui.ActionRow(
+        PageButton(parent, attr, -1, "←", max_page),
+        *middle,
+        PageButton(parent, attr, 1, "→", max_page),
+    )
+
+
+class BackButton(discord.ui.Button):
+    def __init__(self, parent: "ReviewsLayout"):
+        super().__init__(label="Retour", emoji="↩️", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self._hub.go_back(interaction)
+
+
 class ReviewsLayout(discord.ui.LayoutView):
-    """LayoutView CRIT : un Container (texte + ActionRows), comme MARIA."""
+    """LayoutView CRIT : onglets au-dessus, puis un Container (texte + ActionRows).
+
+    Navigation en place : `open()` affiche un sous-écran dans le même message, avec un
+    bouton Retour ; le menu parent reste vivant et se réaffiche au retour (`on_return`).
+    Un court `notice` s'affiche une fois au-dessus des actions, au lieu d'un nouveau message.
+    """
 
     def __init__(self, *, timeout: float | None = MENU_TIMEOUT):
         super().__init__(timeout=timeout)
@@ -122,6 +168,47 @@ class ReviewsLayout(discord.ui.LayoutView):
         self._message: discord.WebhookMessage | discord.Message | None = None
         self.star_skin: StarSkin | None = None
         self.accent_colour: discord.Colour | None = None
+        self.parent: ReviewsLayout | None = None
+        self.notice: str | None = None
+        self._covered = False
+
+    def _build(self) -> None:
+        """Construit le contenu ; chaque menu le redéfinit."""
+
+    def _dispatch_item(self, item: discord.ui.Item, interaction: discord.Interaction):  # type: ignore[override]
+        # Tant qu'on clique dans un sous-écran, les menus parents ne doivent pas expirer.
+        parent = self.parent
+        while parent is not None:
+            parent._refresh_timeout()
+            parent = parent.parent
+        return super()._dispatch_item(item, interaction)
+
+    async def open(self, interaction: discord.Interaction, child: "ReviewsLayout") -> None:
+        """Affiche `child` à la place de ce menu (déjà préparé), avec un bouton Retour."""
+        child.parent = self
+        child._interaction = interaction
+        child._message = self.message or self._message
+        child.star_skin = child.star_skin or self.star_skin
+        child.accent_colour = child.accent_colour or self.accent_colour
+        self._covered = True
+        child._build()
+        await child.push(interaction)
+
+    async def go_back(self, interaction: discord.Interaction) -> None:
+        parent = self.parent
+        if parent is None:
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        self.stop()
+        parent._covered = False
+        parent.notice = parent.notice or self.notice
+        await parent.on_return(interaction)
+
+    async def on_return(self, interaction: discord.Interaction) -> None:
+        """Réaffiche ce menu au retour d'un sous-écran ; à redéfinir pour recharger les données."""
+        self._build()
+        await self.push(interaction)
 
     def stars(self, rating: float) -> str:
         return format_stars(rating, self.star_skin)
@@ -151,6 +238,8 @@ class ReviewsLayout(discord.ui.LayoutView):
             pass
 
     async def on_timeout(self) -> None:
+        if self._covered:  # un sous-écran occupe le message
+            return
         for item in list(self.children):
             _disable_interactive(item)
         message = self.message or self._message
@@ -194,9 +283,20 @@ class ReviewsLayout(discord.ui.LayoutView):
         sticky_head: int = 0,
     ) -> None:
         self.clear_items()
-        for item in above or []:
+        above = list(above or [])
+        if self.parent is not None:
+            # Retour en tête de la rangée d'onglets, ou sur sa propre rangée.
+            first = above[0] if above else None
+            if isinstance(first, discord.ui.ActionRow) and len(first.children) < 5:
+                above[0] = discord.ui.ActionRow(BackButton(self), *first.children)
+            else:
+                above.insert(0, discord.ui.ActionRow(BackButton(self)))
+        for item in above:
             self.add_item(item)
         children = list(body)
+        if self.notice:
+            children.append(discord.ui.TextDisplay(self.notice))
+            self.notice = None
         for row in rows:
             if row is None:
                 continue
@@ -331,7 +431,3 @@ async def present_ephemeral_layout(
         except discord.HTTPException:
             pass
 
-
-async def send_ephemeral_menu(interaction: discord.Interaction, view: ReviewsLayout) -> None:
-    """Nouveau message éphémère — ne jamais éditer la fiche publique."""
-    await present_ephemeral_layout(interaction, view)

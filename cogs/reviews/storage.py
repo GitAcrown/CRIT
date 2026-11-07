@@ -38,7 +38,6 @@ from .constants import (
     MAX_LIST_ITEMS,
     MIN_COMMENT_MAX,
     NO_PINGS,
-    PERIOD_SECONDS,
     TYPE_META,
 )
 from .database import DB_NAME
@@ -611,40 +610,6 @@ class StorageMixin:
         )
         return [(hit_from_row(row), row) for row in rows]
 
-    async def draw_watchlist(
-        self,
-        guild: discord.Guild,
-        *,
-        user_id: int | None,
-        media_type: str = "all",
-        period: str = "all",
-    ) -> MediaHit | None:
-        since = int(time.time()) - PERIOD_SECONDS[period] if period in PERIOD_SECONDS else 0
-        clauses = ["(? = 0 OR w.added_at >= ?)"]
-        args: list[Any] = [since, since]
-        if user_id is not None:
-            # les signets d'un membre sont les mêmes partout
-            clauses.append("w.user_id=?")
-            args.append(user_id)
-            scope = ""
-        else:
-            scope = ON_SERVER.format("w")
-            args.insert(0, guild.id)
-        if media_type != "all":
-            clauses.append("m.media_type=?")
-            args.append(media_type)
-        rows = await self.db.fetchall(
-            f"""SELECT {MEDIA_COLUMNS}
-                FROM watchlist w {scope}
-                JOIN media m ON m.id = w.media_id
-                WHERE {" AND ".join(clauses)}
-                GROUP BY w.media_id""",
-            *args,
-        )
-        if not rows:
-            return None
-        return hit_from_row(random.choice(rows))
-
     # ------------------------------------------------------------------
     # Listes communes (propres au serveur)
     # ------------------------------------------------------------------
@@ -842,24 +807,6 @@ class StorageMixin:
             list_id,
             media_id,
         )
-
-    async def draw_shared_list(
-        self,
-        guild: discord.Guild,
-        list_id: int,
-        *,
-        media_type: str = "all",
-        period: str = "all",
-    ) -> MediaHit | None:
-        items = await self.load_shared_list_items(guild, list_id)
-        since = int(time.time()) - PERIOD_SECONDS[period] if period in PERIOD_SECONDS else 0
-        pool = [
-            hit
-            for hit, row in items
-            if (media_type == "all" or hit.media_type == media_type)
-            and not (since and int(row_field(row, "added_at", 0)) < since)
-        ]
-        return random.choice(pool) if pool else None
 
     # ------------------------------------------------------------------
     # Journal, catalogue du serveur et recommandations

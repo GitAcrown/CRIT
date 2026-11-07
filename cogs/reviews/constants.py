@@ -116,16 +116,6 @@ ANNOUNCE_ROUTE_ALL = "all"
 ANNOUNCE_ROUTE_ORDER = (ANNOUNCE_ROUTE_ALL, *TYPE_META)
 
 
-PERIOD_SECONDS = {"semaine": 7 * 86400, "mois": 30 * 86400}
-
-
-WHEN_CHOICES = [
-    app_commands.Choice(name="N'importe quand", value="all"),
-    app_commands.Choice(name="Ajoutée cette semaine", value="semaine"),
-    app_commands.Choice(name="Ajoutée ce mois", value="mois"),
-]
-
-
 TYPE_STATS = (
     ("movie", "film", "films"),
     ("tv", "série", "séries"),

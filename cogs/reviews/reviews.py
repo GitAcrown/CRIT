@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 
 from utils import dataio, pretty
 
-from .constants import NO_PINGS, TYPE_CHOICES, TYPE_META, WHEN_CHOICES, logger
+from .constants import NO_PINGS, TYPE_CHOICES, TYPE_META, logger
 from .database import prepare_database
 from .dyn import (
     ANNOUNCE_TTL,
@@ -55,8 +55,8 @@ from .ui.fiche import build_announce_view, post_compact_fiche, render_dyn_record
 from .ui.lists import ListsHubView, SharedListView
 from .ui.profile import ProfileView
 from .ui.server import ServerHubView
-from .ui.session import MediaSessionView
-from .ui.settings import CustomView, HelpView, PreferencesView, ReviewsConfigView
+from .ui.session import FicheView
+from .ui.settings import HelpView, ReviewsConfigView
 from .ui.streams import StreamBindView, StreamHubView
 
 
@@ -273,7 +273,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         if not hits:
             await interaction.edit_original_response(content="**Introuvable ·** Aucune œuvre pour ce lien.")
             return
-        view = MediaSessionView(self, guild, hits, author_id=interaction.user.id, ephemeral=True)
+        view = FicheView(self, guild, hits, author_id=interaction.user.id)
         await view.start(interaction, deferred=True)
 
     # ------------------------------------------------------------------
@@ -427,53 +427,50 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             logger.info("Maj annonce %s : %s", rec.id, exc)
             return False
 
-    async def _search_or_reply(
-        self,
-        interaction: discord.Interaction,
-        query: str,
-        media_type: str,
-    ) -> list[MediaHit] | None:
+    async def search_hits(self, query: str, media_type: str) -> tuple[list[MediaHit], str]:
+        """Résultats du catalogue, ou un message d'erreur prêt à afficher."""
         spec = parse_search_query(query)
         if not spec.lookup_id and len(spec.query.strip()) < 2:
-            await interaction.edit_original_response(content="**Erreur ·** La recherche doit contenir au moins 2 caractères.")
-            return None
+            return [], "**Erreur ·** La recherche doit contenir au moins 2 caractères."
         if self.catalog is None:
-            await interaction.edit_original_response(content="**Erreur ·** Catalogue média indisponible.")
-            return None
+            return [], "**Erreur ·** Catalogue média indisponible."
         wants_tmdb = spec.source in (None, "tmdb") and (
             spec.lookup_id
             or media_type == "all"
             or search_pref_includes(media_type, "movie", "tv")
             or spec.media_type in ("movie", "tv")
         )
+        tmdb_missing = "**Erreur ·** Clé TMDB manquante (`TMDB_API_KEY` dans `.env`)."
         if wants_tmdb and spec.source == "tmdb" and not self.catalog.tmdb.available:
-            await interaction.edit_original_response(content="**Erreur ·** Clé TMDB manquante (`TMDB_API_KEY` dans `.env`).")
-            return None
+            return [], tmdb_missing
         if search_pref_includes(media_type, "movie", "tv") and spec.source is None and not self.catalog.tmdb.available:
-            await interaction.edit_original_response(content="**Erreur ·** Clé TMDB manquante (`TMDB_API_KEY` dans `.env`).")
-            return None
+            return [], tmdb_missing
         wants_spotify = spec.source == "spotify" or (
             spec.source is None and search_pref_includes(media_type, "album", "track")
         )
         if wants_spotify and not self.catalog.spotify.available:
-            await interaction.edit_original_response(
-                content="**Erreur ·** Clés Spotify manquantes (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` dans `.env`)."
-            )
-            return None
+            return [], "**Erreur ·** Clés Spotify manquantes (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` dans `.env`)."
         try:
             hits = await self.catalog.search(query.strip(), media_type)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Recherche /search échouée : %s", exc)
-            await interaction.edit_original_response(
-                content="**Erreur ·** La recherche a échoué. Réessaie dans un instant."
-            )
-            return None
+            logger.exception("Recherche échouée : %s", exc)
+            return [], "**Erreur ·** La recherche a échoué. Réessaie dans un instant."
         if not hits:
-            await interaction.edit_original_response(
-                content=f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} »."
-            )
+            return [], f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} »."
+        return hits, ""
+
+    async def _search_or_reply(
+        self,
+        interaction: discord.Interaction,
+        query: str,
+        media_type: str,
+    ) -> list[MediaHit] | None:
+        """Pour une commande : l'erreur remplace la réponse en attente."""
+        hits, error = await self.search_hits(query, media_type)
+        if error:
+            await interaction.edit_original_response(content=error)
             return None
         return hits
 
@@ -486,7 +483,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     @app_commands.rename(query="recherche", media_type="type", rating="note", comment="commentaire")
     @app_commands.describe(
         query="Titre, année, ou préfixe (tmdb:Dune, tmdb:27205, URL TMDB)",
-        media_type="Restreindre à un type (sinon tes types /preferences)",
+        media_type="Restreindre à un type (sinon tes types dans /carnet → Réglages)",
         rating="Note de 0 à 10 (entier, une étoile = 2 points)",
         comment="Court commentaire optionnel",
     )
@@ -510,12 +507,11 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         hits = await self._search_or_reply(interaction, query, resolved_type)
         if not hits:
             return
-        view = MediaSessionView(
+        view = FicheView(
             self,
             guild,
             hits,
             author_id=interaction.user.id,
-            ephemeral=True,
             pending_rating=rating,
             pending_comment=(comment or "").strip(),
         )
@@ -563,7 +559,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     @app_commands.rename(query="recherche", media_type="type")
     @app_commands.describe(
         query="Œuvre à lier à ton live (vide = lives en cours)",
-        media_type="Restreindre à un type (sinon tes types /preferences)",
+        media_type="Restreindre à un type (sinon tes types dans /carnet → Réglages)",
     )
     @app_commands.choices(media_type=TYPE_CHOICES)
     async def critique_stream(
@@ -630,34 +626,12 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             return
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-        accent = await member_accent(self.bot, guild, target)
-        xp = await self.get_profile_xp(guild, target.id)
-        journal_entries = await self.load_journal(guild, target.id)
-        review_count = len(journal_entries)
-        average = (
-            sum(float(row["rating"]) for _hit, row in journal_entries) / review_count
-            if journal_entries else None
-        )
-        affinities = await self.list_affinities(guild, target.id)
-        twin = affinities[0] if affinities else None
-        rival = min(affinities, key=lambda item: (item.percent, -item.overlap)) if affinities else None
-        title_ids = [target.id, *[item.user_id for item in affinities]]
-        view = ProfileView(
+        view = await ProfileView.create(
             self,
             guild,
             target,
-            xp=xp,
-            review_count=review_count,
-            average=average,
-            twin=twin,
-            rival=rival,
-            titles=await self.get_titles(guild, title_ids),
-            journal_entries=journal_entries,
-            watchlist_entries=await self.load_watchlist(guild, target.id),
-            affinities=affinities,
             viewer_id=interaction.user.id,
-            star_skin=await self.star_skin_for(guild, target.id),
-            accent=accent,
+            accent=await member_accent(self.bot, guild, target),
         )
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
@@ -774,14 +748,18 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             )
         await interaction.response.defer(ephemeral=True)
         list_id = int(liste) if liste and liste.isdigit() else None
-        view: ReviewsLayout | None = None
+        hub = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
+        view: ReviewsLayout = hub
         if list_id:
-            view = await SharedListView.create(self, guild, list_id, viewer_id=interaction.user.id)
-            if view is None:
-                await interaction.edit_original_response(content="**Listes ·** Cette liste n'existe plus.")
-                return
-        else:
-            view = await ListsHubView.create(self, guild, viewer_id=interaction.user.id)
+            opened = await SharedListView.create(self, guild, list_id, viewer_id=interaction.user.id)
+            if opened is None:
+                hub.notice = "**Listes ·** Cette liste n'existe plus."
+                hub._build()
+            else:
+                opened.parent = hub
+                hub._covered = True
+                opened._build()
+                view = opened
         view._interaction = interaction
         await present_ephemeral_layout(interaction, view)
 
@@ -790,103 +768,6 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         return await self._shared_list_choices(interaction, current)
-
-    @app_commands.command(name="tirage")
-    @app_commands.guild_only()
-    @app_commands.rename(member="membre", media_type="type", period="quand", liste="liste")
-    @app_commands.describe(
-        member="Tirer dans les signets de ce membre (par défaut : les tiens)",
-        media_type="Restreindre à un type",
-        period="Quand l'œuvre a été ajoutée à la liste",
-        liste="Tirer dans une liste commune (prioritaire sur le membre)",
-    )
-    @app_commands.choices(media_type=TYPE_CHOICES, period=WHEN_CHOICES)
-    async def critique_tirage(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member | None = None,
-        media_type: str = "all",
-        period: str = "all",
-        liste: str | None = None,
-    ) -> None:
-        """Tire une œuvre au hasard dans tes signets, ou dans une liste commune."""
-        guild = interaction.guild
-        if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        await interaction.response.defer(ephemeral=True)
-        list_id = int(liste) if liste and liste.isdigit() else None
-        if list_id:
-            record = await self.get_shared_list(guild, list_id)
-            if record is None:
-                await interaction.edit_original_response(content="**Tirage ·** Cette liste n'existe plus.")
-                return
-            hit = await self.draw_shared_list(
-                guild, list_id, media_type=media_type, period=period,
-            )
-            empty = f"**Tirage ·** « {record['title']} » n'a rien pour ce filtre."
-        else:
-            target = member or interaction.user
-            hit = await self.draw_watchlist(
-                guild,
-                user_id=target.id,
-                media_type=media_type,
-                period=period,
-            )
-            empty = (
-                "**Tirage ·** Tu n'as aucun signet."
-                if target.id == interaction.user.id
-                else f"**Tirage ·** {target.display_name} n'a aucun signet."
-            )
-        if hit is None:
-            await interaction.edit_original_response(content=empty)
-            return
-        view = MediaSessionView(
-            self,
-            guild,
-            [hit],
-            author_id=interaction.user.id,
-            ephemeral=True,
-        )
-        await view.start(interaction, deferred=True)
-
-    @critique_tirage.autocomplete("liste")
-    async def tirage_liste_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        return await self._shared_list_choices(interaction, current)
-
-    @app_commands.command(name="custom")
-    @app_commands.guild_only()
-    async def critique_custom(self, interaction: discord.Interaction) -> None:
-        """Équipe un skin d'étoiles parmi les collections débloquées."""
-        guild = interaction.guild
-        if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        prefs = await self.get_user_prefs(guild, interaction.user.id)
-        xp = await self.get_profile_xp(guild, interaction.user.id)
-        view = CustomView(self, guild, user=interaction.user, prefs=prefs, xp=xp)
-        await view.start(interaction)
-
-    @app_commands.command(name="preferences")
-    @app_commands.guild_only()
-    async def critique_preferences(self, interaction: discord.Interaction) -> None:
-        """Tes préférences : date, listes, recherche, annonces et stream."""
-        guild = interaction.guild
-        if not isinstance(guild, discord.Guild):
-            return await interaction.response.send_message(
-                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
-            )
-        view = PreferencesView(
-            self,
-            guild,
-            user=interaction.user,
-            prefs=await self.get_user_prefs(guild, interaction.user.id),
-        )
-        await view.start(interaction)
 
     @app_commands.command(name="config")
     @app_commands.guild_only()

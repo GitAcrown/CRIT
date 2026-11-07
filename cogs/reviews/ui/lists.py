@@ -35,14 +35,14 @@ from .actions import share_button_kwargs
 from .base import (
     apply_view,
     discard_ephemeral_menu,
+    page_nav,
     publish_layout_message,
     ReviewsLayout,
-    send_ephemeral_notice,
     sep_tight,
     sep_wide,
 )
 from .fiche import chunk_text_displays, section_with_thumbnail
-from .session import HubPageButton
+from .session import OpenFicheSelect, RandomFicheButton
 
 if TYPE_CHECKING:
     from ..reviews import Reviews
@@ -88,10 +88,7 @@ class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
         await interaction.response.defer()
         owned = await self._hub.cog.count_owned_lists(self._hub.guild, interaction.user.id)
         if owned >= MAX_SHARED_LISTS:
-            await interaction.followup.send(
-                f"**Erreur ·** Tu as déjà {MAX_SHARED_LISTS} listes sur ce serveur.",
-                ephemeral=True,
-            )
+            await self._hub.refresh(interaction, f"**Erreur ·** Tu as déjà {MAX_SHARED_LISTS} listes sur ce serveur.")
             return
         record = await self._hub.cog.create_shared_list(
             self._hub.guild,
@@ -106,8 +103,7 @@ class CreateSharedListModal(discord.ui.Modal, title="Nouvelle liste"):
         if view is None:
             await self._hub.refresh(interaction)
             return
-        view._interaction = interaction
-        await apply_view(interaction, view)
+        await self._hub.open(interaction, view)
 
 
 class EditSharedListModal(discord.ui.Modal, title="Modifier la liste"):
@@ -242,7 +238,7 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
         query = str(self.query_input.value or "").strip()
         catalog = self._hub.cog.catalog
         if catalog is None:
-            await interaction.followup.send("**Erreur ·** Catalogue média indisponible.", ephemeral=True)
+            await self._hub.refresh(interaction, "**Erreur ·** Catalogue média indisponible.")
             return
         try:
             kinds = parse_list_types(self._hub.record.get("allowed_types"))
@@ -250,26 +246,18 @@ class SharedListAddModal(discord.ui.Modal, title="Ajouter une œuvre"):
             hits = [hit for hit in hits if list_accepts_type(self._hub.record.get("allowed_types"), hit.media_type)]
         except Exception:
             logger.exception("Recherche pour liste commune impossible")
-            await interaction.followup.send("**Erreur ·** Recherche impossible pour le moment.", ephemeral=True)
+            await self._hub.refresh(interaction, "**Erreur ·** Recherche impossible pour le moment.")
             return
         if not hits:
-            await interaction.followup.send(
-                f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} ».",
-                ephemeral=True,
-            )
+            await self._hub.refresh(interaction, f"**Erreur ·** Aucun résultat pour « {pretty.shorten_text(query, 80)} ».")
             return
         if len(hits) == 1:
             error = await self._hub.cog.add_shared_list_item(
                 self._hub.guild, self._hub.record["id"], interaction.user.id, hits[0],
             )
-            await self._hub.refresh(interaction)
-            await send_ephemeral_notice(
-                interaction,
-                f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}",
-            )
+            await self._hub.refresh(interaction, f"**Liste ·** {error}" if error else f"**Ajouté ·** {hits[0].title}")
             return
-        view = SharedListPickView(self._hub, hits)
-        await interaction.followup.send(view=view, ephemeral=True)
+        await self._hub.open(interaction, SharedListPickView(self._hub, hits))
 
 
 class SharedListHitSelect(discord.ui.Select):
@@ -292,29 +280,26 @@ class SharedListHitSelect(discord.ui.Select):
         error = await self._hub.liste.cog.add_shared_list_item(
             self._hub.liste.guild, self._hub.liste.record["id"], interaction.user.id, hit,
         )
-        await self._hub.liste.refresh()
-        done = discord.ui.LayoutView(timeout=30)
-        box = discord.ui.Container()
-        box.add_item(discord.ui.TextDisplay(
-            f"**Liste ·** {error}" if error else f"**Ajouté ·** {hit.title}"
-        ))
-        done.add_item(box)
-        await apply_view(interaction, done)
-        if interaction.message is not None:
-            await interaction.message.delete(delay=10)
+        self._hub.notice = f"**Liste ·** {error}" if error else f"**Ajouté ·** {hit.title}"
+        await self._hub.go_back(interaction)
 
 
 class SharedListPickView(ReviewsLayout):
+    """Plusieurs résultats : choisir l'œuvre à ajouter, puis retour à la liste."""
+
     def __init__(self, liste: "SharedListView", hits: list[MediaHit]):
         super().__init__()
         self.liste = liste
         self.hits = hits
+        self._build()
+
+    def _build(self) -> None:
         self.set_layout(
             [discord.ui.TextDisplay(
-                f"## Ajouter à {pretty.shorten_text(liste.record['title'], 60)}\n"
-                f"-# {len(hits)} résultat(s) — choisis l'œuvre"
+                f"## Ajouter à {pretty.shorten_text(self.liste.record['title'], 60)}\n"
+                f"-# {len(self.hits)} résultat(s) — choisis l'œuvre"
             )],
-            discord.ui.ActionRow(SharedListHitSelect(self, hits)),
+            discord.ui.ActionRow(SharedListHitSelect(self, self.hits)),
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -352,8 +337,7 @@ class ListsHubOpenSelect(discord.ui.Select):
         if view is None:
             await self._hub.refresh(interaction)
             return
-        view._interaction = interaction
-        await apply_view(interaction, view)
+        await self._hub.open(interaction, view)
 
 
 class CreateSharedListButton(discord.ui.Button):
@@ -363,20 +347,6 @@ class CreateSharedListButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(CreateSharedListModal(self._hub))
-
-
-class SharedListBackButton(discord.ui.Button):
-    def __init__(self, parent: "SharedListView"):
-        super().__init__(label="← Listes", style=discord.ButtonStyle.secondary)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        hub = await ListsHubView.create(
-            self._hub.cog, self._hub.guild, viewer_id=self._hub.viewer_id,
-        )
-        hub._interaction = interaction
-        await apply_view(interaction, hub)
 
 
 class SharedListShareButton(discord.ui.Button):
@@ -598,20 +568,17 @@ class ListsHubView(ReviewsLayout):
             )
             body.append(discord.ui.TextDisplay(text))
         rows.append(discord.ui.ActionRow(ListsHubOpenSelect(self, page_items)))
-        controls: list[discord.ui.Item] = [CreateSharedListButton(self)]
-        if max_page > 0:
-            prev_btn = HubPageButton(self, "page", -1, "←", max_page)
-            next_btn = HubPageButton(self, "page", 1, "→", max_page)
-            prev_btn.disabled = self.page <= 0
-            next_btn.disabled = self.page >= max_page
-            controls.extend([prev_btn, next_btn])
-        rows.append(discord.ui.ActionRow(*controls))
+        rows.append(page_nav(self, "page", max_page, CreateSharedListButton(self)))
         self.set_layout(body, *rows)
 
-    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+    async def refresh(self, interaction: discord.Interaction | None = None, notice: str | None = None) -> None:
         self.lists = await self.cog.load_shared_lists(self.guild)
+        self.notice = notice or self.notice
         self._build()
         await self.push(interaction)
+
+    async def on_return(self, interaction: discord.Interaction) -> None:
+        await self.refresh(interaction)
 
 
 class SharedListView(ReviewsLayout):
@@ -669,17 +636,11 @@ class SharedListView(ReviewsLayout):
             return False
         return True
 
-    def _nav_row(self, max_page: int) -> discord.ui.ActionRow:
-        buttons: list[discord.ui.Item] = [SharedListBackButton(self)]
+    def _nav_row(self, max_page: int) -> discord.ui.ActionRow | None:
+        middle: list[discord.ui.Item] = []
         if self.menu == "remove":
-            buttons.append(SharedListDoneButton(self))
-        if max_page > 0:
-            prev_btn = HubPageButton(self, "item_page", -1, "←", max_page)
-            next_btn = HubPageButton(self, "item_page", 1, "→", max_page)
-            prev_btn.disabled = self.item_page <= 0
-            next_btn.disabled = self.item_page >= max_page
-            buttons.extend([prev_btn, next_btn])
-        return discord.ui.ActionRow(*buttons)
+            middle.append(SharedListDoneButton(self))
+        return page_nav(self, "item_page", max_page, *middle)
 
     def _header(self) -> str:
         desc = pretty.shorten_text(self.record["description"], 220) if self.record["description"] else "*Pas de description.*"
@@ -761,7 +722,9 @@ class SharedListView(ReviewsLayout):
         elif self.menu == "remove" and page_items:
             rows.append(discord.ui.ActionRow(SharedListRemoveSelect(self, page_items)))
         else:
-            actions: list[discord.ui.Item] = []
+            if page_items:
+                rows.append(discord.ui.ActionRow(OpenFicheSelect(self, [hit for hit, _row in page_items])))
+            actions: list[discord.ui.Item] = [RandomFicheButton(self, [hit for hit, _row in self.items])]
             if self.can_edit(self.viewer_id):
                 actions.append(SharedListAddButton(self))
                 if self.items:
@@ -769,8 +732,7 @@ class SharedListView(ReviewsLayout):
             if self.is_owner(self.viewer_id):
                 actions.append(SharedListEditButton(self))
                 actions.append(SharedListDeleteButton(self))
-            if actions:
-                rows.append(discord.ui.ActionRow(*actions[:5]))
+            rows.append(discord.ui.ActionRow(*actions[:5]))
         rows.append(self._nav_row(max_page))
         self.set_layout(body, *rows)
         self.add_item(discord.ui.ActionRow(SharedListShareButton(self)))
@@ -784,8 +746,13 @@ class SharedListView(ReviewsLayout):
         if message is None:
             await interaction.followup.send("**Erreur ·** Impossible de publier cette liste.", ephemeral=True)
             return
-        self.stop()
-        await discard_ephemeral_menu(interaction)
+        if self.parent is None:
+            self.stop()
+            await discard_ephemeral_menu(interaction)
+            return
+        self.notice = f"**Partagé ·** {message.jump_url}"
+        self._build()
+        await self.push(interaction)
 
     async def delete_list(self, interaction: discord.Interaction) -> None:
         if not self.is_owner(interaction.user.id):
@@ -795,21 +762,22 @@ class SharedListView(ReviewsLayout):
             )
             return
         await self.cog.delete_shared_list(self.guild, self.record["id"])
-        hub = await ListsHubView.create(self.cog, self.guild, viewer_id=self.viewer_id)
-        hub._interaction = interaction
-        await apply_view(interaction, hub)
+        self.notice = f"**Liste supprimée ·** {self.record['title']}"
+        await self.go_back(interaction)
 
-    async def refresh(self, interaction: discord.Interaction | None = None) -> None:
+    async def refresh(self, interaction: discord.Interaction | None = None, notice: str | None = None) -> None:
         record = await self.cog.get_shared_list(self.guild, self.record["id"])
         if record is None:
-            hub = await ListsHubView.create(self.cog, self.guild, viewer_id=self.viewer_id)
-            hub._interaction = interaction or self._interaction
-            editor = interaction or self._interaction
-            if editor is not None:
-                await apply_view(editor, hub)
+            self.notice = "**Listes ·** Cette liste n'existe plus."
+            if interaction is not None:
+                await self.go_back(interaction)
             return
         self.record = record
         self.items = await self.cog.load_shared_list_items(self.guild, record["id"])
         self.editor_ids = await self.cog.load_shared_list_editors(self.guild, record["id"])
+        self.notice = notice or self.notice
         self._build()
         await self.push(interaction)
+
+    async def on_return(self, interaction: discord.Interaction) -> None:
+        await self.refresh(interaction)

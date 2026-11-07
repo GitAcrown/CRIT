@@ -8,7 +8,7 @@ import discord
 
 from utils import pretty
 
-from ..constants import MENU_TIMEOUT, RATING_MAX
+from ..constants import RATING_MAX
 from ..emojis import ADD_LIST, BOOKMARK_OFF, BOOKMARK_ON, SHARE, TRASH, XP
 from ..formatting import (
     ONGOING,
@@ -17,7 +17,6 @@ from ..formatting import (
     format_score,
     format_stars,
     is_ongoing,
-    list_accepts_type,
     ongoing_label,
     parse_experienced_date,
     parse_rating,
@@ -28,12 +27,11 @@ from ..formatting import (
 from ..prefs import note_experienced_default, note_spoiler_default, UserPrefs
 from ..progress import skins_unlocked_between, StarSkin, title_for_level, XpAward
 from ..providers import MediaHit
-from .base import apply_view, send_ephemeral_notice
+from .base import apply_view
 from .fiche import send_published_fiche
 
 if TYPE_CHECKING:
-    from ..reviews import Reviews
-    from .session import MediaSessionView
+    from .session import FicheView
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +62,10 @@ def review_saved_lines(
         unlocked = skins_unlocked_between(award.previous_level, award.level)
         if unlocked:
             names = " · ".join(skin.name for skin in unlocked)
-            parts.append(f"Nouveau skin · {names} (`/custom`)")
+            parts.append(f"Nouveau skin · {names} (`/carnet` → Réglages)")
     if collections:
         names = " · ".join(skin.name for skin in collections)
-        parts.append(f"Nouvelle collection · {names} (`/custom`)")
+        parts.append(f"Nouvelle collection · {names} (`/carnet` → Réglages)")
     return parts
 
 
@@ -177,11 +175,11 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
 
 
 # ---------------------------------------------------------------------------
-# Vue session (sélection + fiche + critiques)
+# Boutons de la fiche privée
 # ---------------------------------------------------------------------------
 
 class MediaSelect(discord.ui.Select):
-    def __init__(self, parent: "MediaSessionView", hits: list[MediaHit], selected: int):
+    def __init__(self, parent: "FicheView", hits: list[MediaHit], selected: int):
         options = []
         for index, hit in enumerate(hits[:25]):
             label = f"{hit.title} · {hit.year}" if hit.year else hit.title
@@ -194,13 +192,7 @@ class MediaSelect(discord.ui.Select):
                     default=index == selected,
                 )
             )
-        super().__init__(
-            placeholder="Choisir une œuvre",
-            options=options,
-            min_values=1,
-            max_values=1,
-            custom_id=f"crit:sess:{id(parent)}:pick",
-        )
+        super().__init__(placeholder="Choisir une œuvre", options=options, min_values=1, max_values=1)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -209,29 +201,14 @@ class MediaSelect(discord.ui.Select):
         self._hub.review_page = 0
         self._hub.tab = "fiche"
         self._hub.confirm_delete = False
+        self._hub.picking_list = False
         await self._hub.show_selected(interaction)
-
-
-class TabButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView", tab: str, label: str):
-        super().__init__(
-            label=label,
-            style=discord.ButtonStyle.primary if parent.tab == tab else discord.ButtonStyle.secondary,
-        )
-        self._hub = parent
-        self._tab = tab
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.tab = self._tab
-        self._hub.review_page = 0
-        self._hub._build()
-        await apply_view(interaction, self._hub)
 
 
 class SeasonScopeSelect(discord.ui.Select):
     """Série complète, ou une saison. Chaque cible a sa propre note."""
 
-    def __init__(self, parent: "MediaSessionView", seasons: list[dict[str, Any]], *, include_show: bool):
+    def __init__(self, parent: "FicheView", seasons: list[dict[str, Any]], *, include_show: bool):
         current = parent.season
         options: list[discord.SelectOption] = []
         if include_show:
@@ -255,12 +232,7 @@ class SeasonScopeSelect(discord.ui.Select):
                 description=pretty.shorten_text(" · ".join(bits), 95) or None,
                 default=current == number,
             ))
-        super().__init__(
-            placeholder="Série ou saison",
-            options=options,
-            min_values=1,
-            max_values=1,
-        )
+        super().__init__(placeholder="Série ou saison", options=options, min_values=1, max_values=1)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -270,77 +242,70 @@ class SeasonScopeSelect(discord.ui.Select):
         self._hub.pending_rating = None
         self._hub.pending_comment = ""
         self._hub.confirm_delete = False
+        self._hub.picking_list = False
         await interaction.response.defer()
         await self._hub.reload_stats()
         self._hub._build()
         await self._hub.push(interaction)
 
 
+def rate_modal_for(parent: Any, user_id: int) -> RateModal:
+    """Formulaire Noter prérempli avec la note existante (ou celle passée à /search)."""
+    mine = parent.author_id == user_id
+    existing = (parent.my_review if mine else None) or {}
+    prefs = parent.prefs or UserPrefs()
+    return RateModal(
+        parent,
+        max_comment=parent.cog.cached_comment_max(parent.guild),
+        default_rating=existing.get("rating", parent.pending_rating if mine else None),
+        default_comment=existing.get("comment") or (parent.pending_comment if mine else ""),
+        default_experienced=note_experienced_default(prefs, existing),
+        default_spoiler=note_spoiler_default(existing),
+    )
+
+
 class RateButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    def __init__(self, parent: "FicheView"):
         super().__init__(label="Noter", style=discord.ButtonStyle.green)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self._hub
-        existing = parent.my_review if interaction.user.id == parent.author_id else None
-        pending = parent.pending_rating
-        prefs = parent.prefs or UserPrefs()
-        if pending is not None and existing is None and interaction.user.id == parent.author_id:
+        if parent.pending_rating is not None and parent.my_review is None:
+            # /search avec une note : un clic suffit, sans formulaire.
             await interaction.response.defer()
             await parent.save_review(
                 interaction,
-                pending,
+                parent.pending_rating,
                 parent.pending_comment,
-                experienced_at=note_experienced_default(prefs, {}),
+                experienced_at=note_experienced_default(parent.prefs or UserPrefs(), {}),
                 spoiler=False,
             )
             return
-        existing = existing or {}
-        await interaction.response.send_modal(
-            RateModal(
-                parent,
-                max_comment=parent.cog.cached_comment_max(parent.guild),
-                default_rating=existing.get("rating", parent.pending_rating if interaction.user.id == parent.author_id else None),
-                default_comment=existing.get("comment") or (parent.pending_comment if interaction.user.id == parent.author_id else ""),
-                default_experienced=note_experienced_default(prefs, existing),
-                default_spoiler=note_spoiler_default(existing),
-            )
-        )
+        await interaction.response.send_modal(rate_modal_for(parent, interaction.user.id))
 
 
 class WatchlistButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    def __init__(self, parent: "FicheView"):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            style=discord.ButtonStyle.secondary,
+            label="Signet",
+            style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary,
             emoji=discord.PartialEmoji.from_str(BOOKMARK_ON if on else BOOKMARK_OFF),
             disabled=rated,
         )
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if self._hub.my_review:
-            await interaction.response.send_message(
-                "**Déjà noté ·** Cette œuvre n'est plus dans tes signets.",
-                ephemeral=True,
-                delete_after=8,
-            )
-            return
         await interaction.response.defer()
-        if self._hub.on_watchlist:
-            media_id = await self._hub.cog.lookup_media_id(self._hub.guild, self._hub.hit)
-            if media_id:
-                await self._hub.cog.remove_watchlist(self._hub.guild, interaction.user.id, media_id)
-        else:
-            await self._hub.cog.add_watchlist(self._hub.guild, interaction.user.id, self._hub.hit)
-        await self._hub.refresh(interaction)
+        await self._hub.toggle_watchlist(interaction)
 
 
 class AddToListButton(discord.ui.Button):
-    def __init__(self, parent: Any):
+    def __init__(self, parent: "FicheView"):
         super().__init__(
+            label="Liste",
             style=discord.ButtonStyle.secondary,
             emoji=discord.PartialEmoji.from_str(ADD_LIST),
         )
@@ -348,23 +313,11 @@ class AddToListButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        lists = await self._hub.cog.writable_shared_lists(self._hub.guild, interaction.user.id)
-        lists = [
-            record for record in lists
-            if list_accepts_type(record.get("allowed_types"), self._hub.hit.media_type)
-        ]
-        if not lists:
-            await interaction.followup.send(
-                "**Listes ·** Aucune liste que tu peux modifier n'accepte ce type.",
-                ephemeral=True,
-            )
-            return
-        view = FicheAddListView(self._hub.cog, self._hub.guild, self._hub.hit, lists[:25])
-        await interaction.followup.send(view=view, ephemeral=True)
+        await self._hub.start_list_pick(interaction)
 
 
-class FicheAddListSelect(discord.ui.Select):
-    def __init__(self, parent: "FicheAddListView"):
+class FicheListSelect(discord.ui.Select):
+    def __init__(self, parent: "FicheView", lists: list[dict[str, Any]]):
         options = [
             discord.SelectOption(
                 label=pretty.shorten_text(record["title"], 95) or "Sans titre",
@@ -374,61 +327,40 @@ class FicheAddListSelect(discord.ui.Select):
                     95,
                 ),
             )
-            for record in parent.lists
+            for record in lists
         ]
-        super().__init__(placeholder="Choisir une liste", options=options)
+        super().__init__(placeholder="Ajouter à quelle liste ?", options=options)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        list_id = int(self.values[0])
-        record = next((item for item in self._hub.lists if int(item["id"]) == list_id), None)
-        if record is None:
-            await interaction.response.send_message("**Erreur ·** Cette liste n'existe plus.", ephemeral=True)
-            return
         await interaction.response.defer()
-        error = await self._hub.cog.add_shared_list_item(
-            self._hub.guild, list_id, interaction.user.id, self._hub.hit,
-        )
-        title = pretty.shorten_text(record["title"], 80)
-        await send_ephemeral_notice(
-            interaction,
-            f"**Liste ·** {error}" if error else f"**Ajouté ·** {self._hub.hit.title} dans **{title}**.",
-        )
+        await self._hub.add_to_list(interaction, int(self.values[0]))
 
 
-class FicheAddListView(discord.ui.LayoutView):
-    def __init__(
-        self,
-        cog: "Reviews",
-        guild: discord.Guild,
-        hit: MediaHit,
-        lists: list[dict[str, Any]],
-    ):
-        super().__init__(timeout=MENU_TIMEOUT)
-        self.cog = cog
-        self.guild = guild
-        self.hit = hit
-        self.lists = lists
-        self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("**Ajouter à une liste**"),
-            discord.ui.ActionRow(FicheAddListSelect(self)),
-        ))
+class CancelListPickButton(discord.ui.Button):
+    def __init__(self, parent: "FicheView"):
+        super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self._hub.picking_list = False
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
 class DeleteReviewButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    def __init__(self, parent: "FicheView"):
         super().__init__(style=discord.ButtonStyle.red, emoji=discord.PartialEmoji.from_str(TRASH))
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
         self._hub.confirm_delete = True
         self._hub._build()
         await apply_view(interaction, self._hub)
 
 
 class DeleteReviewConfirmButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    def __init__(self, parent: "FicheView"):
         super().__init__(label="Supprimer", style=discord.ButtonStyle.danger)
         self._hub = parent
 
@@ -438,7 +370,7 @@ class DeleteReviewConfirmButton(discord.ui.Button):
 
 
 class DeleteReviewCancelButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    def __init__(self, parent: "FicheView"):
         super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
         self._hub = parent
 
@@ -457,7 +389,9 @@ def share_button_kwargs() -> dict[str, Any]:
 
 
 class FicheShareButton(discord.ui.Button):
-    def __init__(self, parent: "MediaSessionView"):
+    """Publie la fiche dans le salon (avec ses boutons Noter / Ouvrir pour tous)."""
+
+    def __init__(self, parent: "FicheView"):
         super().__init__(**share_button_kwargs())
         self._hub = parent
 
@@ -468,7 +402,14 @@ class FicheShareButton(discord.ui.Button):
             self._hub.guild,
             self._hub.hit,
             interaction,
-            close_ephemeral=True,
+            close_ephemeral=self._hub.parent is None,
         )
-        if message is not None:
+        if message is None:
+            return
+        if self._hub.parent is None:
             self._hub.stop()
+            return
+        # Ouverte depuis un autre menu : on y reste.
+        self._hub.notice = f"**Partagé ·** {message.jump_url}"
+        self._hub._build()
+        await self._hub.push(interaction)
