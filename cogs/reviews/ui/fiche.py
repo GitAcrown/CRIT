@@ -24,7 +24,7 @@ from ..dyn import (
     mark_stripped,
     update_payload,
 )
-from ..emojis import ADD_LIST, BOOKMARK_OFF, EXPLICIT, OPEN, PLANNING, SALE, STREAMING
+from ..emojis import BOOKMARK_OFF, EXPLICIT, OPEN, PLANNING, SALE, STREAMING
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -413,14 +413,13 @@ def public_fiche_buttons(
     """Boutons d'un message public, utilisables par tout le monde.
 
     Chacun agit pour la personne qui clique, jamais sur le message public, et sans
-    réafficher la fiche : Noter ouvre son formulaire, le signet bascule dans ses signets,
-    la liste propose ses listes, Critiques montre seulement les avis du serveur.
+    réafficher la fiche : Noter ouvre son formulaire, Ranger (signet) ouvre celui du
+    signet et des listes, Critiques montre seulement les avis du serveur.
     """
     critiques = f"Critiques ({count})" if count is not None else "Critiques"
     row = [rate_dyn_button(wid, button)] if with_rate else []
     row += [
-        button(wid, "mark", emoji=BOOKMARK_OFF),
-        button(wid, "list", emoji=ADD_LIST),
+        button(wid, "shelf", emoji=BOOKMARK_OFF),
         button(wid, "critiques", label=critiques),
     ]
     return discord.ui.ActionRow(*row)

@@ -801,6 +801,18 @@ class StorageMixin:
         )
         return None
 
+    async def shared_lists_with_media(self, media_id: int, list_ids: list[int]) -> set[int]:
+        """Parmi `list_ids`, celles qui contiennent déjà l'œuvre."""
+        if not media_id or not list_ids:
+            return set()
+        marks = ",".join("?" * len(list_ids))
+        rows = await self.db.fetchall(
+            f"SELECT list_id FROM shared_list_items WHERE media_id=? AND list_id IN ({marks})",
+            media_id,
+            *list_ids,
+        )
+        return {int(row["list_id"]) for row in rows}
+
     async def remove_shared_list_item(
         self, guild: discord.Guild, list_id: int, media_id: int
     ) -> None:
