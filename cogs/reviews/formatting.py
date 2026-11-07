@@ -283,10 +283,11 @@ def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
         getattr(emoji_set, f"BAR_{max(1, round(top * n / peak)) if n else 0}")
         for n in counts
     )
+    axis = "".join(getattr(emoji_set, f"AXIS_{score}") for score in range(RATING_MAX + 1))
     most = max(range(RATING_MAX + 1), key=lambda score: (counts[score], score))
     return (
-        f"**Répartition**\n{bars}\n"
-        f"-# De 0 à {RATING_MAX} · le plus souvent **{most}/{RATING_MAX}** ({counts[most]} fois)"
+        f"**Répartition**\n{bars}\n{axis}\n"
+        f"-# Le plus souvent **{most}/{RATING_MAX}** ({counts[most]} fois)"
     )
 
 

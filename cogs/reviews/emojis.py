@@ -72,6 +72,10 @@ BAR_9 = BAR_10 = "▆"
 BAR_11 = "█"
 BAR_MAX = 11
 
+# Échelle sous les barres (assets/emojis/axis_0.png … axis_10.png).
+AXIS_0, AXIS_1, AXIS_2, AXIS_3, AXIS_4, AXIS_5 = "0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"
+AXIS_6, AXIS_7, AXIS_8, AXIS_9, AXIS_10 = "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"
+
 
 # ---------------------------------------------------------------------------
 # Synchronisation automatique (émojis d'application)
