@@ -9,7 +9,7 @@ import discord
 from utils import pretty
 
 from ..constants import JOURNAL_PAGE, TYPE_CHOICES
-from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, SETTINGS, TWIN, XP
+from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -48,7 +48,6 @@ from .base import (
     TabButton,
 )
 from .fiche import section_with_thumbnail
-from .preferences import PreferencesView
 from .session import OpenFicheSelect, RandomFicheButton
 
 if TYPE_CHECKING:
@@ -160,19 +159,6 @@ class ProfileShareButton(discord.ui.Button):
             return
         self._hub.stop()
         await discard_ephemeral_menu(interaction)
-
-
-class SettingsTabButton(discord.ui.Button):
-    """Onglet Réglages de son propre carnet : préférences et skins d'étoiles."""
-
-    def __init__(self, parent: "ProfileView"):
-        super().__init__(label="Réglages", emoji=discord.PartialEmoji.from_str(SETTINGS), style=discord.ButtonStyle.secondary)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        view = await PreferencesView.create(self._hub.cog, self._hub.guild, self._hub.member)
-        await self._hub.open(interaction, view)
 
 
 class AffinityCompareSelect(discord.ui.Select):
@@ -299,7 +285,7 @@ class AffinityCompareView(ReviewsLayout):
 
 
 class ProfileView(ReviewsLayout):
-    """Carnet : Profil · Journal · Signets · Affinités (+ Réglages sur son propre carnet)."""
+    """Carnet : Profil · Journal · Signets · Affinités."""
 
     def __init__(
         self,
@@ -417,8 +403,6 @@ class ProfileView(ReviewsLayout):
             TabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_LIST),
             TabButton(self, "affinites", str(len(self.affinities)), emoji=AFFINITY),
         ]
-        if self.editable and self.parent is None:
-            tabs.append(SettingsTabButton(self))
         return discord.ui.ActionRow(*tabs)
 
     def _assemble(

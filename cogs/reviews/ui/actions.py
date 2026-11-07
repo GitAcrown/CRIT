@@ -62,10 +62,10 @@ def review_saved_lines(
         unlocked = skins_unlocked_between(award.previous_level, award.level)
         if unlocked:
             names = " · ".join(skin.name for skin in unlocked)
-            parts.append(f"Nouveau skin · {names} (`/carnet` → Réglages)")
+            parts.append(f"Nouveau skin · {names} (`/reglages`)")
     if collections:
         names = " · ".join(skin.name for skin in collections)
-        parts.append(f"Nouvelle collection · {names} (`/carnet` → Réglages)")
+        parts.append(f"Nouvelle collection · {names} (`/reglages`)")
     return parts
 
 

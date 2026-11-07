@@ -53,6 +53,7 @@ from .ui.base import (
 )
 from .ui.fiche import build_announce_view, post_compact_fiche, render_dyn_record
 from .ui.lists import ListsHubView, SharedListView
+from .ui.preferences import PreferencesView
 from .ui.profile import ProfileView
 from .ui.server import ServerHubView
 from .ui.session import FicheView
@@ -483,7 +484,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     @app_commands.rename(query="recherche", media_type="type", rating="note", comment="commentaire")
     @app_commands.describe(
         query="Titre, année, ou préfixe (tmdb:Dune, tmdb:27205, URL TMDB)",
-        media_type="Restreindre à un type (sinon tes types dans /carnet → Réglages)",
+        media_type="Restreindre à un type (sinon tes types dans /reglages)",
         rating="Note de 0 à 10 (entier, une étoile = 2 points)",
         comment="Court commentaire optionnel",
     )
@@ -559,7 +560,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     @app_commands.rename(query="recherche", media_type="type")
     @app_commands.describe(
         query="Œuvre à lier à ton live (vide = lives en cours)",
-        media_type="Restreindre à un type (sinon tes types dans /carnet → Réglages)",
+        media_type="Restreindre à un type (sinon tes types dans /reglages)",
     )
     @app_commands.choices(media_type=TYPE_CHOICES)
     async def critique_stream(
@@ -768,6 +769,18 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         return await self._shared_list_choices(interaction, current)
+
+    @app_commands.command(name="reglages")
+    @app_commands.guild_only()
+    async def critique_reglages(self, interaction: discord.Interaction) -> None:
+        """Tes réglages : recherche, date, annonces, listes, stream et apparence des étoiles."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        view = await PreferencesView.create(self, guild, interaction.user)
+        await view.start(interaction)
 
     @app_commands.command(name="config")
     @app_commands.guild_only()

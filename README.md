@@ -16,9 +16,10 @@ Un message qui n'est qu'un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open L
 
 - `/search` — catalogues externes : fiche, noter, signet ou liste (autocomplete dès 2 lettres)
 - `/stream` — lives en cours (fiches liées) ; lie le tien ou planifie un stream
-- `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet) ; sur ton carnet, **Réglages** regroupe préférences et skins d'étoiles
+- `/carnet` — page d'un membre : profil, journal, signets et affinités (aussi via clic droit → Voir le carnet)
 - `/explore` — feuillette ce que le serveur a déjà noté : récentes, catalogue, top et pour toi
 - `/listes` — listes communes : titre, description, droits d'édition (autocomplete pour ouvrir une liste)
+- `/reglages` — tes préférences (recherche, date, annonces, listes, stream) et l'apparence de tes étoiles, communes à tous les serveurs
 - `/config` — panneau de configuration réservé à la modération (salons d'annonces par type, commentaires)
 - `/help` — aide : commandes et comment noter
 

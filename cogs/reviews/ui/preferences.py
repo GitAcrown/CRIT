@@ -1,4 +1,4 @@
-"""Réglages du membre, ouverts depuis son carnet : fiches, listes, stream et skins d'étoiles.
+"""Réglages du membre (/reglages) : fiches, listes, stream et apparence (skins d'étoiles).
 
 Les préférences sont communes à tous les serveurs.
 """
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from ..constants import TYPE_META
-from ..emojis import XP
+from ..emojis import SETTINGS, XP
 from ..formatting import list_edit_label, select_emoji, type_label
 from ..prefs import (
     STREAM_REMIND_BOTH,
@@ -160,6 +160,11 @@ class PreferencesView(ReviewsLayout):
         self.star_skin = resolve_star_skin(prefs.star_skin, level=self.level, owned=prefs.unlocked_skins)
         self._build()
 
+    async def start(self, interaction: discord.Interaction) -> None:
+        self._interaction = interaction
+        await interaction.response.send_message(view=self, ephemeral=True)
+        await self.attach(interaction)
+
     @classmethod
     async def create(cls, cog: "Reviews", guild: discord.Guild, user: discord.abc.User) -> "PreferencesView":
         return cls(
@@ -207,7 +212,7 @@ class PreferencesView(ReviewsLayout):
 
     def _header(self, subtitle: str) -> discord.ui.Item:
         return section_with_thumbnail(
-            f"## Réglages\n-# {subtitle} · communs à tous les serveurs",
+            f"## {SETTINGS} Réglages\n-# {subtitle} · communs à tous les serveurs",
             self.user.display_avatar.url,
         )
 
