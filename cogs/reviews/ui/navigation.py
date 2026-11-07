@@ -2,36 +2,27 @@
 
 Leurs boutons sont utilisables par tout le monde : chaque clic agit pour la personne qui
 clique et ne modifie jamais le message public pour elle. La fiche est déjà sous ses yeux,
-donc on ne la réaffiche pas : Noter ouvre son formulaire, le signet bascule dans ses
-signets, la liste propose ses listes, Critiques montre seulement les avis du serveur.
+donc on ne la réaffiche pas : Noter ouvre son formulaire, Ranger ouvre celui du signet
+et des listes, Critiques montre seulement les avis du serveur.
 """
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import discord
 
-from utils import pretty
-
 from ..constants import NO_PINGS
 from ..dyn import FicheRecord, get_record, hit_from_dict, is_live, mark_stripped
-from ..formatting import list_accepts_type
 from ..providers import MediaHit
-from .actions import FicheListSelect, rate_modal_for
-from .base import present_ephemeral_layout, ReviewsLayout
+from .actions import rate_modal_for
+from .base import present_ephemeral_layout
 from .fiche import render_announce_record, render_dyn_record
 from .session import CritiquesView, FicheView
+from .shelf import open_shelf, public_shelf_done
 
 if TYPE_CHECKING:
     from ..reviews import Reviews
-
-NOTICE_SECONDS = 12
-
-
-async def _notice(interaction: discord.Interaction, text: str) -> None:
-    await interaction.response.send_message(text, ephemeral=True, delete_after=NOTICE_SECONDS)
-
 
 async def open_private_fiche(
     interaction: discord.Interaction,
@@ -58,86 +49,13 @@ async def rate_from_public(
 ) -> None:
     """Formulaire Noter direct ; la confirmation arrive en message privé.
 
-    Déjà noté : la fiche perso s'ouvre à la place, pour modifier ou supprimer sa note.
+    Déjà noté : le menu de la note propose aussi « Sans note », qui supprime la note.
     """
     view = FicheView(cog, guild, [hit], author_id=interaction.user.id, published_wid=published_wid)
     view.from_published_modal = True
     await view.load_member()
     await view.load_my_review()
-    if view.my_review:
-        await open_private_fiche(interaction, cog, guild, hit, published_wid=published_wid)
-        return
     await interaction.response.send_modal(rate_modal_for(view, interaction.user.id))
-
-
-async def toggle_bookmark_from_public(
-    interaction: discord.Interaction,
-    cog: "Reviews",
-    guild: discord.Guild,
-    hit: MediaHit,
-) -> None:
-    user_id = interaction.user.id
-    title = pretty.shorten_text(hit.title, 80)
-    media_id = await cog.lookup_media_id(guild, hit)
-    if media_id and await cog.get_review(guild, user_id, media_id):
-        await _notice(interaction, f"**Signet ·** Tu as déjà noté **{title}**.")
-        return
-    if media_id and await cog.is_on_watchlist(guild, user_id, media_id):
-        await cog.remove_watchlist(guild, user_id, media_id)
-        await _notice(interaction, f"**Signet retiré ·** {title}")
-        return
-    await cog.add_watchlist(guild, user_id, hit)
-    await _notice(interaction, f"**Signet ajouté ·** {title} — retrouve-le dans `/carnet`.")
-
-
-class PublicListPickView(ReviewsLayout):
-    """Juste le choix de la liste, puis la confirmation à sa place."""
-
-    def __init__(self, cog: "Reviews", guild: discord.Guild, hit: MediaHit, *, author_id: int, lists: list[dict[str, Any]]):
-        super().__init__()
-        self.cog = cog
-        self.guild = guild
-        self.hit = hit
-        self.author_id = author_id
-        self.writable_lists = lists
-        self.done = ""
-        self._build()
-
-    async def add_to_list(self, interaction: discord.Interaction, list_id: int) -> None:
-        record = next((item for item in self.writable_lists if int(item["id"]) == list_id), None)
-        error = await self.cog.add_shared_list_item(self.guild, list_id, self.author_id, self.hit)
-        name = pretty.shorten_text(record["title"], 80) if record else "la liste"
-        self.done = f"**Liste ·** {error}" if error else f"**Ajouté ·** {self.hit.title} dans **{name}**."
-        self._build()
-        await self.push(interaction)
-        self.stop()
-
-    def _build(self) -> None:
-        if self.done:
-            self.set_layout([discord.ui.TextDisplay(self.done)])
-            return
-        title = pretty.shorten_text(self.hit.title, 80)
-        self.set_layout(
-            [discord.ui.TextDisplay(f"Ajouter **{title}** à…")],
-            discord.ui.ActionRow(FicheListSelect(self, self.writable_lists)),
-        )
-
-
-async def pick_list_from_public(
-    interaction: discord.Interaction,
-    cog: "Reviews",
-    guild: discord.Guild,
-    hit: MediaHit,
-) -> None:
-    lists = [
-        record for record in await cog.writable_shared_lists(guild, interaction.user.id)
-        if list_accepts_type(record.get("allowed_types"), hit.media_type)
-    ][:25]
-    if not lists:
-        await _notice(interaction, "**Listes ·** Aucune liste que tu peux modifier n'accepte ce type. Crée-en une avec `/listes`.")
-        return
-    view = PublicListPickView(cog, guild, hit, author_id=interaction.user.id, lists=lists)
-    await present_ephemeral_layout(interaction, view)
 
 
 async def show_critiques_from_public(
@@ -191,10 +109,8 @@ async def _dispatch(
 ) -> None:
     if action == "rate":
         await rate_from_public(interaction, cog, guild, hit, published_wid=published_wid)
-    elif action == "mark":
-        await toggle_bookmark_from_public(interaction, cog, guild, hit)
-    elif action == "list":
-        await pick_list_from_public(interaction, cog, guild, hit)
+    elif action in ("shelf", "mark", "list"):  # mark / list : anciens boutons déjà postés
+        await open_shelf(interaction, cog, guild, hit, done=public_shelf_done)
     elif action == "critiques":
         await show_critiques_from_public(interaction, cog, guild, hit)
     else:

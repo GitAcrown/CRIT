@@ -9,7 +9,7 @@ import discord
 from utils import pretty
 
 from ..constants import RATING_MAX
-from ..emojis import ADD_LIST, BOOKMARK_OFF, BOOKMARK_ON, SHARE, TRASH, XP
+from ..emojis import SHARE, TRASH, XP
 from ..formatting import (
     ONGOING,
     allows_ongoing,
@@ -69,8 +69,14 @@ def review_saved_lines(
     return parts
 
 
-def rating_options(default: float | None) -> list[discord.SelectOption]:
-    """Notes de 10 à 0 ; un menu n'affiche que des étoiles unicode."""
+NO_RATING = "none"
+
+
+def rating_options(default: float | None, *, allow_clear: bool = False) -> list[discord.SelectOption]:
+    """Notes de 10 à 0 ; un menu n'affiche que des étoiles unicode.
+
+    `allow_clear` (œuvre déjà notée) : dernière ligne « Sans note », qui supprime la note.
+    """
     selected = int(round(default)) if default is not None else None
     options = []
     for points in range(RATING_MAX, -1, -1):
@@ -81,6 +87,10 @@ def rating_options(default: float | None) -> list[discord.SelectOption]:
                 value=str(points),
                 default=points == selected,
             )
+        )
+    if allow_clear:
+        options.append(
+            discord.SelectOption(label="Sans note", value=NO_RATING, description="Supprime ta note et ton commentaire")
         )
     return options
 
@@ -95,6 +105,7 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
         default_comment: str,
         default_experienced: str = "",
         default_spoiler: bool = False,
+        has_review: bool = False,
     ):
         super().__init__()
         self._hub = parent
@@ -103,7 +114,7 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
         # donc le commentaire tapé n'est jamais perdu sur une erreur de saisie.
         self.rating_select = discord.ui.Select(
             placeholder="Choisis ta note",
-            options=rating_options(default_rating),
+            options=rating_options(default_rating, allow_clear=has_review),
         )
         self.comment_input = discord.ui.TextInput(
             label="Commentaire (optionnel)",
@@ -146,8 +157,20 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
             )
         )
 
+    async def _defer(self, interaction: discord.Interaction) -> None:
+        from_public = bool(self._hub.from_published_modal)
+        orphan = from_public or (self._hub._interaction is None and self._hub._message is None)
+        await interaction.response.defer(ephemeral=orphan or from_public)
+        if orphan and not from_public:
+            self._hub._interaction = interaction
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        rating = parse_rating(self.rating_select.values[0]) if self.rating_select.values else None
+        choice = self.rating_select.values[0] if self.rating_select.values else None
+        if choice == NO_RATING:
+            await self._defer(interaction)
+            await self._hub.delete_review(interaction)
+            return
+        rating = parse_rating(choice) if choice else None
         if rating is None:
             await interaction.response.send_message("**Erreur ·** Choisis une note.", ephemeral=True)
             return
@@ -158,11 +181,7 @@ class RateModal(discord.ui.Modal, title="Noter cette œuvre"):
         if date_error:
             # La note est enregistrée quand même ; seule la date mal tapée est ignorée.
             experienced_at = self._default_experienced
-        from_public = bool(self._hub.from_published_modal)
-        orphan = from_public or (self._hub._interaction is None and self._hub._message is None)
-        await interaction.response.defer(ephemeral=orphan or from_public)
-        if orphan and not from_public:
-            self._hub._interaction = interaction
+        await self._defer(interaction)
         await self._hub.save_review(
             interaction,
             rating,
@@ -201,7 +220,6 @@ class MediaSelect(discord.ui.Select):
         self._hub.review_page = 0
         self._hub.tab = "fiche"
         self._hub.confirm_delete = False
-        self._hub.picking_list = False
         await self._hub.show_selected(interaction)
 
 
@@ -242,7 +260,6 @@ class SeasonScopeSelect(discord.ui.Select):
         self._hub.pending_rating = None
         self._hub.pending_comment = ""
         self._hub.confirm_delete = False
-        self._hub.picking_list = False
         await interaction.response.defer()
         await self._hub.reload_stats()
         self._hub._build()
@@ -261,6 +278,7 @@ def rate_modal_for(parent: Any, user_id: int) -> RateModal:
         default_comment=existing.get("comment") or (parent.pending_comment if mine else ""),
         default_experienced=note_experienced_default(prefs, existing),
         default_spoiler=note_spoiler_default(existing),
+        has_review=mine and bool(parent.my_review),
     )
 
 
@@ -283,67 +301,6 @@ class RateButton(discord.ui.Button):
             )
             return
         await interaction.response.send_modal(rate_modal_for(parent, interaction.user.id))
-
-
-class WatchlistButton(discord.ui.Button):
-    def __init__(self, parent: "FicheView"):
-        rated = bool(parent.my_review)
-        on = bool(parent.on_watchlist) and not rated
-        super().__init__(
-            style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(BOOKMARK_ON if on else BOOKMARK_OFF),
-            disabled=rated,
-        )
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        await self._hub.toggle_watchlist(interaction)
-
-
-class AddToListButton(discord.ui.Button):
-    def __init__(self, parent: "FicheView"):
-        super().__init__(
-            style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(ADD_LIST),
-        )
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        await self._hub.start_list_pick(interaction)
-
-
-class FicheListSelect(discord.ui.Select):
-    def __init__(self, parent: "FicheView", lists: list[dict[str, Any]]):
-        options = [
-            discord.SelectOption(
-                label=pretty.shorten_text(record["title"], 95) or "Sans titre",
-                value=str(record["id"]),
-                description=pretty.shorten_text(
-                    f"{record['item_count']} œuvre{'s' if record['item_count'] != 1 else ''}",
-                    95,
-                ),
-            )
-            for record in lists
-        ]
-        super().__init__(placeholder="Ajouter à quelle liste ?", options=options)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        await self._hub.add_to_list(interaction, int(self.values[0]))
-
-
-class CancelListPickButton(discord.ui.Button):
-    def __init__(self, parent: "FicheView"):
-        super().__init__(label="Annuler", style=discord.ButtonStyle.secondary)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.picking_list = False
-        self._hub._build()
-        await apply_view(interaction, self._hub)
 
 
 class DeleteReviewButton(discord.ui.Button):

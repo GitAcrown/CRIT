@@ -21,7 +21,6 @@ from ..formatting import (
     experienced_line,
     format_comment,
     format_score,
-    list_accepts_type,
     mention_of,
     row_spoiler,
     season_media,
@@ -34,18 +33,14 @@ from ..formatting import (
 from ..prefs import UserPrefs
 from ..providers import MediaHit
 from .actions import (
-    AddToListButton,
-    CancelListPickButton,
     DeleteReviewButton,
     DeleteReviewCancelButton,
     DeleteReviewConfirmButton,
-    FicheListSelect,
     FicheShareButton,
     MediaSelect,
     RateButton,
     review_saved_lines,
     SeasonScopeSelect,
-    WatchlistButton,
 )
 from .base import (
     PageButton,
@@ -54,6 +49,7 @@ from .base import (
     sep_tight,
     TabButton,
 )
+from .shelf import ShelfButton
 from .fiche import (
     also_liked_line,
     append_fiche_sections,
@@ -109,8 +105,6 @@ class FicheView(ReviewsLayout):
         # Noté depuis le bouton Noter d'une fiche publique : ce menu n'est pas affiché.
         self.from_published_modal = False
         self.confirm_delete = False
-        self.picking_list = False
-        self.writable_lists: list[dict[str, Any]] = []
         self.prefs = UserPrefs()
         self._enriched: set[int] = set()
 
@@ -201,7 +195,6 @@ class FicheView(ReviewsLayout):
         )
         self.pending_rating = None
         self.confirm_delete = False
-        self.picking_list = False
         self.tab = "fiche"
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
@@ -224,41 +217,12 @@ class FicheView(ReviewsLayout):
         self.confirm_delete = False
         if self.published_wid:
             await sync_published_fiche(self.cog, self.guild, self.published_wid, self.hit)
-        self.notice = "**Critique supprimée ·** Ta note a été retirée."
+        notice = "**Critique supprimée ·** Ta note a été retirée."
+        if self.from_published_modal:  # « Sans note » depuis une fiche publique : pas de menu à rafraîchir
+            await interaction.followup.send(notice, ephemeral=True)
+            return
+        self.notice = notice
         await self.refresh(interaction)
-
-    async def toggle_watchlist(self, interaction: discord.Interaction) -> None:
-        if self.on_watchlist:
-            media_id = await self.cog.lookup_media_id(self.guild, self.hit)
-            if media_id:
-                await self.cog.remove_watchlist(self.guild, self.author_id, media_id)
-        else:
-            await self.cog.add_watchlist(self.guild, self.author_id, self.hit)
-        await self.load_my_review()
-        self._build()
-        await self.push(interaction)
-
-    async def start_list_pick(self, interaction: discord.Interaction) -> None:
-        lists = await self.cog.writable_shared_lists(self.guild, self.author_id)
-        self.writable_lists = [
-            record for record in lists
-            if list_accepts_type(record.get("allowed_types"), self.hit.media_type)
-        ][:25]
-        if self.writable_lists:
-            self.picking_list = True
-        else:
-            self.notice = "-# Aucune liste que tu peux modifier n'accepte ce type. Crée-en une avec `/listes`."
-        self._build()
-        await self.push(interaction)
-
-    async def add_to_list(self, interaction: discord.Interaction, list_id: int) -> None:
-        record = next((item for item in self.writable_lists if int(item["id"]) == list_id), None)
-        error = await self.cog.add_shared_list_item(self.guild, list_id, self.author_id, self.hit)
-        title = pretty.shorten_text(record["title"], 80) if record else "la liste"
-        self.notice = f"**Liste ·** {error}" if error else f"**Ajouté ·** {self.hit.title} dans **{title}**."
-        self.picking_list = False
-        self._build()
-        await self.push(interaction)
 
     async def refresh(self, interaction: discord.Interaction | None = None) -> None:
         await self.reload_stats()
@@ -366,11 +330,6 @@ class FicheView(ReviewsLayout):
                 discord.ui.TextDisplay(f"**Supprimer ta note de {title} ?**\n-# Ta note et ton commentaire seront retirés."),
                 discord.ui.ActionRow(DeleteReviewConfirmButton(self), DeleteReviewCancelButton(self)),
             ]
-        if self.picking_list:
-            return [
-                discord.ui.ActionRow(FicheListSelect(self, self.writable_lists)),
-                discord.ui.ActionRow(CancelListPickButton(self)),
-            ]
         rate_btn = RateButton(self)
         if self.pending_rating is not None and self.my_review is None:
             rate_btn.label = f"Noter {int(round(self.pending_rating))}"
@@ -379,8 +338,7 @@ class FicheView(ReviewsLayout):
         row: list[discord.ui.Item] = [rate_btn]
         if self.my_review:
             row.append(DeleteReviewButton(self))
-        row.append(WatchlistButton(self))
-        row.append(AddToListButton(self))
+        row.append(ShelfButton(self))
         return [discord.ui.ActionRow(*row)]
 
     def _build(self) -> None:
@@ -413,8 +371,8 @@ class FicheView(ReviewsLayout):
         actions.extend(self._action_rows())
         self.set_layout(body, *actions, above=[self._tabs_row()], sticky_head=sticky_head)
         # Partager sous la carte, comme dans le carnet ; pas de second partage
-        # d'une fiche déjà publique, ni pendant une confirmation ou un choix de liste.
-        if not self.published_wid and not self.confirm_delete and not self.picking_list:
+        # d'une fiche déjà publique, ni pendant une confirmation.
+        if not self.published_wid and not self.confirm_delete:
             self.add_item(discord.ui.ActionRow(FicheShareButton(self)))
 
 
