@@ -57,3 +57,80 @@ TRASH = "<:trash:1553496864538628196>"
 PLUS_SMALL = "<:plussmall:1553496866845360159>"
 MINUS_SMALL = "<:minussmall:1553496865624817865>"
 SETTINGS = "<:settings:1568616643456798811>"
+
+
+# ---------------------------------------------------------------------------
+# Synchronisation automatique (émojis d'application)
+# ---------------------------------------------------------------------------
+# Chaque `assets/emojis/<nom>.png` est envoyé comme émoji d'application du bot
+# (visible partout, hors quota des serveurs). Le nom du fichier correspond au
+# nom dans les tags ci-dessus : `movie.png` remplace `<:movie:…>`.
+# Un PNG modifié est ré-envoyé au démarrage suivant (empreinte dans .sync.json).
+# Les constantes sans PNG gardent leur valeur ci-dessus.
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import logging  # noqa: E402
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import discord  # noqa: E402
+
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets" / "emojis"
+_STATE_FILE = ASSETS_DIR / ".sync.json"
+_TAG = re.compile(r"<a?:(\w+):\d+>")
+_log = logging.getLogger("CRIT.Emojis")
+
+
+async def sync_app_emojis(bot: discord.Client) -> None:
+    """Envoie les PNG manquants ou modifiés puis met à jour les constantes.
+
+    À appeler après la connexion (setup_hook) et AVANT le chargement des cogs,
+    qui importent les constantes par valeur.
+    """
+    pngs = {p.stem: p for p in sorted(ASSETS_DIR.glob("*.png"))}
+    if not pngs:
+        return
+    try:
+        state = json.loads(_STATE_FILE.read_text("utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    known: dict[str, str] = state.setdefault(str(bot.application_id), {})
+
+    try:
+        remote = {e.name: e for e in await bot.fetch_application_emojis()}
+    except discord.HTTPException as e:
+        _log.error(f"Lecture des émojis d'application impossible : {e}")
+        return
+
+    resolved: dict[str, str] = {}
+    created = 0
+    for name, path in pngs.items():
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        emoji = remote.get(name)
+        try:
+            if emoji is not None and known.get(name) != digest:
+                await emoji.delete()  # ancienne image : on remplace
+                emoji = None
+            if emoji is None:
+                emoji = await bot.create_application_emoji(name=name, image=data)
+                known[name] = digest
+                created += 1
+        except discord.HTTPException as e:
+            _log.error(f"Émoji '{name}' non synchronisé : {e}")
+            continue
+        resolved[name] = str(emoji)
+
+    try:
+        _STATE_FILE.write_text(json.dumps(state, indent=2), "utf-8")
+    except OSError as e:
+        _log.warning(f"Écriture de {_STATE_FILE.name} impossible : {e}")
+
+    g = globals()
+    for const, value in list(g.items()):
+        if const.isupper() and isinstance(value, str):
+            m = _TAG.fullmatch(value)
+            if m and m[1] in resolved:
+                g[const] = resolved[m[1]]
+    _log.info(f"Émojis : {len(resolved)} synchronisé(s), dont {created} envoyé(s).")

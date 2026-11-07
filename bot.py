@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import dotenv_values
 
+from cogs.reviews.emojis import sync_app_emojis
+
 # ---------------------------------------------------------------------------
 # Variables
 # ---------------------------------------------------------------------------
@@ -101,11 +103,20 @@ async def main() -> None:
         logger.critical(f"Variable(s) manquante(s) dans .env : {', '.join(missing)}")
         return
 
-    async with bot:
+    async def setup_hook() -> None:
+        # Après la connexion (application_id connu), avant les cogs : ils
+        # importent les constantes d'émojis par valeur.
+        try:
+            await sync_app_emojis(bot)
+        except Exception as e:
+            logger.error(f"Synchro des émojis échouée : {type(e).__name__}: {e}")
         logger.info("Chargement des cogs...")
         await load_cogs(bot)
         logger.info("Cogs chargés.")
 
+    bot.setup_hook = setup_hook  # type: ignore[method-assign]
+
+    async with bot:
         # -------------------------------------------------------------------
         # Événements
         # -------------------------------------------------------------------
