@@ -24,7 +24,7 @@ from ..dyn import (
     mark_stripped,
     update_payload,
 )
-from ..emojis import EXPLICIT, PLANNING, SALE, STREAMING
+from ..emojis import ADD_LIST, BOOKMARK_OFF, EXPLICIT, PLANNING, SALE, STREAMING
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -394,15 +394,19 @@ def _link_label(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, "Fiche")
 
 
-def public_fiche_buttons(wid: str, button: type) -> discord.ui.ActionRow:
+def public_fiche_buttons(wid: str, button: type, *, count: int | None = None) -> discord.ui.ActionRow:
     """Boutons d'un message public, utilisables par tout le monde.
 
-    Chacun agit pour la personne qui clique, jamais sur le message public :
-    Noter ouvre son formulaire, Ouvrir lui affiche la fiche en privé.
+    Chacun agit pour la personne qui clique, jamais sur le message public, et sans
+    réafficher la fiche : Noter ouvre son formulaire, le signet bascule dans ses signets,
+    la liste propose ses listes, Critiques montre seulement les avis du serveur.
     """
+    critiques = f"Critiques ({count})" if count is not None else "Critiques"
     return discord.ui.ActionRow(
         button(wid, "rate", label="Noter", style=discord.ButtonStyle.green),
-        button(wid, "open", label="Ouvrir", style=discord.ButtonStyle.secondary),
+        button(wid, "mark", emoji=BOOKMARK_OFF),
+        button(wid, "list", emoji=ADD_LIST),
+        button(wid, "critiques", label=critiques),
     )
 
 
@@ -430,7 +434,7 @@ def render_published_fiche(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
     )
     if live:
-        body.append(public_fiche_buttons(wid, FicheDynButton))
+        body.append(public_fiche_buttons(wid, FicheDynButton, count=count))
     view.add_item(discord.ui.Container(*with_control_separators(body)))
     return view
 
@@ -555,7 +559,7 @@ def render_compact_fiche(
     guild_name: str = "",
     wid: str | None = None,
 ) -> discord.ui.LayoutView:
-    """Fiche postée en réponse à un lien : sans image large, avec les boutons Noter et Ouvrir."""
+    """Fiche postée en réponse à un lien : sans image large, avec les boutons publics."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
     body.extend(stream_live_items(stream_channels or [], plans))
@@ -566,7 +570,7 @@ def render_compact_fiche(
     if body:
         view.add_item(discord.ui.Container(*body))
     if wid:
-        view.add_item(public_fiche_buttons(wid, FicheDynButton))
+        view.add_item(public_fiche_buttons(wid, FicheDynButton, count=count))
     return view
 
 
@@ -636,19 +640,27 @@ async def sync_published_fiche(cog: "Reviews", guild: discord.Guild, wid: str, h
         "guild_name": guild.name,
         "plans": plans,
     })
-    update_payload(wid, rec.payload)
     stream_channels = await cog.stream_channels_for_hit(guild, hit)
-    view = render_published_fiche(
-        hit,
-        avg=avg,
-        count=count,
-        social=social,
-        wid=wid,
-        live=True,
-        stream_channels=stream_channels,
-        plans=plans,
-        guild_name=guild.name,
-    )
+    if rec.payload.get("kind") == "compact":
+        # Fiche de lien : même mise à jour (moyenne, nombre de critiques sur le bouton).
+        rec.payload["stream_channels"] = stream_channels
+        update_payload(wid, rec.payload)
+        view = render_compact_record(rec, live=True)
+    else:
+        update_payload(wid, rec.payload)
+        view = render_published_fiche(
+            hit,
+            avg=avg,
+            count=count,
+            social=social,
+            wid=wid,
+            live=True,
+            stream_channels=stream_channels,
+            plans=plans,
+            guild_name=guild.name,
+        )
+    if view is None:
+        return
     if not rec.channel_id or not rec.message_id:
         return
     try:

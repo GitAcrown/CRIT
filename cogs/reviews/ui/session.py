@@ -468,3 +468,24 @@ class RandomFicheButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await open_fiche(self._hub, interaction, random.choice(self._pool))
+
+
+class CritiquesView(FicheView):
+    """Critiques du serveur sur une œuvre, sans la fiche autour (bouton public Critiques)."""
+
+    def __init__(self, cog: "Reviews", guild: discord.Guild, hit: MediaHit, *, author_id: int):
+        super().__init__(cog, guild, [hit], author_id=author_id, tab="critiques")
+
+    async def prepare(self) -> None:
+        # La fiche est déjà dans le salon : pas d'enrichissement, juste les avis.
+        await self.load_member()
+        await self.reload_stats()
+        self._build()
+
+    def _build(self) -> None:
+        hit = self.hit
+        year = f"  ·  {hit.year}" if hit.year else ""
+        body: list[discord.ui.Item] = [discord.ui.TextDisplay(f"### Critiques · {hit.title}{year}")]
+        actions: list[discord.ui.Item] = []
+        self._critiques_body(body, actions)
+        self.set_layout(body, *actions)
