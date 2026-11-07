@@ -262,9 +262,6 @@ def journal_stats_line(entries: list[tuple[MediaHit, Any]]) -> str:
     return "-# " + " · ".join(parts)
 
 
-GRAPH_LEVELS = "▁▂▃▄▅▆▇█"
-
-
 def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
     counts = [0] * (RATING_MAX + 1)
     for _hit, row in entries:
@@ -274,24 +271,22 @@ def rating_counts(entries: list[tuple[MediaHit, Any]]) -> list[int]:
 
 
 def format_rating_graph(entries: list[tuple[MediaHit, Any]]) -> str:
-    """Répartition des notes sur une ligne : un bloc par note, de 0 à 10."""
+    """Répartition des notes sur une ligne d'émojis barres (pixel art), de 0 à 10."""
     if not entries:
         return ""
+    from . import emojis as emoji_set  # lu à l'appel : les barres sont synchronisées au démarrage
+
     counts = rating_counts(entries)
     peak = max(counts)
-    steps = len(GRAPH_LEVELS)  # 8 crans par rangée, 2 rangées
-    upper, lower = [], []
-    for n in counts:
-        height = 0 if not n else max(1, round(2 * steps * n / peak))
-        lower.append(GRAPH_LEVELS[min(height, steps) - 1] * 2 if height else "  ")
-        upper.append(GRAPH_LEVELS[height - steps - 1] * 2 if height > steps else "  ")
-    scale = "0" + " " * 9 + "5" + " " * 9 + "10"
+    top = emoji_set.BAR_MAX
+    bars = "".join(
+        getattr(emoji_set, f"BAR_{max(1, round(top * n / peak)) if n else 0}")
+        for n in counts
+    )
     most = max(range(RATING_MAX + 1), key=lambda score: (counts[score], score))
-    graph = "\n".join(["".join(upper).rstrip(), "".join(lower).rstrip(), scale])
     return (
-        "**Répartition**\n"
-        f"```\n{graph}\n```\n"
-        f"-# Le plus souvent **{most}/{RATING_MAX}** ({counts[most]} fois)"
+        f"**Répartition**\n{bars}\n"
+        f"-# De 0 à {RATING_MAX} · le plus souvent **{most}/{RATING_MAX}** ({counts[most]} fois)"
     )
 
 

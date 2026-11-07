@@ -61,6 +61,17 @@ SHUFFLE = "🔀"  # remplacé par assets/emojis/shuffle.png à la synchro
 OPEN = "↗️"  # remplacé par assets/emojis/open.png à la synchro
 SHELF = "🗂️"  # bouton Ranger (signet + listes), remplacé par assets/emojis/shelf.png
 
+# Barres du graphique de répartition (assets/emojis/bar_0.png … bar_11.png) :
+# BAR_0 = aucune note, BAR_1 à BAR_11 = hauteur croissante.
+BAR_0 = "▁"
+BAR_1 = BAR_2 = "▂"
+BAR_3 = BAR_4 = "▃"
+BAR_5 = BAR_6 = "▄"
+BAR_7 = BAR_8 = "▅"
+BAR_9 = BAR_10 = "▆"
+BAR_11 = "█"
+BAR_MAX = 11
+
 
 # ---------------------------------------------------------------------------
 # Synchronisation automatique (émojis d'application)
