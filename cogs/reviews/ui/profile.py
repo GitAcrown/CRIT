@@ -9,7 +9,7 @@ import discord
 from utils import pretty
 
 from ..constants import JOURNAL_PAGE, TYPE_CHOICES
-from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
+from ..emojis import AFFINITY, BOOKMARK_ON, HOUSE, JOURNAL, RIVAL, TWIN, XP
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -400,7 +400,7 @@ class ProfileView(ReviewsLayout):
         tabs: list[discord.ui.Item] = [
             TabButton(self, "profil", None, emoji=HOUSE),
             TabButton(self, "journal", str(self.review_count), emoji=JOURNAL),
-            TabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_LIST),
+            TabButton(self, "signets", str(len(self.watchlist_entries)), emoji=BOOKMARK_ON),
             TabButton(self, "affinites", str(len(self.affinities)), emoji=AFFINITY),
         ]
         return discord.ui.ActionRow(*tabs)
@@ -574,13 +574,13 @@ class ProfileView(ReviewsLayout):
     def _build(self) -> None:
         if self.tab == "journal":
             content, filters, actions = self._journal_layout()
-            self._assemble(self._header_item(avatar=False), content, filters=filters, actions=actions)
+            self._assemble(self._header_item(avatar=True), content, filters=filters, actions=actions)
         elif self.tab == "signets":
             content, actions = self._watchlist_layout()
-            self._assemble(self._header_item(avatar=False), content, actions=actions)
+            self._assemble(self._header_item(avatar=True), content, actions=actions)
         elif self.tab == "affinites":
             content, actions = self._affinites_layout()
-            self._assemble(self._header_item(avatar=False), content, actions=actions)
+            self._assemble(self._header_item(avatar=True), content, actions=actions)
         else:
             self._assemble(self._header_item(avatar=True), self._profil_content())
         self.add_item(discord.ui.ActionRow(ProfileShareButton(self)))
