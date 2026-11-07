@@ -349,6 +349,9 @@ class ReviewsLayout(discord.ui.LayoutView):
         for row in rows:
             if row is None:
                 continue
+            # Texte parmi les actions (question de confirmation…) : un trait le sépare du contenu.
+            if not _is_control_row(row) and not _is_separator(row) and children and not _is_separator(children[-1]):
+                children.append(sep_tight())
             children.append(row)
         if control_separators:
             head = children[:sticky_head]

@@ -234,9 +234,8 @@ class ReviewsConfigView(ReviewsLayout):
 
     def _build(self) -> None:
         apis = "  ·  ".join(f"{name} {'ok' if ok else 'manquant'}" for name, ok in self.api_status.items())
-        rows: list[discord.ui.Item] = []
-        if self.announce_channels:
-            rows.append(discord.ui.ActionRow(RemoveAnnounceSelect(self)))
+        # « Retirer un salon » juste sous les salons d'annonce, sans trait entre les deux.
+        remove_row = [discord.ui.ActionRow(RemoveAnnounceSelect(self))] if self.announce_channels else []
         self.set_layout(
             [
                 discord.ui.TextDisplay(f"## Configuration des critiques — {self.guild.name}"),
@@ -245,6 +244,7 @@ class ReviewsConfigView(ReviewsLayout):
                     self._announce_body(),
                     accessory=AddAnnounceButton(self),
                 ),
+                *remove_row,
                 discord.ui.Separator(),
                 discord.ui.Section(
                     f"**Commentaire max.**\n{self.comment_max} caractères",
@@ -255,7 +255,7 @@ class ReviewsConfigView(ReviewsLayout):
                     f"-# {self.review_count} critique(s) · {self.media_count} œuvre(s)\n-# APIs · {apis}"
                 ),
             ],
-            *rows,
+            control_separators=False,
         )
 
     async def _reload(self) -> None:

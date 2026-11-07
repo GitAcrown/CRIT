@@ -682,7 +682,7 @@ class SharedListView(ReviewsLayout):
         if self.menu == "confirm_delete" and not self.is_owner(self.viewer_id):
             self.menu = "browse"
         body: list[discord.ui.Item] = [discord.ui.TextDisplay(self._header()), sep_wide()]
-        rows: list[discord.ui.ActionRow] = []
+        rows: list[discord.ui.Item | None] = []
         max_page = 0
         page_items: list[tuple[MediaHit, Any]] = []
         if not self.items:
@@ -711,7 +711,7 @@ class SharedListView(ReviewsLayout):
                 body.append(section_with_thumbnail(text, hit.poster_url))
         if self.menu == "confirm_delete":
             title = pretty.shorten_text(str(self.record["title"]), 80) or "cette liste"
-            body.append(discord.ui.TextDisplay(
+            rows.append(discord.ui.TextDisplay(
                 f"**Supprimer {title} ?**\n"
                 "-# La liste et les œuvres qu'elle contient seront retirées."
             ))
