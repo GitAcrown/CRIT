@@ -9,7 +9,7 @@ import discord
 from utils import pretty
 
 from ..constants import JOURNAL_PAGE, TYPE_CHOICES
-from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
+from ..emojis import AFFINITY, BOOKMARK_LIST, HOUSE, JOURNAL, RIVAL, SETTINGS, TWIN, XP
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -166,7 +166,7 @@ class SettingsTabButton(discord.ui.Button):
     """Onglet Réglages de son propre carnet : préférences et skins d'étoiles."""
 
     def __init__(self, parent: "ProfileView"):
-        super().__init__(label="Réglages", emoji="⚙️", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Réglages", emoji=discord.PartialEmoji.from_str(SETTINGS), style=discord.ButtonStyle.secondary)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:

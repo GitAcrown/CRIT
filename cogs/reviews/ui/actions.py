@@ -290,7 +290,6 @@ class WatchlistButton(discord.ui.Button):
         rated = bool(parent.my_review)
         on = bool(parent.on_watchlist) and not rated
         super().__init__(
-            label="Signet",
             style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary,
             emoji=discord.PartialEmoji.from_str(BOOKMARK_ON if on else BOOKMARK_OFF),
             disabled=rated,
@@ -305,7 +304,6 @@ class WatchlistButton(discord.ui.Button):
 class AddToListButton(discord.ui.Button):
     def __init__(self, parent: "FicheView"):
         super().__init__(
-            label="Liste",
             style=discord.ButtonStyle.secondary,
             emoji=discord.PartialEmoji.from_str(ADD_LIST),
         )

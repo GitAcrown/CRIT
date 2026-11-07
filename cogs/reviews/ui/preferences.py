@@ -137,7 +137,7 @@ class EquipStarSkinButton(discord.ui.Button):
 
 
 class PreferencesView(ReviewsLayout):
-    """Onglets Fiches · Listes · Stream · Étoiles ; chaque choix s'enregistre aussitôt."""
+    """Onglets Fiches · Listes · Stream · Apparence ; chaque choix s'enregistre aussitôt."""
 
     def __init__(
         self,
@@ -202,7 +202,7 @@ class PreferencesView(ReviewsLayout):
             TabButton(self, "fiches", "Fiches"),
             TabButton(self, "listes", "Listes"),
             TabButton(self, "stream", "Stream"),
-            TabButton(self, "etoiles", "Étoiles"),
+            TabButton(self, "apparence", "Apparence"),
         )
 
     def _header(self, subtitle: str) -> discord.ui.Item:
@@ -354,7 +354,7 @@ class PreferencesView(ReviewsLayout):
             ),
         ]
 
-    def _etoiles(self) -> list[discord.ui.Item]:
+    def _apparence(self) -> list[discord.ui.Item]:
         if self.level >= 99:
             progress = f"{XP} Niveau max · **{self.total} XP** au total"
         else:
@@ -362,9 +362,9 @@ class PreferencesView(ReviewsLayout):
                 f"{XP} **{self.into}** / **{self.need}** XP vers le niveau {self.level + 1}\n"
                 f"{format_xp_bar(self.into, self.need)}"
             )
+        # En haut, seulement le niveau et l'XP : les skins sont le sujet de l'onglet.
         children: list[discord.ui.Item] = [
-            self._header("Étoiles"),
-            discord.ui.TextDisplay(f"**Niveau {self.level}** · {title_for_level(self.level)}\n{progress}"),
+            discord.ui.TextDisplay(f"### Niveau {self.level} · {title_for_level(self.level)}\n{progress}"),
         ]
         for skin in STAR_SKINS:
             locked = not self.skin_unlocked(skin)
@@ -384,5 +384,5 @@ class PreferencesView(ReviewsLayout):
         return children
 
     def _build(self) -> None:
-        pages = {"listes": self._listes, "stream": self._stream, "etoiles": self._etoiles}
+        pages = {"listes": self._listes, "stream": self._stream, "apparence": self._apparence}
         self.set_layout(pages.get(self.tab, self._fiches)(), above=[self._tabs_row()])
