@@ -254,8 +254,12 @@ def append_fiche_sections(
     social_line: str = "",
     guild_name: str = "",
     skin: StarSkin | str | None = None,
+    rate_button: discord.ui.Button | None = None,
 ) -> None:
-    """Notes (serveur en premier, source ensuite, puis la tienne), résumé, détails."""
+    """Notes (serveur en premier, source ensuite, puis la tienne), résumé, détails.
+
+    `rate_button` : bouton Noter placé à droite des étoiles (fiches publiques).
+    """
     notes: list[str] = []
     server = pretty.shorten_text((guild_name or "Ce serveur").strip() or "Ce serveur", 32)
     if count:
@@ -280,7 +284,8 @@ def append_fiche_sections(
     if social_line:
         notes.append(f"-# {social_line}")
     body.append(sep_tight())
-    body.append(discord.ui.TextDisplay("\n".join(notes)))
+    notes_text = discord.ui.TextDisplay("\n".join(notes))
+    body.append(discord.ui.Section(notes_text, accessory=rate_button) if rate_button else notes_text)
 
     summary = excerpt(hit.overview)
     footer = fiche_footer_line(hit)
@@ -394,7 +399,17 @@ def _link_label(hit: MediaHit) -> str:
     return SOURCE_NAMES.get(hit.source, "Fiche")
 
 
-def public_fiche_buttons(wid: str, button: type, *, count: int | None = None) -> discord.ui.ActionRow:
+def rate_dyn_button(wid: str, button: type) -> discord.ui.Item:
+    return button(wid, "rate", label="Noter", style=discord.ButtonStyle.green)
+
+
+def public_fiche_buttons(
+    wid: str,
+    button: type,
+    *,
+    count: int | None = None,
+    with_rate: bool = True,
+) -> discord.ui.ActionRow:
     """Boutons d'un message public, utilisables par tout le monde.
 
     Chacun agit pour la personne qui clique, jamais sur le message public, et sans
@@ -402,12 +417,13 @@ def public_fiche_buttons(wid: str, button: type, *, count: int | None = None) ->
     la liste propose ses listes, Critiques montre seulement les avis du serveur.
     """
     critiques = f"Critiques ({count})" if count is not None else "Critiques"
-    return discord.ui.ActionRow(
-        button(wid, "rate", label="Noter", style=discord.ButtonStyle.green),
+    row = [rate_dyn_button(wid, button)] if with_rate else []
+    row += [
         button(wid, "mark", emoji=BOOKMARK_OFF),
         button(wid, "list", emoji=ADD_LIST),
         button(wid, "critiques", label=critiques),
-    )
+    ]
+    return discord.ui.ActionRow(*row)
 
 
 def render_published_fiche(
@@ -432,9 +448,10 @@ def render_published_fiche(
     body.extend(fiche_intro(hit))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+        rate_button=rate_dyn_button(wid, FicheDynButton) if live else None,
     )
     if live:
-        body.append(public_fiche_buttons(wid, FicheDynButton, count=count))
+        body.append(public_fiche_buttons(wid, FicheDynButton, count=count, with_rate=False))
     view.add_item(discord.ui.Container(*with_control_separators(body)))
     return view
 
@@ -566,11 +583,11 @@ def render_compact_fiche(
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
+        rate_button=rate_dyn_button(wid, FicheDynButton) if wid else None,
     )
-    if body:
-        view.add_item(discord.ui.Container(*body))
     if wid:
-        view.add_item(public_fiche_buttons(wid, FicheDynButton, count=count))
+        body.append(public_fiche_buttons(wid, FicheDynButton, count=count, with_rate=False))
+    view.add_item(discord.ui.Container(*with_control_separators(body)))
     return view
 
 
@@ -706,9 +723,11 @@ def build_announce_view(
     container.add_item(discord.ui.Separator())
     container.add_item(section_with_thumbnail(film, hit.poster_url))
     container.add_item(discord.ui.TextDisplay(f"-# {fiche_meta_line(hit)}" + (f"  ·  [{_link_label(hit)}]({hit.url})" if hit.url else "")))
-    view.add_item(container)
     if live and wid:
-        view.add_item(public_fiche_buttons(wid, AnnounceDynButton))
+        # Boutons dans la carte, comme sur les fiches.
+        container.add_item(sep_tight())
+        container.add_item(public_fiche_buttons(wid, AnnounceDynButton))
+    view.add_item(container)
     return view
 
 
