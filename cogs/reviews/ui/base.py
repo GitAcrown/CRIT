@@ -281,7 +281,9 @@ class ReviewsLayout(discord.ui.LayoutView):
         *rows: discord.ui.Item | None,
         above: list[discord.ui.Item] | None = None,
         sticky_head: int = 0,
+        control_separators: bool = True,
     ) -> None:
+        """`control_separators=False` : pas de trait automatique avant un menu (formulaires de réglages)."""
         self.clear_items()
         above = list(above or [])
         if self.parent is not None:
@@ -301,8 +303,9 @@ class ReviewsLayout(discord.ui.LayoutView):
             if row is None:
                 continue
             children.append(row)
-        head = children[:sticky_head]
-        children = head + with_control_separators(children[sticky_head:])
+        if control_separators:
+            head = children[:sticky_head]
+            children = head + with_control_separators(children[sticky_head:])
         if children:
             self.add_item(discord.ui.Container(*children, accent_colour=self.accent_colour))
 

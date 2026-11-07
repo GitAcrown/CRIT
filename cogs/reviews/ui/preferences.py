@@ -390,4 +390,5 @@ class PreferencesView(ReviewsLayout):
 
     def _build(self) -> None:
         pages = {"listes": self._listes, "stream": self._stream, "apparence": self._apparence}
-        self.set_layout(pages.get(self.tab, self._fiches)(), above=[self._tabs_row()])
+        # Chaque titre colle à son menu ; seuls les traits larges séparent les réglages.
+        self.set_layout(pages.get(self.tab, self._fiches)(), above=[self._tabs_row()], control_separators=False)
