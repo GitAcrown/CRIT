@@ -14,7 +14,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .progress import format_unlocked_skins, level_for_xp, parse_unlocked_skins
+from .progress import LEGACY_SKIN_LEVELS, format_unlocked_skins, level_for_xp, parse_unlocked_skins
 
 logger = logging.getLogger("CRIT.Reviews")
 
@@ -145,6 +145,34 @@ SCHEMA = (
         user_id INTEGER NOT NULL,
         PRIMARY KEY (plan_id, user_id)
     )""",
+    # Quêtes hebdomadaires : état par membre, 3 emplacements, semaines validées.
+    """CREATE TABLE IF NOT EXISTS quest_profile (
+        user_id INTEGER PRIMARY KEY,
+        week TEXT NOT NULL DEFAULT '',
+        rerolled INTEGER NOT NULL DEFAULT 0,
+        streak INTEGER NOT NULL DEFAULT 0,
+        best_streak INTEGER NOT NULL DEFAULT 0,
+        last_full_week TEXT NOT NULL DEFAULT '',
+        quests_done INTEGER NOT NULL DEFAULT 0,
+        theme_month TEXT NOT NULL DEFAULT '',
+        theme_count INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL DEFAULT ''
+    )""",
+    """CREATE TABLE IF NOT EXISTS quest_slots (
+        user_id INTEGER NOT NULL,
+        slot INTEGER NOT NULL,
+        quest_id TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        done_week TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (user_id, slot)
+    )""",
+    """CREATE TABLE IF NOT EXISTS quest_weeks (
+        user_id INTEGER NOT NULL,
+        week TEXT NOT NULL,
+        month TEXT NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, week)
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_members_user ON members(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_reviews_media ON reviews(media_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchlist_media ON watchlist(media_id)",
@@ -183,9 +211,37 @@ def prepare_database(data_dir: Path) -> Path:
                 stats = _merge_legacy(conn, legacy_path, guild_id)
                 logger.info("Base du serveur %s fusionnée : %s", guild_id, stats)
             _archive(legacy_path, data_dir / "legacy")
+        _grandfather_skins(conn)
     finally:
         conn.close()
     return path
+
+
+def _grandfather_skins(conn: sqlite3.Connection) -> None:
+    """Une fois : les skins déjà débloqués avec les anciens seuils restent acquis."""
+    key = "skins_grandfather_v1"
+    if conn.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone() is not None:
+        return
+    granted = 0
+    for row in conn.execute("SELECT user_id, xp FROM profiles").fetchall():
+        level = level_for_xp(int(row["xp"]))
+        earned = {skin for skin, minimum in LEGACY_SKIN_LEVELS.items() if level >= minimum}
+        if not earned:
+            continue
+        current = conn.execute(
+            "SELECT unlocked_skins FROM preferences WHERE user_id=?", (row["user_id"],)
+        ).fetchone()
+        owned = set(parse_unlocked_skins(current["unlocked_skins"] if current else "")) | earned
+        conn.execute(
+            """INSERT INTO preferences (user_id, unlocked_skins) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET unlocked_skins=excluded.unlocked_skins""",
+            (row["user_id"], format_unlocked_skins(owned)),
+        )
+        granted += 1
+    conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, str(int(time.time()))))
+    conn.commit()
+    if granted:
+        logger.info("Skins conservés pour %s membre(s) (nouveaux seuils de niveau).", granted)
 
 
 def _archive(path: Path, folder: Path) -> None:

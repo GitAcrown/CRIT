@@ -57,6 +57,7 @@ from .ui.preferences import PreferencesView
 from .ui.profile import ProfileView
 from .ui.server import ServerHubView
 from .ui.session import FicheView
+from .ui.quests import QuestsView
 from .ui.settings import HelpView, ReviewsConfigView
 from .ui.streams import StreamBindView, StreamHubView
 
@@ -773,13 +774,25 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     @app_commands.command(name="reglages")
     @app_commands.guild_only()
     async def critique_reglages(self, interaction: discord.Interaction) -> None:
-        """Tes réglages : recherche, date, annonces, listes, stream et apparence des étoiles."""
+        """Tes réglages : recherche, date, annonces, listes et stream."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
                 "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
             )
         view = await PreferencesView.create(self, guild, interaction.user)
+        await view.start(interaction)
+
+    @app_commands.command(name="quetes")
+    @app_commands.guild_only()
+    async def critique_quetes(self, interaction: discord.Interaction) -> None:
+        """Tes quêtes de la semaine, ta série, et l'apparence de ton carnet (titre, skins)."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        view = await QuestsView.create(self, guild, interaction.user)
         await view.start(interaction)
 
     @app_commands.command(name="config")

@@ -6,10 +6,11 @@ le palier 2 vaut ~10 notes sans commentaire (100 XP).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import emojis as icons
 from .emojis import (
     CROWN_EMPTY,
     CROWN_FULL,
@@ -23,6 +24,12 @@ from .emojis import (
     HEART_EMPTY,
     HEART_FULL,
     HEART_HALF,
+    LEAF_EMPTY,
+    LEAF_FULL,
+    LEAF_HALF,
+    PINE_EMPTY,
+    PINE_FULL,
+    PINE_HALF,
     STAR,
     STAR_EMPTY,
     STAR_HALF,
@@ -85,6 +92,8 @@ class XpAward:
     level: int
     previous_level: int
     capped: bool
+    quest_lines: list[str] = field(default_factory=list)  # quêtes finies, série, thème
+    quest_skins: list["StarSkin"] = field(default_factory=list)  # skins de saison gagnés
 
     @property
     def leveled_up(self) -> bool:
@@ -95,11 +104,29 @@ class XpAward:
         return [r for r in PROFILE_REWARDS if self.previous_level < r.unlock_level <= self.level]
 
 
+# Icône de chaque titre de niveau (attribut de `emojis`, lu à l'appel car remplacé à la synchro).
+LEVEL_ICONS = {
+    "Novice": "LVL_NOVICE",
+    "Curieux": "LVL_CURIEUX",
+    "Chroniqueur": "LVL_CHRONIQUEUR",
+    "Critique": "LVL_CRITIQUE",
+    "Référent": "LVL_REFERENT",
+    "Légende du salon": "LVL_LEGENDE",
+}
+
+
 def title_for_level(level: int) -> str:
     for minimum, title in LEVEL_TITLES:
         if level >= minimum:
             return title
     return "Novice"
+
+
+def level_title_label(level: int) -> str:
+    """Titre de niveau précédé de son icône."""
+    title = title_for_level(level)
+    icon = getattr(icons, LEVEL_ICONS.get(title, ""), "")
+    return f"{icon} {title}".strip()
 
 
 def rewards_for_level(level: int) -> list[ProfileReward]:
@@ -141,8 +168,8 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         HEART_FULL,
         HEART_HALF,
         HEART_EMPTY,
-        2,
-        "Se débloque au niveau 2.",
+        3,
+        "Se débloque au niveau 3.",
     ),
     StarSkin(
         "couronnes",
@@ -150,8 +177,8 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         CROWN_FULL,
         CROWN_HALF,
         CROWN_EMPTY,
-        3,
-        "Se débloque au niveau 3.",
+        5,
+        "Se débloque au niveau 5.",
     ),
     StarSkin(
         "fleurs",
@@ -159,8 +186,8 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         FLOWER_FULL,
         FLOWER_HALF,
         FLOWER_EMPTY,
-        4,
-        "Se débloque au niveau 4.",
+        8,
+        "Se débloque au niveau 8.",
     ),
     StarSkin(
         "citrouille",
@@ -172,7 +199,29 @@ STAR_SKINS: tuple[StarSkin, ...] = (
         "Note un film ou une série d'horreur en octobre.",
         event="october_horror",
     ),
+    StarSkin(
+        "feuilles",
+        "Feuilles",
+        LEAF_FULL,
+        LEAF_HALF,
+        LEAF_EMPTY,
+        1,
+        "Valide 2 semaines de quêtes en novembre.",
+        event="season_11",
+    ),
+    StarSkin(
+        "sapins",
+        "Sapins",
+        PINE_FULL,
+        PINE_HALF,
+        PINE_EMPTY,
+        1,
+        "Valide 2 semaines de quêtes en décembre.",
+        event="season_12",
+    ),
 )
+# Seuils d'avant (cœurs 2, couronnes 3, fleurs 4) : repris par database._grandfather_skins.
+LEGACY_SKIN_LEVELS = {"coeurs": 2, "couronnes": 3, "fleurs": 4}
 STAR_SKIN_ALIASES = {"rpg": "coeurs"}
 STAR_SKIN_BY_ID: dict[str, StarSkin] = {skin.id: skin for skin in STAR_SKINS}
 
@@ -193,17 +242,40 @@ def resolve_star_skin(
         if owned is not None and chosen.id not in owned:
             return classic
         return chosen
-    if level is not None and level < chosen.unlock_level:
+    if level is not None and level < chosen.unlock_level and not (owned and chosen.id in owned):
         return classic
     return chosen
 
 
+def skin_is_unlocked(skin: StarSkin, level: int, owned: set[str] | frozenset[str]) -> bool:
+    """Skin de niveau atteint, ou skin possédé (événement, saison, ancien seuil)."""
+    if skin.id in owned:
+        return True
+    return not skin.event and level >= skin.unlock_level
+
+
+def event_month(event: str) -> int | None:
+    if event == "october_horror":
+        return 10
+    if event.startswith("season_"):
+        try:
+            return int(event.removeprefix("season_"))
+        except ValueError:
+            return None
+    return None
+
+
 def event_is_open(event: str, when: datetime | None = None) -> bool:
     """Fenêtre pendant laquelle une collection d'événement peut encore se gagner."""
-    if event != "october_horror":
+    month = event_month(event)
+    if month is None:
         return False
     moment = when or datetime.now(ZoneInfo("Europe/Paris"))
-    return moment.month == 10
+    return moment.month == month
+
+
+def season_skin_for_month(month: int) -> StarSkin | None:
+    return next((skin for skin in STAR_SKINS if skin.event == f"season_{month}"), None)
 
 
 def parse_unlocked_skins(raw: object) -> frozenset[str]:
@@ -211,18 +283,20 @@ def parse_unlocked_skins(raw: object) -> frozenset[str]:
         parts = {str(part).strip() for part in raw}
     else:
         parts = {part.strip() for part in str(raw or "").split(",")}
-    known = {skin.id for skin in STAR_SKINS if skin.event}
+    known = {skin.id for skin in STAR_SKINS}
     return frozenset(part for part in parts if part in known)
 
 
 def format_unlocked_skins(owned: set[str] | frozenset[str]) -> str:
-    return ",".join(skin.id for skin in STAR_SKINS if skin.event and skin.id in owned)
+    return ",".join(skin.id for skin in STAR_SKINS if skin.id in owned)
 
 
-def skins_unlocked_between(previous_level: int, level: int) -> list[StarSkin]:
+def skins_unlocked_between(
+    previous_level: int, level: int, owned: set[str] | frozenset[str] = frozenset()
+) -> list[StarSkin]:
     return [
         skin for skin in STAR_SKINS
-        if not skin.event and previous_level < skin.unlock_level <= level
+        if not skin.event and skin.id not in owned and previous_level < skin.unlock_level <= level
     ]
 
 

@@ -9,7 +9,7 @@ import discord
 from utils import pretty
 
 from ..constants import JOURNAL_PAGE, MAX_FAVORITES, TYPE_CHOICES
-from ..emojis import AFFINITY, BOOKMARK_ON, EDIT_LIST, HOUSE, JOURNAL, RIVAL, TWIN, XP
+from ..emojis import AFFINITY, BOOKMARK_ON, EDIT_LIST, HOUSE, JOURNAL, RIVAL, STREAK, TWIN, XP
 from ..formatting import (
     experienced_from_row,
     experienced_line,
@@ -32,7 +32,7 @@ from ..progress import (
     Affinity,
     level_progress,
     StarSkin,
-    title_for_level,
+    level_title_label,
 )
 from ..providers import MediaHit
 from .actions import share_button_kwargs
@@ -246,7 +246,7 @@ class AffinityCompareView(ReviewsLayout):
     def _person(self, user_id: int) -> str:
         return titled(
             mention_of(self.guild, self.cog.bot, user_id),
-            self.titles.get(user_id, title_for_level(1)),
+            self.titles.get(user_id, level_title_label(1)),
         )
 
     def _pair_line(self, title: str, left: float, right: float) -> str:
@@ -405,6 +405,7 @@ class ProfileView(ReviewsLayout):
         self.affinities = sorted(affinities, key=lambda a: (-a.percent, -a.overlap))
         self.titles = await cog.get_titles(guild, [member_id, *[item.user_id for item in self.affinities]])
         self.star_skin = await cog.star_skin_for(guild, member_id)
+        self.streak = (await cog.load_quests(member_id)).streak
 
     async def on_return(self, interaction: discord.Interaction) -> None:
         # Une note, un signet ou un skin a pu changer depuis la fiche ou les réglages.
@@ -428,7 +429,7 @@ class ProfileView(ReviewsLayout):
 
     def _profile_header(self, extra: str = "") -> str:
         level, into, need, total = level_progress(self.xp)
-        title = self.titles.get(self.member.id, title_for_level(level))
+        title = self.titles.get(self.member.id, level_title_label(level))
         mention = mention_of(self.guild, self.cog.bot, self.member.id)
         notes = f"**{self.review_count}** note{'s' if self.review_count != 1 else ''}"
         if self.average is not None:
@@ -441,6 +442,8 @@ class ProfileView(ReviewsLayout):
         stats = journal_stats_line(self.journal_entries)
         if stats:
             lines.append(stats)
+        if getattr(self, "streak", 0):
+            lines.append(f"{STREAK} Série de **{self.streak}** semaine{'s' if self.streak > 1 else ''} de quêtes")
         if extra:
             lines.append(extra)
         lines.append(format_grade(title))

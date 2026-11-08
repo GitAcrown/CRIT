@@ -1,4 +1,4 @@
-"""Réglages du membre (/reglages) : fiches, listes, stream et apparence (skins d'étoiles).
+"""Réglages du membre (/reglages) : fiches, listes et stream (l'apparence est dans /quetes).
 
 Les préférences sont communes à tous les serveurs.
 """
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from ..constants import TYPE_META
-from ..emojis import SETTINGS, XP
+from ..emojis import SETTINGS
 from ..formatting import list_edit_label, select_emoji, type_label
 from ..prefs import (
     STREAM_REMIND_BOTH,
@@ -23,15 +23,6 @@ from ..prefs import (
     search_pref_label,
     stream_remind_label,
     UserPrefs,
-)
-from ..progress import (
-    STAR_SKINS,
-    event_is_open,
-    format_xp_bar,
-    level_progress,
-    resolve_star_skin,
-    StarSkin,
-    title_for_level,
 )
 from .base import apply_view, ReviewsLayout, sep_wide, TabButton
 from .fiche import section_with_thumbnail
@@ -107,37 +98,8 @@ class PrefOnOffButton(discord.ui.Button):
         await self._hub.save(interaction, **{self._field: not current})
 
 
-def _skin_lock_label(skin: StarSkin) -> str:
-    if skin.event:
-        return "Octobre" if event_is_open(skin.event) else "Terminé"
-    return f"Niv. {skin.unlock_level}"
-
-
-def _skin_lock_reason(skin: StarSkin) -> str:
-    if skin.event == "october_horror":
-        if event_is_open(skin.event):
-            return f"{skin.name} se débloque en notant un film ou une série d'horreur en octobre."
-        return f"{skin.name} n'est plus gagnable. Elle se débloquait en notant un film ou une série d'horreur en octobre."
-    return f"{skin.name} se débloque au niveau {skin.unlock_level}."
-
-
-class EquipStarSkinButton(discord.ui.Button):
-    def __init__(self, parent: "PreferencesView", skin: StarSkin):
-        if not parent.skin_unlocked(skin):
-            super().__init__(label=_skin_lock_label(skin), style=discord.ButtonStyle.secondary, disabled=True)
-        elif parent.star_skin is not None and parent.star_skin.id == skin.id:
-            super().__init__(label="Équipé", style=discord.ButtonStyle.green, disabled=True)
-        else:
-            super().__init__(label="Équiper", style=discord.ButtonStyle.primary)
-        self._hub = parent
-        self._skin_id = skin.id
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await self._hub.save(interaction, star_skin=self._skin_id)
-
-
 class PreferencesView(ReviewsLayout):
-    """Onglets Fiches · Listes · Stream · Apparence ; chaque choix s'enregistre aussitôt."""
+    """Onglets Fiches · Listes · Stream ; chaque choix s'enregistre aussitôt."""
 
     def __init__(
         self,
@@ -146,7 +108,6 @@ class PreferencesView(ReviewsLayout):
         *,
         user: discord.abc.User,
         prefs: UserPrefs,
-        xp: int,
         tab: str = "fiches",
     ):
         super().__init__()
@@ -156,8 +117,6 @@ class PreferencesView(ReviewsLayout):
         self.user_id = user.id
         self.prefs = prefs
         self.tab = tab
-        self.level, self.into, self.need, self.total = level_progress(xp)
-        self.star_skin = resolve_star_skin(prefs.star_skin, level=self.level, owned=prefs.unlocked_skins)
         self._build()
 
     async def start(self, interaction: discord.Interaction) -> None:
@@ -172,7 +131,6 @@ class PreferencesView(ReviewsLayout):
             guild,
             user=user,
             prefs=await cog.get_user_prefs(guild, user.id),
-            xp=await cog.get_profile_xp(guild, user.id),
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -187,14 +145,8 @@ class PreferencesView(ReviewsLayout):
 
     async def save(self, interaction: discord.Interaction, **updates: object) -> None:
         self.prefs = await self.cog.set_user_prefs(self.guild, self.user_id, **updates)
-        self.star_skin = resolve_star_skin(self.prefs.star_skin, level=self.level, owned=self.prefs.unlocked_skins)
         self._build()
         await apply_view(interaction, self)
-
-    def skin_unlocked(self, skin: StarSkin) -> bool:
-        if skin.event:
-            return skin.id in self.prefs.unlocked_skins
-        return self.level >= skin.unlock_level
 
     def _section(self, title: str, hint: str, select: discord.ui.Select) -> list[discord.ui.Item]:
         return [
@@ -207,7 +159,6 @@ class PreferencesView(ReviewsLayout):
             TabButton(self, "fiches", "Fiches"),
             TabButton(self, "listes", "Listes"),
             TabButton(self, "stream", "Stream"),
-            TabButton(self, "apparence", "Apparence"),
         )
 
     def _header(self, subtitle: str) -> discord.ui.Item:
@@ -359,36 +310,7 @@ class PreferencesView(ReviewsLayout):
             ),
         ]
 
-    def _apparence(self) -> list[discord.ui.Item]:
-        if self.level >= 99:
-            progress = f"{XP} Niveau max · **{self.total} XP** au total"
-        else:
-            progress = (
-                f"{XP} **{self.into}** / **{self.need}** XP vers le niveau {self.level + 1}\n"
-                f"{format_xp_bar(self.into, self.need)}"
-            )
-        # En haut, seulement le niveau et l'XP : les skins sont le sujet de l'onglet.
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"### Niveau {self.level} · {title_for_level(self.level)}\n{progress}"),
-        ]
-        for skin in STAR_SKINS:
-            locked = not self.skin_unlocked(skin)
-            equipped = self.star_skin is not None and self.star_skin.id == skin.id
-            status = " · équipé" if equipped else (" · verrouillé" if locked else "")
-            if locked:
-                hint = _skin_lock_reason(skin)
-            elif skin.event:
-                hint = "Débloquée. Elle reste équipable."
-            else:
-                hint = skin.description
-            children.append(sep_wide())
-            children.append(discord.ui.Section(
-                f"**{skin.name}**{status}\n{skin.preview(7)}\n-# {hint}",
-                accessory=EquipStarSkinButton(self, skin),
-            ))
-        return children
-
     def _build(self) -> None:
-        pages = {"listes": self._listes, "stream": self._stream, "apparence": self._apparence}
+        pages = {"listes": self._listes, "stream": self._stream}
         # Chaque titre colle à son menu ; seuls les traits larges séparent les réglages.
         self.set_layout(pages.get(self.tab, self._fiches)(), above=[self._tabs_row()], control_separators=False)

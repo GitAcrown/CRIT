@@ -25,7 +25,7 @@ from ..formatting import (
     select_hit_description,
 )
 from ..prefs import note_experienced_default, note_spoiler_default, UserPrefs
-from ..progress import skins_unlocked_between, StarSkin, title_for_level, XpAward
+from ..progress import level_title_label, skins_unlocked_between, StarSkin, title_for_level, XpAward
 from ..providers import MediaHit
 from .base import apply_view
 from .fiche import send_published_fiche
@@ -58,14 +58,18 @@ def review_saved_lines(
     if award.leveled_up:
         new_title = title_for_level(award.level)
         old_title = title_for_level(award.previous_level)
-        parts.append(f"Nouveau titre · {new_title}" if new_title != old_title else f"Niveau {award.level}")
+        parts.append(
+            f"Nouveau titre · {level_title_label(award.level)}" if new_title != old_title else f"Niveau {award.level}"
+        )
         unlocked = skins_unlocked_between(award.previous_level, award.level)
         if unlocked:
             names = " · ".join(skin.name for skin in unlocked)
-            parts.append(f"Nouveau skin · {names} (`/reglages`)")
-    if collections:
-        names = " · ".join(skin.name for skin in collections)
-        parts.append(f"Nouvelle collection · {names} (`/reglages`)")
+            parts.append(f"Nouveau skin · {names} (`/quetes`)")
+    parts.extend(award.quest_lines)
+    gained = [*(collections or []), *award.quest_skins]
+    if gained:
+        names = " · ".join(skin.name for skin in gained)
+        parts.append(f"Nouvelle collection · {names} (`/quetes`)")
     return parts
 
 

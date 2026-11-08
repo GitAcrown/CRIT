@@ -61,6 +61,32 @@ SHUFFLE = "🔀"  # remplacé par assets/emojis/shuffle.png à la synchro
 OPEN = "↗️"  # remplacé par assets/emojis/open.png à la synchro
 SHELF = "🗂️"  # bouton Ranger (signet + listes), remplacé par assets/emojis/shelf.png
 
+# Les valeurs ci-dessous sont des secours Unicode, remplacées par assets/emojis/<nom>.png.
+# Icônes de niveau (lvl_*.png) et de titres spéciaux (title_*.png).
+LVL_NOVICE = "✨"
+LVL_CURIEUX = "🔍"
+LVL_CHRONIQUEUR = "🪶"
+LVL_CRITIQUE = "👁️"
+LVL_REFERENT = "🧭"
+LVL_LEGENDE = "👑"
+TITLE_PIONNIER = "🚩"
+TITLE_INCREVABLE = "🔥"
+TITLE_ECLECTIQUE = "🎨"
+TITLE_CONTRE = "🌊"
+TITLE_PLUME = "✏️"
+TITLE_AVENTURIER = "🎯"
+TITLE_COLLECTION = "🎁"
+
+# Quêtes.
+STREAK = "🔥"
+QUEST = "📜"
+REROLL = "🔄"
+THEME = "🎉"
+
+# Skins de saison.
+LEAF_FULL, LEAF_HALF, LEAF_EMPTY = "🍂", "🍂", "▫️"
+PINE_FULL, PINE_HALF, PINE_EMPTY = "🎄", "🎄", "▫️"
+
 # Barres du graphique de répartition (assets/emojis/bar_0.png … bar_11.png) :
 # BAR_0 = aucune note, BAR_1 à BAR_11 = hauteur croissante.
 BAR_0 = "▁"

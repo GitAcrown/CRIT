@@ -40,6 +40,7 @@ from .constants import (
     TYPE_META,
 )
 from .database import DB_NAME
+from .quests import QuestEvent, QuestMixin
 from .formatting import (
     experienced_from_row,
     format_list_types,
@@ -75,7 +76,7 @@ from .progress import (
     resolve_star_skin,
     STAR_SKINS,
     StarSkin,
-    title_for_level,
+    level_title_label,
     XpAward,
 )
 from .providers import MediaHit
@@ -93,7 +94,7 @@ MEDIA_COLUMNS = (
 ON_SERVER = "JOIN members gm ON gm.user_id = {}.user_id AND gm.guild_id = ?"
 
 
-class StorageMixin:
+class StorageMixin(QuestMixin):
     """Accès à la base commune. Les vues passent la guilde pour les données propres au serveur."""
 
     bot: commands.Bot
@@ -366,7 +367,11 @@ class StorageMixin:
             *unique,
         )
         xp_by_user = {int(row["user_id"]): int(row["xp"]) for row in rows}
-        return {user_id: title_for_level(level_for_xp(xp_by_user.get(user_id, 0))) for user_id in unique}
+        special = await self.special_titles_for(unique)
+        return {
+            user_id: special.get(user_id) or level_title_label(level_for_xp(xp_by_user.get(user_id, 0)))
+            for user_id in unique
+        }
 
     async def grant_review_xp(
         self,
@@ -542,6 +547,8 @@ class StorageMixin:
 
     async def add_watchlist(self, guild: discord.Guild | None, user_id: int, hit: MediaHit) -> None:
         media_id = await self.upsert_media(guild, hit)
+        if not await self.is_on_watchlist(guild, user_id, media_id):
+            await self.record_quest_event(user_id, QuestEvent("bookmark", hit))
         await self.db.execute(
             """INSERT INTO watchlist (user_id, media_id, added_at) VALUES (?, ?, ?)
                ON CONFLICT(user_id, media_id) DO UPDATE SET added_at=excluded.added_at""",
@@ -760,6 +767,7 @@ class StorageMixin:
             user_id,
             int(time.time()),
         )
+        await self.record_quest_event(user_id, QuestEvent("list_add", hit))
         return None
 
     async def load_favorite_ids(self, user_id: int) -> list[int]:
@@ -1134,6 +1142,7 @@ class StorageMixin:
             now,
             commit=False,
         )
+        from_bookmark = await self.is_on_watchlist(guild, user.id, media_id)
         await self.remove_watchlist(guild, user.id, media_id)
         award = await self.grant_review_xp(
             guild,
@@ -1142,6 +1151,16 @@ class StorageMixin:
             pioneer=pioneer,
             new_comment=new_comment,
         )
+        outcome = await self.record_quest_event(user.id, QuestEvent(
+            "review", hit, created=created, pioneer=pioneer, new_comment=new_comment,
+            from_bookmark=from_bookmark, others_rated=count,
+        ))
+        if outcome.xp:
+            award.gained += outcome.xp
+            award.total += outcome.xp
+            award.level = level_for_xp(award.total)
+        award.quest_lines = outcome.lines
+        award.quest_skins = outcome.skins
         if created:
             asyncio.create_task(
                 self.notify_bookmark_watchers(guild, user, hit, rating),
