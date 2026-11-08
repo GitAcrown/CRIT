@@ -14,8 +14,10 @@ from ..progress import (
     event_month,
     format_xp_bar,
     level_progress,
+    LEVEL_ICONS,
     level_title_label,
     resolve_star_skin,
+    title_for_level,
     season_skin_for_month,
     skin_is_unlocked,
 )
@@ -73,72 +75,90 @@ class RerollButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
-class EquipStarSkinButton(discord.ui.Button):
-    def __init__(self, parent: "QuestsView", skin: StarSkin):
-        if not parent.skin_unlocked(skin):
-            super().__init__(label=_skin_lock_label(skin), style=discord.ButtonStyle.secondary, disabled=True)
-        elif parent.star_skin.id == skin.id:
-            super().__init__(label="Équipé", style=discord.ButtonStyle.green, disabled=True)
-        else:
-            super().__init__(label="Équiper", style=discord.ButtonStyle.primary)
-        self._hub = parent
-        self._skin_id = skin.id
+LOCKED = "🔒 "
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await self._hub.cog.set_user_prefs(self._hub.guild, self._hub.user_id, star_skin=self._skin_id)
-        await self._hub.reload()
-        self._hub._build()
-        await apply_view(interaction, self._hub)
+
+def _option_emoji(value: str) -> discord.PartialEmoji | None:
+    return discord.PartialEmoji.from_str(value) if value else None
 
 
 class TitleSelect(discord.ui.Select):
+    """Tous les titres ; ceux pas encore gagnés disent comment les obtenir."""
+
     def __init__(self, parent: "QuestsView"):
+        level_title = title_for_level(parent.level)
         options = [
             discord.SelectOption(
-                label=f"Titre de niveau · {parent.level_title}",
+                # Un émoji custom ne s'affiche pas dans le texte d'une option : il va dans `emoji`.
+                label=f"Titre de niveau · {level_title}",
+                emoji=_option_emoji(getattr(icons, LEVEL_ICONS.get(level_title, ""), "")),
                 value="none",
                 description="Suit ton niveau",
                 default=not parent.state.title,
             )
         ]
-        for title in SPECIAL_TITLES:
-            if title.id not in parent.earned:
-                continue
+        for title in sorted(SPECIAL_TITLES, key=lambda t: t.id not in parent.earned):
+            earned = title.id in parent.earned
             options.append(discord.SelectOption(
                 label=title.name,
                 value=title.id,
-                description=title.hint[:100],
-                emoji=discord.PartialEmoji.from_str(getattr(icons, title.icon)),
+                description=(title.hint if earned else LOCKED + title.hint)[:100],
+                emoji=_option_emoji(getattr(icons, title.icon, "")),
                 default=parent.state.title == title.id,
             ))
-        super().__init__(placeholder="Titre affiché", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder="Titre affiché", options=options[:25], min_values=1, max_values=1)
         self._hub = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         value = self.values[0]
-        await self._hub.cog.set_special_title(self._hub.user_id, "" if value == "none" else value)
-        await self._hub.reload()
-        self._hub._build()
-        await apply_view(interaction, self._hub)
+        hub = self._hub
+        if value != "none" and value not in hub.earned:
+            hub.notice = "**Titre verrouillé ·** Tu ne l'as pas encore gagné."
+        else:
+            await hub.cog.set_special_title(hub.user_id, "" if value == "none" else value)
+            await hub.reload()
+        hub._build()
+        await apply_view(interaction, hub)
 
 
-def _skin_lock_label(skin: StarSkin) -> str:
-    month = event_month(skin.event) if skin.event else None
-    if month:
-        return _month_name(month).capitalize() if event_is_open(skin.event) else "Terminé"
-    return f"Niv. {skin.unlock_level}"
+class SkinSelect(discord.ui.Select):
+    """Tous les skins : débloqués d'abord, puis ceux à gagner avec leur condition."""
+
+    def __init__(self, parent: "QuestsView"):
+        skins = sorted(STAR_SKINS, key=lambda skin: not parent.skin_unlocked(skin))
+        options = []
+        for skin in skins[:25]:
+            unlocked = parent.skin_unlocked(skin)
+            options.append(discord.SelectOption(
+                label=skin.name,
+                value=skin.id,
+                description=("Débloqué" if unlocked else LOCKED + _skin_condition(skin))[:100],
+                emoji=_option_emoji(skin.full),
+                default=parent.star_skin.id == skin.id,
+            ))
+        super().__init__(placeholder="Skin d'étoiles", options=options, min_values=1, max_values=1)
+        self._hub = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        hub = self._hub
+        skin = next((s for s in STAR_SKINS if s.id == self.values[0]), None)
+        if skin is None or not hub.skin_unlocked(skin):
+            hub.notice = f"**Skin verrouillé ·** {_skin_condition(skin) if skin else ''}".rstrip()
+        else:
+            await hub.cog.set_user_prefs(hub.guild, hub.user_id, star_skin=skin.id)
+            await hub.reload()
+        hub._build()
+        await apply_view(interaction, hub)
 
 
-def _skin_lock_reason(skin: StarSkin) -> str:
+def _skin_condition(skin: StarSkin) -> str:
     if skin.event == "october_horror":
-        if event_is_open(skin.event):
-            return f"{skin.name} se débloque en notant un film ou une série d'horreur en octobre."
-        return f"{skin.name} se gagne en octobre, en notant un film ou une série d'horreur."
+        return "En octobre : noter un film ou une série d'horreur"
     month = event_month(skin.event) if skin.event else None
     if month:
-        when = "ce mois-ci" if event_is_open(skin.event) else f"en {_month_name(month)}"
-        return f"{skin.name} se gagne {when} en validant {SEASON_WEEKS} semaines de quêtes."
-    return f"{skin.name} se débloque au niveau {skin.unlock_level}."
+        when = "Ce mois-ci" if event_is_open(skin.event) else f"En {_month_name(month)}"
+        return f"{when} : valider {SEASON_WEEKS} semaines de quêtes"
+    return f"Niveau {skin.unlock_level}"
 
 
 # ---------------------------------------------------------------------------
@@ -265,36 +285,28 @@ class QuestsView(ReviewsLayout):
                 f"{icons.XP} **{self.into}** / **{self.need}** XP vers le niveau {self.level + 1}\n"
                 f"{format_xp_bar(self.into, self.need)}"
             )
-        locked = [title for title in SPECIAL_TITLES if title.id not in self.earned]
-        locked_lines = "\n".join(f"-# {title.label()} · {title.hint}" for title in locked)
-        children: list[discord.ui.Item] = [
+        special = next((t for t in SPECIAL_TITLES if t.id == self.state.title), None)
+        shown_title = special.label() if special else self.level_title
+        titles_won = sum(1 for t in SPECIAL_TITLES if t.id in self.earned)
+        skins_won = sum(1 for skin in STAR_SKINS if self.skin_unlocked(skin))
+        return [
             section_with_thumbnail(
                 f"## Apparence\n**Niveau {self.level}** · {self.level_title}\n{progress}",
                 self.user.display_avatar.url,
             ),
             sep_wide(),
             discord.ui.TextDisplay(
-                "**Titre affiché**\n-# Sous ton nom dans le carnet et les annonces."
+                f"**Titre ·** {shown_title}\n"
+                f"-# Sous ton nom dans le carnet et les annonces · {titles_won}/{len(SPECIAL_TITLES)} titres spéciaux"
             ),
             discord.ui.ActionRow(TitleSelect(self)),
+            sep_wide(),
+            discord.ui.TextDisplay(
+                f"**Étoiles ·** {self.star_skin.name}\n{self.star_skin.preview(7)}\n"
+                f"-# {skins_won}/{len(STAR_SKINS)} skins débloqués"
+            ),
+            discord.ui.ActionRow(SkinSelect(self)),
         ]
-        if locked_lines:
-            children.append(discord.ui.TextDisplay(f"-# **À gagner**\n{locked_lines}"))
-        for skin in STAR_SKINS:
-            is_locked = not self.skin_unlocked(skin)
-            equipped = self.star_skin.id == skin.id
-            status = " · équipé" if equipped else (" · verrouillé" if is_locked else "")
-            if is_locked:
-                hint = _skin_lock_reason(skin)
-            elif skin.event or skin.id in self.prefs.unlocked_skins:
-                hint = "Débloqué. Il reste équipable."
-            else:
-                hint = skin.description
-            children.append(discord.ui.Section(
-                f"**{skin.name}**{status}\n{skin.preview(7)}\n-# {hint}",
-                accessory=EquipStarSkinButton(self, skin),
-            ))
-        return children
 
     def _build(self) -> None:
         page = self._apparence if self.tab == "apparence" else self._quetes
