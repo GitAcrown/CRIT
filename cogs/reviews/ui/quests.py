@@ -238,9 +238,21 @@ class QuestsView(ReviewsLayout):
             ),
             sep_wide(),
         ]
-        for index, slot in enumerate(state.slots):
-            if index:
-                children.append(sep_tight())
+        # 1. Le skin à gagner ce mois-ci, à part.
+        skin = season_skin_for_month(today().month)
+        if skin is not None:
+            month = _month_name(today().month)
+            if skin.id in self.prefs.unlocked_skins:
+                status = "Débloqué · équipable dans **Apparence**"
+            else:
+                weeks = min(state.month_weeks, SEASON_WEEKS)
+                status = f"**{weeks}/{SEASON_WEEKS}** semaines validées · valide {SEASON_WEEKS} semaines en {month}"
+            children.extend([
+                discord.ui.TextDisplay(f"**Skin de {month} · {skin.name}**\n{skin.preview(7)}\n-# {status}"),
+                sep_wide(),
+            ])
+        # 2. Les 3 quêtes de la semaine puis la quête du mois, à la suite.
+        for slot in state.slots:
             if slot.done:
                 text = f"~~{slot.quest.label}~~\n-# Accomplie · +{QUEST_XP} XP · remplacée lundi"
             else:
@@ -249,30 +261,26 @@ class QuestsView(ReviewsLayout):
                     f"-# {_progress_bar(slot.progress, slot.quest.target)}  "
                     f"{slot.progress}/{slot.quest.target} · +{QUEST_XP} XP"
                 )
-            children.append(discord.ui.Section(text, accessory=RerollButton(self, slot)))
+            # Relance déjà utilisée ou quête finie : pas de bouton du tout.
+            if slot.done or state.rerolled:
+                children.append(discord.ui.TextDisplay(text))
+            else:
+                children.append(discord.ui.Section(text, accessory=RerollButton(self, slot)))
+            children.append(sep_tight())
         theme = current_theme()
         count = state.theme_count
+        children.append(discord.ui.TextDisplay(
+            f"{icons.THEME} **{theme.label}**\n"
+            f"-# {theme.name} · répétable tout le mois · +{THEME_XP} XP à chaque fois"
+            + (f" · **{count}** ce mois-ci" if count else "")
+        ))
         children.extend([
             sep_wide(),
             discord.ui.TextDisplay(
-                f"{icons.THEME} **{theme.name} ·** {theme.label}\n"
-                f"-# Quête du mois, répétable · +{THEME_XP} XP à chaque fois"
-                + (f" · **{count}** ce mois-ci" if count else "")
+                "-# Finis les 3 quêtes pour valider la semaine. Une quête pas finie continue "
+                "la semaine suivante ; les quêtes finies sont remplacées le lundi."
             ),
         ])
-        skin = season_skin_for_month(today().month)
-        if skin is not None:
-            owned = skin.id in self.prefs.unlocked_skins
-            weeks = min(state.month_weeks, SEASON_WEEKS)
-            status = "Débloqué" if owned else f"**{weeks}/{SEASON_WEEKS}** semaines validées ce mois-ci"
-            children.extend([
-                sep_tight(),
-                discord.ui.TextDisplay(f"**Skin du mois · {skin.name}**  {skin.preview(7)}\n-# {status}"),
-            ])
-        children.append(discord.ui.TextDisplay(
-            "-# Finis les 3 quêtes pour valider la semaine. Une quête pas finie continue "
-            "la semaine suivante ; les quêtes finies sont remplacées le lundi."
-        ))
         return children
 
     # -- Apparence ----------------------------------------------------------

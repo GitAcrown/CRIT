@@ -86,6 +86,9 @@ async def apply_view(interaction: discord.Interaction, view: discord.ui.LayoutVi
     """Met à jour le message cliqué, pas le defer d'origine."""
     kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
     target = interaction.message
+    if hasattr(view, "_interaction"):
+        # Dernier clic : son jeton permet de rééditer un message éphémère plus tard (effacement d'un avis).
+        view._interaction = interaction
     if not interaction.response.is_done():
         await interaction.response.edit_message(**kwargs)
         bind_view_message(view, target)
@@ -273,10 +276,15 @@ class ReviewsLayout(discord.ui.LayoutView):
                 return
             message = self.message or self._message
             if message is not None:
-                await message.edit(view=self, allowed_mentions=NO_PINGS)
-                return
+                try:
+                    await message.edit(view=self, allowed_mentions=NO_PINGS)
+                    return
+                except discord.HTTPException:
+                    # Message éphémère lié par un clic : seul le jeton d'interaction peut l'éditer.
+                    if self._interaction is None:
+                        raise
             if self._interaction is not None:
-                await apply_view(self._interaction, self)
+                await self._interaction.edit_original_response(view=self, allowed_mentions=NO_PINGS)
         except discord.HTTPException as exc:
             logger.warning("Impossible de rafraîchir %s : %s", type(self).__name__, exc)
 
