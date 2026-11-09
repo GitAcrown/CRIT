@@ -98,6 +98,8 @@ SOURCE_NAMES = {
     "steam": "Steam",
     "spotify": "Spotify",
     "openlibrary": "Open Library",
+    "googlebooks": "Google Books",
+    "anilist": "AniList",
 }
 
 

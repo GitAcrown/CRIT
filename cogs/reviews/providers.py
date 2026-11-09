@@ -1,7 +1,8 @@
-"""Clients HTTP pour TMDB, Steam, Spotify et Open Library.
+"""Clients HTTP pour TMDB, Steam, Spotify et les livres (Open Library, Google Books, AniList).
 
-Les clés TMDB / Spotify sont lues depuis `.env` (mêmes noms que MARIA_R).
-Steam Store et Open Library n'exigent aucune clé.
+Les clés TMDB / Spotify / Google Books sont lues depuis `.env`.
+Steam Store, Open Library et AniList n'exigent aucune clé ; Google Books marche sans
+clé mais avec un quota partagé vite épuisé (GOOGLE_BOOKS_API_KEY recommandée).
 """
 
 from __future__ import annotations
@@ -39,6 +40,22 @@ OPENLIB_COVER = "https://covers.openlibrary.org/b/id/{}-M.jpg"
 OPENLIB_WORK = "https://openlibrary.org{}"
 OPENLIB_FIELDS = "key,title,author_name,first_publish_year,cover_i,subject,language"
 
+GBOOKS_VOLUMES = "https://www.googleapis.com/books/v1/volumes"
+GBOOKS_FIELDS = (
+    "items(id,volumeInfo(title,subtitle,authors,publishedDate,imageLinks,categories,"
+    "language,infoLink,canonicalVolumeLink,description,pageCount,publisher))"
+)
+
+ANILIST_URL = "https://graphql.anilist.co"
+ANILIST_MEDIA_FIELDS = """
+    id siteUrl format countryOfOrigin genres volumes
+    title { romaji english native }
+    startDate { year }
+    coverImage { large }
+    description(asHtml: false)
+    staff(perPage: 2, sort: RELEVANCE) { nodes { name { full } } }
+"""
+
 _YEAR_RE = re.compile(r"\s*[\(\[]?(19\d{2}|20\d{2})[\)\]]?\s*$")
 _PREFIX_RE = re.compile(r"^([^\s:/]+)\s*:\s*(.+)$")
 _TMDB_URL_RE = re.compile(
@@ -62,6 +79,10 @@ _SOURCE_ALIASES: dict[str, tuple[str, str | None]] = {
     "openlibrary": ("openlibrary", "book"),
     "ol": ("openlibrary", "book"),
     "isbn": ("openlibrary", "book"),
+    "googlebooks": ("googlebooks", "book"),
+    "gb": ("googlebooks", "book"),
+    "anilist": ("anilist", "book"),
+    "manga": ("anilist", "book"),
     "movie": ("tmdb", "movie"),
     "film": ("tmdb", "movie"),
     "tv": ("tmdb", "tv"),
@@ -73,8 +94,10 @@ _SOURCE_ALIASES: dict[str, tuple[str, str | None]] = {
     "album": ("spotify", "album"),
     "track": ("spotify", "track"),
     "morceau": ("spotify", "track"),
-    "book": ("openlibrary", "book"),
-    "livre": ("openlibrary", "book"),
+    # Toutes les sources de livres à la fois.
+    "book": ("books", "book"),
+    "livre": ("books", "book"),
+    "bd": ("books", "book"),
 }
 _TOKEN_SAFETY_MARGIN = 60
 _LOW_PRIORITY_MARKERS = (
@@ -232,6 +255,18 @@ def parse_search_query(raw: str) -> SearchSpec:
             spec.query = ""
             spec.lookup_id = rest
             return spec
+
+    if source == "googlebooks" and re.fullmatch(r"[A-Za-z0-9_-]{12}", rest) and re.search(r"[A-Z0-9_-]", rest):
+        spec.query = ""
+        spec.lookup_id = rest
+        spec.lookup_kind = "volume"
+        return spec
+
+    if source == "anilist" and rest.isdigit():
+        spec.query = ""
+        spec.lookup_id = rest
+        spec.lookup_kind = "manga"
+        return spec
 
     if source == "openlibrary":
         key = rest.strip()
@@ -405,6 +440,7 @@ class _ResponseCache:
         except Exception as exc:
             if not waiter.done():
                 waiter.set_exception(exc)
+                waiter.exception()  # marqué « lu » : sinon asyncio logue une erreur s'il n'y a pas d'autre attente
             raise
         else:
             self._store[key] = (time.monotonic() + self.ttl, payload)
@@ -1053,6 +1089,194 @@ class OpenLibraryClient:
         ]
 
 
+def _gb_cover(info: dict) -> str | None:
+    links = info.get("imageLinks") or {}
+    url = links.get("thumbnail") or links.get("smallThumbnail")
+    if not url:
+        return None
+    # https obligatoire pour Discord ; sans le coin corné ajouté par Google.
+    return str(url).replace("http://", "https://").replace("&edge=curl", "")
+
+
+def _gb_hit(item: dict) -> MediaHit | None:
+    volume_id = item.get("id")
+    info = item.get("volumeInfo") or {}
+    title = (info.get("title") or "").strip()
+    if not volume_id or not title:
+        return None
+    if info.get("subtitle"):
+        title = f"{title} — {info['subtitle']}"
+    authors = [name for name in (info.get("authors") or []) if isinstance(name, str)]
+    language = str(info.get("language") or "")
+    return MediaHit(
+        source="googlebooks",
+        source_id=str(volume_id),
+        media_type="book",
+        title=title,
+        subtitle=", ".join(authors[:2]),
+        year=_year_from(info.get("publishedDate")),
+        poster_url=_gb_cover(info),
+        url=info.get("canonicalVolumeLink") or info.get("infoLink") or "",
+        overview=re.sub(r"<[^>]+>", "", info.get("description") or "")[:1000],
+        genres=[c for c in (info.get("categories") or []) if isinstance(c, str)][:3],
+        extra={
+            "authors": authors[:3],
+            "languages": ["fre"] if language == "fr" else [language] if language else [],
+            "publisher": info.get("publisher") or "",
+            "pages": info.get("pageCount") or 0,
+        },
+    )
+
+
+class GoogleBooksClient:
+    """Google Books : bonne couverture des BD, mangas et sorties françaises récentes."""
+
+    COOLDOWN = 600  # après un 429 (quota), on laisse Google tranquille 10 min
+
+    def __init__(self, session: aiohttp.ClientSession, api_key: str = ""):
+        self.session = session
+        self.api_key = api_key
+        self._paused_until = 0.0
+
+    def _pause_if_quota(self, exc: Exception) -> None:
+        if isinstance(exc, aiohttp.ClientResponseError) and exc.status == 429:
+            self._paused_until = time.monotonic() + self.COOLDOWN
+            hint = "" if self.api_key else " (ajoute GOOGLE_BOOKS_API_KEY dans .env)"
+            logger.warning("Google Books : quota atteint, pause de %d min%s", self.COOLDOWN // 60, hint)
+
+    def _params(self, extra: dict[str, Any]) -> dict[str, Any]:
+        params = dict(extra)
+        if self.api_key:
+            params["key"] = self.api_key
+        return params
+
+    async def search(self, query: str, limit: int) -> list[MediaHit]:
+        text = query.strip()
+        if len(text) < 2 or time.monotonic() < self._paused_until:
+            return []
+        try:
+            payload = await _json(
+                self.session,
+                GBOOKS_VOLUMES,
+                params=self._params({
+                    "q": text,
+                    "maxResults": min(max(limit, 8), 20),
+                    "printType": "books",
+                    "fields": GBOOKS_FIELDS,
+                }),
+                timeout=aiohttp.ClientTimeout(total=6, sock_connect=2),
+            )
+        except Exception as exc:
+            if isinstance(exc, aiohttp.ClientResponseError) and exc.status == 429:
+                self._pause_if_quota(exc)
+            else:
+                logger.warning("Recherche Google Books échouée : %s", exc)
+            return []
+        hits = [hit for item in payload.get("items") or [] if (hit := _gb_hit(item))]
+        return _rank_books(text, hits)[:limit]
+
+    async def lookup(self, volume_id: str) -> list[MediaHit]:
+        try:
+            payload = await _json(
+                self.session,
+                f"{GBOOKS_VOLUMES}/{volume_id}",
+                params=self._params({}),
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+        except Exception as exc:
+            logger.warning("Lookup Google Books échoué (%s) : %s", volume_id, exc)
+            return []
+        hit = _gb_hit(payload)
+        return [hit] if hit else []
+
+
+def _anilist_hit(media: dict) -> MediaHit | None:
+    media_id = media.get("id")
+    titles = media.get("title") or {}
+    title = titles.get("english") or titles.get("romaji") or titles.get("native")
+    if not media_id or not title:
+        return None
+    staff = [
+        node["name"]["full"]
+        for node in ((media.get("staff") or {}).get("nodes") or [])
+        if (node.get("name") or {}).get("full")
+    ]
+    fmt = str(media.get("format") or "")
+    kind = {"MANGA": "Manga", "NOVEL": "Light novel", "ONE_SHOT": "One shot"}.get(fmt, "Manga")
+    origin = {"KR": "Manhwa", "CN": "Manhua"}.get(str(media.get("countryOfOrigin") or ""))
+    description = re.sub(r"<[^>]+>", "", media.get("description") or "").strip()
+    genres = [g for g in (media.get("genres") or []) if isinstance(g, str)]
+    return MediaHit(
+        source="anilist",
+        source_id=str(media_id),
+        media_type="book",
+        title=str(title),
+        subtitle=", ".join(staff[:2]),
+        year=(media.get("startDate") or {}).get("year"),
+        poster_url=(media.get("coverImage") or {}).get("large"),
+        url=media.get("siteUrl") or f"https://anilist.co/manga/{media_id}",
+        overview=description[:1000],
+        genres=[origin or kind, *genres[:2]],
+        extra={
+            "authors": staff[:3],
+            "volumes": media.get("volumes") or 0,
+            "alt_titles": [t for t in (titles.get("romaji"), titles.get("native")) if t and t != title],
+        },
+    )
+
+
+class AniListClient:
+    """AniList (GraphQL, sans clé) : mangas, manhwas, light novels."""
+
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
+
+    async def _graphql(self, query: str, variables: dict[str, Any], *, total: float) -> dict:
+        async with self.session.post(
+            ANILIST_URL,
+            json={"query": query, "variables": variables},
+            timeout=aiohttp.ClientTimeout(total=total, sock_connect=2),
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json()
+        return payload.get("data") or {}
+
+    async def search(self, query: str, limit: int) -> list[MediaHit]:
+        text = query.strip()
+        if len(text) < 2:
+            return []
+        gql = (
+            "query ($q: String, $n: Int) { Page(perPage: $n) { media(search: $q, type: MANGA, "
+            "sort: SEARCH_MATCH, isAdult: false) {" + ANILIST_MEDIA_FIELDS + "} } }"
+        )
+        try:
+            data = await self._graphql(gql, {"q": text, "n": max(limit, 5)}, total=6)
+        except Exception as exc:
+            logger.warning("Recherche AniList échouée : %s", exc)
+            return []
+        media = (data.get("Page") or {}).get("media") or []
+        return [hit for item in media if (hit := _anilist_hit(item))][:limit]
+
+    async def lookup(self, media_id: str) -> list[MediaHit]:
+        gql = "query ($id: Int) { Media(id: $id, type: MANGA) {" + ANILIST_MEDIA_FIELDS + "} }"
+        try:
+            data = await self._graphql(gql, {"id": int(media_id)}, total=10)
+        except Exception as exc:
+            logger.warning("Lookup AniList échoué (%s) : %s", media_id, exc)
+            return []
+        hit = _anilist_hit(data.get("Media") or {})
+        return [hit] if hit else []
+
+
+def _book_key(hit: MediaHit) -> tuple[str, str]:
+    """Même livre d'une source à l'autre : titre sans sous-titre + nom du premier auteur."""
+    title = _fold(hit.title).split(" — ")[0]
+    title = re.sub(r"[^a-z0-9]+", " ", title).strip()
+    authors = hit.extra.get("authors") or []
+    words = _fold(authors[0]).split() if authors else []
+    return title, words[-1] if words else ""
+
+
 _TYPE_PRIORITY = {
     "movie": 0,
     "tv": 1,
@@ -1073,11 +1297,14 @@ class MediaCatalog:
         tmdb_key: str,
         spotify_id: str,
         spotify_secret: str,
+        google_books_key: str = "",
     ):
         self.tmdb = TMDBClient(session, tmdb_key.strip())
         self.steam = SteamClient(session)
         self.spotify = SpotifyClient(session, spotify_id.strip(), spotify_secret.strip())
         self.books = OpenLibraryClient(session)
+        self.gbooks = GoogleBooksClient(session, google_books_key.strip())
+        self.anilist = AniListClient(session)
 
     def status(self) -> dict[str, bool]:
         return {
@@ -1134,9 +1361,22 @@ class MediaCatalog:
             tasks.append(("spotify-track", self.spotify.search(clean, "track", 3 if wide else 8), 2.5 if quick else 3.5))
         # « Tous types » incluait les livres seulement via `livre:`. Une recherche
         # complète les interroge aussi ; l'autocomplete reste sans Open Library.
-        want_books = source == "openlibrary" or (kinds is not None and "book" in kinds)
+        book_sources = ("openlibrary", "googlebooks", "anilist", "books")
+        want_books = source in book_sources or (kinds is not None and "book" in kinds)
         if want_books or (source is None and wide and not quick):
-            tasks.append(("books", self.books.search(clean, per if want_books else 4), 6.0))
+            n = per if want_books else 4
+
+            def book_source(name: str) -> bool:
+                return source in (None, "books", name)
+
+            # Ordre = priorité des doublons : Google Books (catalogue français, BD récentes),
+            # AniList (une fiche par série de manga, pas par tome), puis Open Library.
+            if book_source("googlebooks"):
+                tasks.append(("googlebooks", self.gbooks.search(clean, n), 6.0))
+            if book_source("anilist"):
+                tasks.append(("anilist", self.anilist.search(clean, 3 if wide else n), 5.0))
+            if book_source("openlibrary"):
+                tasks.append(("books", self.books.search(clean, n), 6.0))
 
         async def one_source(name: str, coro: Any, budget: float) -> list[MediaHit]:
             try:
@@ -1161,10 +1401,17 @@ class MediaCatalog:
             raise asyncio.CancelledError
         merged: list[MediaHit] = []
         seen: set[tuple[str, str, str]] = set()
+        seen_books: set[tuple[str, str]] = set()
         for result in gathered:
             for hit in result:
                 if not hit.source_id or hit.identity in seen:
                     continue
+                if hit.media_type == "book":
+                    # Le même livre vient souvent de plusieurs sources : on garde la première.
+                    key = _book_key(hit)
+                    if key[0] and key in seen_books:
+                        continue
+                    seen_books.add(key)
                 seen.add(hit.identity)
                 merged.append(hit)
 
@@ -1200,6 +1447,10 @@ class MediaCatalog:
             return await self.spotify.lookup(spec.lookup_id or "", kind if kind in ("album", "track") else None)
         if spec.source == "openlibrary":
             return await self.books.lookup(spec.lookup_id or "")
+        if spec.source == "googlebooks":
+            return await self.gbooks.lookup(spec.lookup_id or "")
+        if spec.source == "anilist":
+            return await self.anilist.lookup(spec.lookup_id or "")
         return []
 
     async def enrich(self, hit: MediaHit) -> MediaHit:

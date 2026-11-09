@@ -309,6 +309,10 @@ def autocomplete_query_value(hit: MediaHit) -> str:
         return f"spotify:{hit.media_type}:{hit.source_id}"
     if hit.source == "openlibrary":
         return f"ol:{hit.source_id}"
+    if hit.source == "googlebooks":
+        return f"gb:{hit.source_id}"
+    if hit.source == "anilist":
+        return f"anilist:{hit.source_id}"
     return pretty.shorten_text(hit.title, 100)
 
 

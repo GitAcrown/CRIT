@@ -310,11 +310,11 @@ class HelpView(ReviewsLayout):
             "**Critiques** te montre les avis du serveur : "
             "personne d'autre ne voit tes actions.\n"
             "-# Exemples · `Dune 2021`  ·  `film:Dune`  ·  `jeu:Hades`  ·  "
-            "`album:Blonde`  ·  `livre:Dune`  ·  une URL TMDB, Steam, Spotify ou IMDb"
+            "`album:Blonde`  ·  `bd:Blacksad`  ·  `manga:Berserk`  ·  une URL TMDB, Steam, Spotify ou IMDb"
         )
         commandes = (
             "### Commandes\n"
-            "`/search` — catalogues (TMDB, Steam, Spotify, Open Library) : fiche, noter ou signet\n"
+            "`/search` — catalogues (TMDB, Steam, Spotify, Google Books, Open Library, AniList) : fiche, noter ou signet\n"
             "`/stream` — lives en cours et streams planifiés : voir, s'intéresser, lier ou planifier\n"
             "`/carnet` — page d'un membre : profil, journal, signets, affinités "
             "(ou clic droit sur un membre → **Voir le carnet**)\n"
@@ -345,7 +345,7 @@ class HelpView(ReviewsLayout):
             "(une quête pas finie continue, une relance par semaine). "
             "Chaque mois a sa quête thématique répétable et son skin de saison, gagné en validant 2 semaines. "
             "En octobre, noter un film ou une série d'horreur débloque les citrouilles, qui restent équipables ensuite. "
-            "Colle seul dans un message un lien TMDB, IMDb, Letterboxd, Steam, Spotify ou Open Library : "
+            "Colle seul dans un message un lien TMDB, IMDb, Letterboxd, Steam, Spotify, Open Library, Google Books ou AniList : "
             "si l'œuvre a déjà été notée ici, CRIT répond avec la fiche. "
             "Sinon, ou dans une phrase, clic droit sur le message → **Ouvrir la fiche**. "
             "Tes notes, ton XP et tes signets te suivent sur tous les serveurs où est CRIT.\n"

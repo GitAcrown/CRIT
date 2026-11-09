@@ -1,6 +1,6 @@
 """Reconnaissance des liens d'œuvres collés dans un message.
 
-TMDB, IMDb, Letterboxd, Steam, Spotify et Open Library. Chaque lien devient une requête
+TMDB, IMDb, Letterboxd, Steam, Spotify, Open Library, Google Books et AniList. Chaque lien devient une requête
 que `MediaCatalog.search` sait résoudre directement (`tmdb:movie/27205`, `steam:620`…).
 """
 
@@ -34,6 +34,11 @@ _SPOTIFY_LINK = re.compile(
     re.I,
 )
 _OPENLIBRARY_LINK = re.compile(r"openlibrary\.org/works/(OL\d+W)", re.I)
+_GOOGLE_BOOKS_LINK = re.compile(
+    r"(?:books\.google\.[a-z.]+/books\?(?:[^\s>]*&)?id=|google\.[a-z.]+/books/edition/[^/\s>]+/)([A-Za-z0-9_-]{12})",
+    re.I,
+)
+_ANILIST_LINK = re.compile(r"anilist\.co/manga/(\d+)", re.I)
 _SLUG_YEAR = re.compile(r"-(19\d{2}|20\d{2})(?:-\d+)?$")
 
 
@@ -64,6 +69,10 @@ def _parse_link(token: str) -> MediaLink | None:
     if match := _OPENLIBRARY_LINK.search(token):
         key = match.group(1).upper()
         return MediaLink(f"ol:{key}", identity=("openlibrary", f"/works/{key}", "book"))
+    if match := _GOOGLE_BOOKS_LINK.search(token):
+        return MediaLink(f"gb:{match.group(1)}", identity=("googlebooks", match.group(1), "book"))
+    if match := _ANILIST_LINK.search(token):
+        return MediaLink(f"anilist:{match.group(1)}", identity=("anilist", match.group(1), "book"))
     return None
 
 

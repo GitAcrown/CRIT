@@ -100,6 +100,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             tmdb_key=str(config.get("TMDB_API_KEY") or "").strip(),
             spotify_id=str(config.get("SPOTIFY_CLIENT_ID") or "").strip(),
             spotify_secret=str(config.get("SPOTIFY_CLIENT_SECRET") or "").strip(),
+            google_books_key=str(config.get("GOOGLE_BOOKS_API_KEY") or "").strip(),
         )
         status = self.catalog.status()
         missing = [name for name, ok in status.items() if not ok]
@@ -266,7 +267,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             return
         if not find_media_links(message.content):
             await interaction.response.send_message(
-                "**Fiche ·** Aucun lien d'œuvre dans ce message (TMDB, IMDb, Letterboxd, Steam, Spotify, Open Library).",
+                "**Fiche ·** Aucun lien d'œuvre dans ce message (TMDB, IMDb, Letterboxd, Steam, Spotify, Open Library, Google Books, AniList).",
                 ephemeral=True,
             )
             return
