@@ -471,7 +471,9 @@ def format_people_fr(mentions: list[str], extra: int = 0) -> str:
 
 
 def format_grade(title: str) -> str:
-    return f"-# **_{title}_**"
+    # Gras + italique en astérisques : les `_` du nom d'un émoji custom (<:lvl_critique:…>)
+    # cassaient l'italique `_…_` et soulignaient le texte.
+    return f"-# ***{title}***"
 
 
 def titled(mention: str, title: str) -> str:

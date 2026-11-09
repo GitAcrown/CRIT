@@ -710,7 +710,7 @@ def build_announce_view(
     container = discord.ui.Container()
     verb = "a mis à jour sa note" if updated else "a noté"
     stamped = f"<t:{int(posted_at or time.time())}:f>"
-    profile = f"{mention} · _{title}_ · le {stamped} · {verb}"
+    profile = f"{mention} · *{title}* · le {stamped} · {verb}"  # pas de `_` : ils cassent sur les émojis custom
     film = f"{fiche_title_line(hit)}\n{format_stars(rating, skin)}  **{format_score(rating)}**"
     shown = format_comment(comment, spoiler=spoiler, hide=True, limit=240)
     if shown:

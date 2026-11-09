@@ -436,6 +436,7 @@ class ProfileView(ReviewsLayout):
             notes += f"  ·  moyenne **{format_score(self.average, average=True)}**"
         lines = [
             f"## {mention}",
+            format_grade(title),
             f"{XP} **{total} XP** · niveau **{level}**  ·  {notes}",
             f"-# {into}/{need} vers le niveau {level + 1}",
         ]
@@ -446,7 +447,6 @@ class ProfileView(ReviewsLayout):
             lines.append(f"{STREAK} Série de **{self.streak}** semaine{'s' if self.streak > 1 else ''} de quêtes")
         if extra:
             lines.append(extra)
-        lines.append(format_grade(title))
         return "\n".join(lines)
 
     def _header_item(self, *, avatar: bool) -> discord.ui.Item:
