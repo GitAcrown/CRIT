@@ -24,6 +24,7 @@ from ..formatting import (
     row_spoiler,
     select_emoji,
     titled,
+    type_emoji,
     type_label,
     user_display,
 )
@@ -56,6 +57,17 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Sélections partagées (profil / explorateur)
 # ---------------------------------------------------------------------------
+
+
+def _type_tile(media_type: str) -> str | None:
+    """Image de l'émoji du type (livre, film…) : tuile de secours pour une œuvre sans couverture."""
+    tag = type_emoji(media_type)
+    try:
+        emoji = discord.PartialEmoji.from_str(tag)
+    except Exception:
+        return None
+    return f"{emoji.url}?size=256" if emoji.id else None
+
 
 class JournalTypeSelect(discord.ui.Select):
     def __init__(self, parent: "ProfileView"):
@@ -522,8 +534,10 @@ class ProfileView(ReviewsLayout):
         if graph:
             content.append(discord.ui.TextDisplay(graph))
         picks, chosen = self.favorites()
-        shown = [(hit, row) for hit, row in picks if hit.poster_url]
-        if shown:
+        # Sans couverture (livres surtout) : l'icône du type en tuile, le titre en légende.
+        shown = [(hit, row, hit.poster_url or _type_tile(hit.media_type)) for hit, row in picks]
+        shown = [(hit, row, image) for hit, row, image in shown if image]
+        if shown or (editable and chosen):
             if content:
                 content.append(sep_wide())
             title = "### Favoris" if chosen else "### Mieux notées"
@@ -531,13 +545,14 @@ class ProfileView(ReviewsLayout):
                 content.append(discord.ui.Section(title, accessory=EditFavoritesButton(self)))
             else:
                 content.append(discord.ui.TextDisplay(title))
-            content.append(discord.ui.MediaGallery(*[
-                discord.MediaGalleryItem(
-                    hit.poster_url,
-                    description=pretty.shorten_text(f"{hit.title} · {format_score(float(row['rating']))}", 250),
-                )
-                for hit, row in shown
-            ]))
+            if shown:
+                content.append(discord.ui.MediaGallery(*[
+                    discord.MediaGalleryItem(
+                        image,
+                        description=pretty.shorten_text(f"{hit.title} · {format_score(float(row['rating']))}", 250),
+                    )
+                    for hit, row, image in shown
+                ]))
         return content
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
