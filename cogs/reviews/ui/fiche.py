@@ -132,6 +132,12 @@ def _official_line(hit: MediaHit, skin: StarSkin | str | None = None) -> str:
         emoji = hit.extra.get("review_emoji") or ""
         if label:
             return f"**{source}**  {f'{emoji} {label}'.strip()}"
+    if hit.source == "googlebooks":
+        rating = float(hit.extra.get("book_rating") or 0)  # sur 5
+        count = int(hit.extra.get("book_rating_count") or 0)
+        if rating:
+            votes = f"  ·  {fmt_int(count)} avis" if count else ""
+            return f"**{source}**  {format_stars(rating * 2, skin)}  {_decimal(rating)}/5{votes}"
     popularity = hit.extra.get("popularity")
     if hit.media_type == "track" and popularity:
         return f"**{source}**  popularité {popularity}/100"
@@ -185,6 +191,11 @@ def fiche_info_line(hit: MediaHit) -> str:
     elif extra.get("seasons"):
         seasons = extra["seasons"]
         parts.append(f"{seasons} saison{'s' if seasons > 1 else ''}")
+    if extra.get("pages"):
+        parts.append(f"{extra['pages']} pages")
+    if extra.get("volumes"):
+        volumes = extra["volumes"]
+        parts.append(f"{volumes} tome{'s' if volumes > 1 else ''}")
     if extra.get("total_tracks"):
         tracks = extra["total_tracks"]
         parts.append(f"{tracks} piste{'s' if tracks > 1 else ''}")
@@ -221,6 +232,8 @@ def fiche_footer_line(hit: MediaHit) -> str:
         parts.append("Avec " + ", ".join(cast[:3]))
     if extra.get("album"):
         parts.append(extra["album"])
+    if extra.get("publisher"):
+        parts.append(str(extra["publisher"]))
     lang = extra.get("original_language") or ""
     if lang and lang != "fr":
         parts.append(f"VO {LANGUAGES.get(lang, lang.upper())}")

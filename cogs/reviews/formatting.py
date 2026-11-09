@@ -299,6 +299,39 @@ def skip_note_autocomplete(raw: str) -> bool:
     return bool(spec.lookup_id or spec.source)
 
 
+_PREFIX_TARGETS = {
+    ("tmdb", "movie"): "les films (TMDB)",
+    ("tmdb", "tv"): "les séries (TMDB)",
+    ("tmdb", None): "TMDB",
+    ("steam", "game"): "Steam",
+    ("spotify", "album"): "les albums (Spotify)",
+    ("spotify", "track"): "les morceaux (Spotify)",
+    ("spotify", None): "Spotify",
+    ("books", "book"): "les livres (Google Books, AniList, Open Library)",
+    ("googlebooks", "book"): "Google Books",
+    ("anilist", "book"): "AniList (mangas)",
+    ("openlibrary", "book"): "Open Library",
+}
+
+
+def prefix_autocomplete_hint(raw: str) -> tuple[str, str] | None:
+    """Recherche avec préfixe (`gb:`, `film:`, URL…) : pas d'autocomplétion, mais une ligne
+    qui dit ce qui sera cherché. Renvoie (libellé, valeur) ou None."""
+    text = (raw or "").strip()
+    spec = parse_search_query(text)
+    if not spec.source or len(text) > 100:
+        return None
+    target = _PREFIX_TARGETS.get((spec.source, spec.media_type)) or _PREFIX_TARGETS.get((spec.source, None))
+    target = target or spec.source
+    if spec.lookup_id:
+        name = f"🔗 Ouvrir {spec.lookup_id} sur {target} · valide pour lancer"
+    elif len(spec.query.strip()) >= 1:
+        name = f"🔎 Chercher « {spec.query.strip()} » dans {target} · valide pour lancer"
+    else:
+        return None
+    return pretty.shorten_text(name, 100), text
+
+
 def autocomplete_query_value(hit: MediaHit) -> str:
     if hit.source == "tmdb":
         kind = "movie" if hit.media_type == "movie" else "tv"

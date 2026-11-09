@@ -43,7 +43,8 @@ OPENLIB_FIELDS = "key,title,author_name,first_publish_year,cover_i,subject,langu
 GBOOKS_VOLUMES = "https://www.googleapis.com/books/v1/volumes"
 GBOOKS_FIELDS = (
     "items(id,volumeInfo(title,subtitle,authors,publishedDate,imageLinks,categories,"
-    "language,infoLink,canonicalVolumeLink,description,pageCount,publisher))"
+    "language,infoLink,canonicalVolumeLink,description,pageCount,publisher,industryIdentifiers,"
+    "averageRating,ratingsCount))"
 )
 
 ANILIST_URL = "https://graphql.anilist.co"
@@ -1091,11 +1092,59 @@ class OpenLibraryClient:
 
 def _gb_cover(info: dict) -> str | None:
     links = info.get("imageLinks") or {}
-    url = links.get("thumbnail") or links.get("smallThumbnail")
+    # La fiche détaillée d'un volume donne des tailles plus grandes que la recherche.
+    url = next((links[k] for k in ("medium", "small", "thumbnail", "smallThumbnail", "large") if links.get(k)), None)
     if not url:
         return None
     # https obligatoire pour Discord ; sans le coin corné ajouté par Google.
     return str(url).replace("http://", "https://").replace("&edge=curl", "")
+
+
+# Catégories Google (anglais, « Comics & Graphic Novels / Europe / General ») → libellé court.
+_GB_CATEGORIES = {
+    "comics & graphic novels": "BD",
+    "fiction": "Roman",
+    "juvenile fiction": "Jeunesse",
+    "young adult fiction": "Young adult",
+    "biography & autobiography": "Biographie",
+    "history": "Histoire",
+    "science": "Sciences",
+    "philosophy": "Philosophie",
+    "poetry": "Poésie",
+    "drama": "Théâtre",
+    "cooking": "Cuisine",
+    "art": "Art",
+    "humor": "Humour",
+    "true crime": "Faits divers",
+    "self-help": "Développement personnel",
+    "social science": "Sciences sociales",
+    "political science": "Politique",
+    "travel": "Voyage",
+}
+_GB_SUBCATEGORIES = {
+    "manga": "Manga", "fantasy": "Fantasy", "science fiction": "Science-fiction",
+    "thrillers": "Thriller", "mystery & detective": "Policier", "horror": "Horreur",
+    "romance": "Romance", "historical": "Historique", "literary": "Littérature",
+    "crime & mystery": "Policier", "superheroes": "Super-héros",
+}
+
+
+def _gb_genres(categories: list[str]) -> list[str]:
+    genres: list[str] = []
+    for raw in categories:
+        parts = [part.strip() for part in str(raw).split("/") if part.strip()]
+        if not parts:
+            continue
+        top = _GB_CATEGORIES.get(parts[0].casefold(), parts[0])
+        for name in (top, *(_GB_SUBCATEGORIES.get(p.casefold()) for p in parts[1:])):
+            if name and name not in genres and name.casefold() != "general":
+                genres.append(name)
+    return genres[:3]
+
+
+def _gb_isbn(info: dict) -> str:
+    ids = {i.get("type"): i.get("identifier") for i in info.get("industryIdentifiers") or [] if isinstance(i, dict)}
+    return str(ids.get("ISBN_13") or ids.get("ISBN_10") or "")
 
 
 def _gb_hit(item: dict) -> MediaHit | None:
@@ -1117,15 +1166,27 @@ def _gb_hit(item: dict) -> MediaHit | None:
         year=_year_from(info.get("publishedDate")),
         poster_url=_gb_cover(info),
         url=info.get("canonicalVolumeLink") or info.get("infoLink") or "",
-        overview=re.sub(r"<[^>]+>", "", info.get("description") or "")[:1000],
-        genres=[c for c in (info.get("categories") or []) if isinstance(c, str)][:3],
+        overview=_gb_text(info.get("description") or ""),
+        genres=_gb_genres([c for c in (info.get("categories") or []) if isinstance(c, str)]),
         extra={
             "authors": authors[:3],
             "languages": ["fre"] if language == "fr" else [language] if language else [],
             "publisher": info.get("publisher") or "",
-            "pages": info.get("pageCount") or 0,
+            "pages": int(info.get("pageCount") or info.get("printedPageCount") or 0),
+            "isbn": _gb_isbn(info),
+            "book_rating": float(info.get("averageRating") or 0),
+            "book_rating_count": int(info.get("ratingsCount") or 0),
         },
     )
+
+
+def _gb_text(html: str) -> str:
+    """Description Google : HTML (<p>, <br>, <b>…) → texte brut."""
+    text = re.sub(r"<\s*(br|/p)\s*/?>", " ", html, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    for entity, char in (("&nbsp;", " "), ("&amp;", "&"), ("&quot;", '"'), ("&#39;", "'"), ("&lt;", "<"), ("&gt;", ">")):
+        text = text.replace(entity, char)
+    return " ".join(text.split())[:1000]
 
 
 class GoogleBooksClient:
@@ -1188,6 +1249,46 @@ class GoogleBooksClient:
             return []
         hit = _gb_hit(payload)
         return [hit] if hit else []
+
+    async def enrich(self, hit: MediaHit) -> MediaHit:
+        """Fiche détaillée du volume : résumé complet, grande couverture, pages, ISBN."""
+        if time.monotonic() < self._paused_until:
+            return hit
+        try:
+            payload = await _json(
+                self.session,
+                f"{GBOOKS_VOLUMES}/{hit.source_id}",
+                params=self._params({}),
+                timeout=aiohttp.ClientTimeout(total=6, sock_connect=2),
+            )
+        except Exception as exc:
+            if isinstance(exc, aiohttp.ClientResponseError) and exc.status == 429:
+                self._pause_if_quota(exc)
+            else:
+                logger.warning("Détails Google Books impossibles (%s) : %s", hit.source_id, exc)
+            return hit
+        full = _gb_hit(payload)
+        if full is None:
+            return hit
+        hit.overview = full.overview or hit.overview
+        hit.poster_url = full.poster_url or hit.poster_url
+        hit.genres = full.genres or hit.genres
+        hit.subtitle = full.subtitle or hit.subtitle
+        for key, value in full.extra.items():
+            if value:
+                hit.extra[key] = value
+        if not hit.poster_url and hit.extra.get("isbn"):
+            hit.poster_url = await self._isbn_cover(str(hit.extra["isbn"]))
+        return hit
+
+    async def _isbn_cover(self, isbn: str) -> str | None:
+        """Pas de couverture chez Google : celle d'Open Library pour le même ISBN, si elle existe."""
+        url = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false"
+        try:
+            async with self.session.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                return url if resp.status == 200 else None
+        except Exception:
+            return None
 
 
 def _anilist_hit(media: dict) -> MediaHit | None:
@@ -1459,4 +1560,6 @@ class MediaCatalog:
             return await self.tmdb.enrich(hit)
         if hit.source == "steam":
             return await self.steam.enrich(hit)
+        if hit.source == "googlebooks":
+            return await self.gbooks.enrich(hit)
         return hit

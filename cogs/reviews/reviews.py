@@ -31,6 +31,7 @@ from .dyn import (
 from .formatting import (
     RATING_CHOICES,
     autocomplete_query_value,
+    prefix_autocomplete_hint,
     format_score,
     hit_identity,
     mention_of,
@@ -526,7 +527,9 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
     ) -> list[app_commands.Choice[str]]:
         current = (current or "").strip()
         if skip_note_autocomplete(current) or self.catalog is None:
-            return []
+            # Préfixe (`gb:`, `manga:`…) ou lien : une ligne indique ce qui sera cherché.
+            hint = prefix_autocomplete_hint(current)
+            return [app_commands.Choice(name=hint[0], value=hint[1])] if hint else []
         ns = getattr(interaction, "namespace", None)
         explicit = None
         if ns is not None:
