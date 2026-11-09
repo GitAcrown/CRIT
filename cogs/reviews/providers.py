@@ -1312,6 +1312,7 @@ class MediaCatalog:
             "Spotify": self.spotify.available,
             "Steam": True,
             "Livres": True,
+            "Google Books (clé)": bool(self.gbooks.api_key),
         }
 
     async def search(self, query: str, media_type: str, *, quick: bool = False) -> list[MediaHit]:
