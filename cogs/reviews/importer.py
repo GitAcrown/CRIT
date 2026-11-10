@@ -1,0 +1,332 @@
+"""Import d'un export Letterboxd (ZIP officiel ou CSV au format Letterboxd).
+
+Le ZIP (Réglages → Data → Export) contient `ratings.csv`, `reviews.csv`, `diary.csv` et
+`watchlist.csv`. Un CSV seul est aussi accepté : export partiel, ou CSV produit par un
+outil tiers depuis SensCritique (s2l, critique2boxd…) au format Letterboxd.
+
+Règles : aucune XP, aucune quête, aucune annonce ; une note déjà présente dans le carnet
+n'est jamais écrasée ; les films vus sans note sont ignorés (une note est obligatoire).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import csv
+from dataclasses import dataclass, field
+import io
+import re
+import time
+from typing import TYPE_CHECKING, Awaitable, Callable
+import zipfile
+
+import discord
+
+from .constants import logger
+from .providers import MediaHit, _fold, _year_from
+
+if TYPE_CHECKING:
+    from utils import dataio
+
+    from .providers import MediaCatalog
+
+MAX_IMPORT_BYTES = 10 * 1024 * 1024
+MATCH_CONCURRENCY = 5
+
+
+@dataclass
+class LetterboxdEntry:
+    title: str
+    year: int | None
+    rating: float | None = None  # sur 10
+    watched: str = ""  # AAAA-MM-JJ
+    review: str = ""
+    logged: str = ""  # date d'ajout dans Letterboxd (AAAA-MM-JJ)
+
+    @property
+    def key(self) -> tuple[str, int | None]:
+        return _fold(self.title).strip(), self.year
+
+
+@dataclass
+class LetterboxdData:
+    rated: list[LetterboxdEntry] = field(default_factory=list)
+    watchlist: list[LetterboxdEntry] = field(default_factory=list)
+
+
+@dataclass
+class ImportReport:
+    imported: int = 0
+    already: int = 0
+    bookmarked: int = 0
+    not_found: list[str] = field(default_factory=list)
+    total: int = 0
+
+
+class ImportError_(Exception):
+    """Fichier illisible : le message est montré tel quel au membre."""
+
+
+# ---------------------------------------------------------------------------
+# Lecture
+# ---------------------------------------------------------------------------
+
+def _col(row: dict[str, str], *names: str) -> str:
+    lowered = {(k or "").strip().casefold(): (v or "") for k, v in row.items()}
+    for name in names:
+        value = lowered.get(name.casefold())
+        if value:
+            return value.strip()
+    return ""
+
+
+def _rating(raw: str) -> float | None:
+    """Letterboxd note de 0,5 à 5 étoiles : ×2 pour passer sur 10."""
+    try:
+        value = float(raw.replace(",", "."))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    if value > 5:  # CSV déjà sur 10 (certains outils tiers)
+        return max(0.0, min(10.0, round(value)))
+    return max(0.0, min(10.0, round(value * 2)))
+
+
+def _rating_on_10(row: dict[str, str]) -> float | None:
+    """`Rating10` / `Note` (outils tiers, SensCritique) sont déjà sur 10 ; `Rating` est sur 5."""
+    raw10 = _col(row, "Rating10", "Note")
+    if raw10:
+        try:
+            value = float(raw10.replace(",", "."))
+        except ValueError:
+            return None
+        return max(0.0, min(10.0, round(value))) if value > 0 else None
+    return _rating(_col(row, "Rating"))
+
+
+def _entry(row: dict[str, str]) -> LetterboxdEntry | None:
+    title = _col(row, "Name", "Title", "Titre")
+    if not title:
+        return None
+    year_raw = _col(row, "Year", "Année", "Annee")
+    year = int(year_raw) if year_raw.isdigit() else _year_from(year_raw)
+    watched = _col(row, "Watched Date", "WatchedDate", "Watched")[:10]
+    return LetterboxdEntry(
+        title=title,
+        year=year,
+        rating=_rating_on_10(row),
+        watched=watched if len(watched) == 10 else "",
+        review=_plain(_col(row, "Review", "Critique")),
+        logged=_col(row, "Date")[:10],
+    )
+
+
+def _plain(text: str) -> str:
+    """Critique Letterboxd en HTML (<i>, <br />, <p>) → texte Discord (italique en *…*)."""
+    text = re.sub(r"<\s*br\s*/?>|</p>", "\n", text, flags=re.I)
+    text = re.sub(r"</?(i|em)>", "*", text, flags=re.I)
+    text = re.sub(r"</?(b|strong)>", "**", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    for entity, char in (("&amp;", "&"), ("&quot;", '"'), ("&#39;", "'"), ("&lt;", "<"), ("&gt;", ">"), ("&nbsp;", " ")):
+        text = text.replace(entity, char)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _read_csv(raw: bytes) -> list[dict[str, str]]:
+    text = raw.decode("utf-8-sig", errors="replace")
+    return list(csv.DictReader(io.StringIO(text)))
+
+
+def parse_letterboxd(raw: bytes, filename: str) -> LetterboxdData:
+    name = filename.casefold()
+    data = LetterboxdData()
+    if name.endswith(".zip"):
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile as exc:
+            raise ImportError_("Ce ZIP est illisible.") from exc
+        files = {info.filename.rsplit("/", 1)[-1].casefold(): info for info in archive.infolist()}
+
+        def rows(file: str) -> list[dict[str, str]]:
+            info = files.get(file)
+            return _read_csv(archive.read(info)) if info else []
+
+        if "ratings.csv" not in files and "watchlist.csv" not in files:
+            raise ImportError_("Ce ZIP ne ressemble pas à un export Letterboxd (pas de `ratings.csv`).")
+        by_key: dict[tuple[str, int | None], LetterboxdEntry] = {}
+        for row in rows("ratings.csv"):
+            entry = _entry(row)
+            if entry and entry.rating is not None:
+                by_key[entry.key] = entry
+        # Journal puis critiques : date de visionnage la plus récente et texte de la critique.
+        for file in ("diary.csv", "reviews.csv"):
+            for row in rows(file):
+                extra = _entry(row)
+                if extra is None:
+                    continue
+                entry = by_key.get(extra.key)
+                if entry is None:
+                    if extra.rating is None:
+                        continue
+                    entry = by_key[extra.key] = extra
+                if extra.watched and extra.watched > entry.watched:
+                    entry.watched = extra.watched
+                if extra.review and not entry.review:
+                    entry.review = extra.review
+        data.rated = list(by_key.values())
+        rated_keys = set(by_key)
+        for row in rows("watchlist.csv"):
+            entry = _entry(row)
+            if entry and entry.key not in rated_keys:
+                data.watchlist.append(entry)
+        return data
+
+    if name.endswith(".csv"):
+        entries = [entry for row in _read_csv(raw) if (entry := _entry(row))]
+        if not entries:
+            raise ImportError_("Ce CSV est vide ou n'a pas de colonne `Name` / `Title`.")
+        if "watchlist" in name or all(entry.rating is None for entry in entries):
+            data.watchlist = entries
+        else:
+            data.rated = [entry for entry in entries if entry.rating is not None]
+        return data
+    raise ImportError_("Envoie le ZIP d'export Letterboxd ou un fichier `.csv`.")
+
+
+# ---------------------------------------------------------------------------
+# Correspondance TMDB et écriture
+# ---------------------------------------------------------------------------
+
+async def match_film(catalog: "MediaCatalog", entry: LetterboxdEntry) -> MediaHit | None:
+    """Film TMDB du même titre, à un an près ; sans année, le premier résultat exact."""
+    query = f"{entry.title} {entry.year}" if entry.year else entry.title
+    for attempt in (query, entry.title):
+        hits = await catalog.tmdb.search(attempt, "movie", 5)
+        for hit in hits:
+            if entry.year is None or hit.year is None or abs(hit.year - entry.year) <= 1:
+                return hit
+        if not entry.year:
+            break
+    return None
+
+
+ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
+class ImportMixin:
+    """Import Letterboxd dans le carnet du membre (base commune)."""
+
+    db: "dataio.ModelDataManager"
+    catalog: "MediaCatalog | None"
+
+    async def import_letterboxd(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        data: LetterboxdData,
+        progress: ProgressCallback,
+    ) -> ImportReport:
+        assert self.catalog is not None
+        report = ImportReport(total=len(data.rated) + len(data.watchlist))
+        max_len = await self.get_comment_max(guild)  # type: ignore[attr-defined]
+        await self.remember_member(guild.id, user_id)  # type: ignore[attr-defined]
+        semaphore = asyncio.Semaphore(MATCH_CONCURRENCY)
+        done = 0
+        last_push = 0.0
+
+        async def matched(entry: LetterboxdEntry) -> tuple[LetterboxdEntry, MediaHit | None]:
+            nonlocal done, last_push
+            async with semaphore:
+                try:
+                    hit = await match_film(self.catalog, entry)  # type: ignore[arg-type]
+                except Exception:
+                    logger.exception("Import Letterboxd : recherche impossible pour %s", entry.title)
+                    hit = None
+            done += 1
+            if time.monotonic() - last_push > 3:
+                last_push = time.monotonic()
+                await progress(done, report.total)
+            return entry, hit
+
+        rated = await asyncio.gather(*(matched(entry) for entry in data.rated))
+        wanted = await asyncio.gather(*(matched(entry) for entry in data.watchlist))
+
+        now = int(time.time())
+        for entry, hit in rated:
+            if hit is None:
+                report.not_found.append(f"{entry.title} ({entry.year})" if entry.year else entry.title)
+                continue
+            media_id = await self._import_media_id(guild, hit)
+            exists = await self.db.fetchone(
+                "SELECT 1 AS n FROM reviews WHERE user_id=? AND media_id=?", user_id, media_id
+            )
+            if exists:
+                report.already += 1
+                continue
+            # Date d'import, pas celle de Letterboxd : sinon un import ferait de son auteur le
+            # « premier à noter » des centaines d'œuvres (titre Pionnier). « Vu le » garde la vraie date.
+            stamp = now
+            await self.db.execute(
+                """INSERT INTO reviews (user_id, media_id, rating, comment, experienced_at, spoiler, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(user_id, media_id) DO NOTHING""",
+                user_id, media_id, entry.rating, entry.review[:max_len], entry.watched, stamp, stamp,
+                commit=False,
+            )
+            await self.db.execute(
+                "DELETE FROM watchlist WHERE user_id=? AND media_id=?", user_id, media_id, commit=False,
+            )
+            report.imported += 1
+        for entry, hit in wanted:
+            if hit is None:
+                report.not_found.append(f"{entry.title} ({entry.year})" if entry.year else entry.title)
+                continue
+            media_id = await self._import_media_id(guild, hit)
+            rated_row = await self.db.fetchone(
+                "SELECT 1 AS n FROM reviews WHERE user_id=? AND media_id=?", user_id, media_id
+            )
+            listed = await self.db.fetchone(
+                "SELECT 1 AS n FROM watchlist WHERE user_id=? AND media_id=?", user_id, media_id
+            )
+            if rated_row or listed:
+                report.already += 1
+                continue
+            # Directement en base : pas d'événement de quête pour un import.
+            await self.db.execute(
+                "INSERT OR IGNORE INTO watchlist (user_id, media_id, added_at) VALUES (?, ?, ?)",
+                user_id, media_id, _stamp(entry.logged) or now, commit=False,
+            )
+            report.bookmarked += 1
+        await self.db.commit()
+        await progress(report.total, report.total)
+        return report
+
+    async def _import_media_id(self, guild: discord.Guild, hit: MediaHit) -> int:
+        # Œuvre déjà connue : on ne remplace pas ses infos enrichies par celles de la recherche.
+        known = await self.lookup_media_id(guild, hit)  # type: ignore[attr-defined]
+        if known:
+            return known
+        return await self.upsert_media(guild, hit)  # type: ignore[attr-defined]
+
+
+def _stamp(day: str) -> int | None:
+    try:
+        return int(time.mktime(time.strptime(day[:10], "%Y-%m-%d"))) + 12 * 3600
+    except (ValueError, TypeError):
+        return None
+
+
+def report_text(report: ImportReport) -> str:
+    lines = [
+        "**Import Letterboxd terminé**",
+        f"{report.imported} note{'s' if report.imported != 1 else ''} ajoutée{'s' if report.imported != 1 else ''}"
+        f" · {report.bookmarked} signet{'s' if report.bookmarked != 1 else ''}"
+        f" · {report.already} déjà dans ton carnet",
+    ]
+    if report.not_found:
+        shown = report.not_found[:15]
+        more = len(report.not_found) - len(shown)
+        lines.append(f"\n**Pas trouvé{'s' if len(report.not_found) > 1 else ''} sur TMDB ({len(report.not_found)})**")
+        lines.append("\n".join(f"- {title}" for title in shown) + (f"\n-# et {more} autre(s)" if more else ""))
+        lines.append("-# Ajoute-les à la main avec `/search` si besoin.")
+    lines.append("-# Pas d'XP ni d'annonce pour un import. Tes notes existantes n'ont pas été touchées.")
+    return "\n".join(lines)

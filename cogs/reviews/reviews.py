@@ -40,6 +40,7 @@ from .formatting import (
     type_label,
 )
 from .links import MediaLink, find_media_links, message_is_only_links, pick_fiche_hit
+from .importer import MAX_IMPORT_BYTES, ImportError_, ImportMixin, parse_letterboxd, report_text
 from .live import LiveMixin
 from .prefs import UserPrefs, search_pref_includes
 from .progress import resolve_star_skin, title_for_level
@@ -67,7 +68,7 @@ from .ui.streams import StreamBindView, StreamHubView
 # Cog
 # ---------------------------------------------------------------------------
 
-class Reviews(StorageMixin, LiveMixin, commands.Cog):
+class Reviews(StorageMixin, LiveMixin, ImportMixin, commands.Cog):
     """Carnet de critiques commun à tous les serveurs (films, séries, jeux, musique, livres)."""
 
     def __init__(self, bot: commands.Bot):
@@ -78,6 +79,7 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
         self._comment_max: dict[int, int] = {}
         self._prefs: dict[int, UserPrefs] = {}
         self._known_members: set[tuple[int, int]] = set()
+        self._imports: set[int] = set()  # membres avec un import Letterboxd en cours
         self._stream_end_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._stream_remind_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._stream_session_reminded: set[tuple[int, int]] = set()
@@ -786,6 +788,73 @@ class Reviews(StorageMixin, LiveMixin, commands.Cog):
             )
         view = await PreferencesView.create(self, guild, interaction.user)
         await view.start(interaction)
+
+    @app_commands.command(name="importer")
+    @app_commands.guild_only()
+    @app_commands.describe(fichier="ZIP d'export Letterboxd (Réglages → Data → Export) ou CSV au format Letterboxd")
+    async def critique_importer(self, interaction: discord.Interaction, fichier: discord.Attachment) -> None:
+        """Importe tes notes et ta watchlist Letterboxd dans ton carnet (sans XP ni annonce)."""
+        guild = interaction.guild
+        if not isinstance(guild, discord.Guild):
+            return await interaction.response.send_message(
+                "**Erreur ·** Cette commande ne peut être utilisée que sur un serveur.", ephemeral=True
+            )
+        user_id = interaction.user.id
+        if self.catalog is None or not self.catalog.tmdb.available:
+            return await interaction.response.send_message(
+                "**Import impossible ·** TMDB n'est pas configuré sur ce bot.", ephemeral=True
+            )
+        if user_id in self._imports:
+            return await interaction.response.send_message(
+                "**Import en cours ·** Attends la fin de ton import précédent.", ephemeral=True
+            )
+        if fichier.size > MAX_IMPORT_BYTES:
+            return await interaction.response.send_message(
+                "**Fichier trop gros ·** 10 Mo maximum.", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            data = parse_letterboxd(await fichier.read(), fichier.filename)
+        except ImportError_ as exc:
+            return await interaction.followup.send(f"**Import impossible ·** {exc}", ephemeral=True)
+        except Exception:
+            logger.exception("Lecture de l'import Letterboxd impossible")
+            return await interaction.followup.send("**Import impossible ·** Fichier illisible.", ephemeral=True)
+        total = len(data.rated) + len(data.watchlist)
+        if not total:
+            return await interaction.followup.send(
+                "**Rien à importer ·** Aucun film noté ni de watchlist dans ce fichier.", ephemeral=True
+            )
+
+        async def progress(done: int, count: int) -> None:
+            try:
+                await interaction.edit_original_response(
+                    content=f"**Import Letterboxd ·** {done}/{count} films traités…"
+                )
+            except discord.HTTPException:
+                pass
+
+        self._imports.add(user_id)
+        try:
+            await progress(0, total)
+            report = await self.import_letterboxd(guild, user_id, data, progress)
+        except Exception:
+            logger.exception("Import Letterboxd échoué")
+            await progress(0, total)
+            return await interaction.followup.send(
+                "**Import interrompu ·** Une erreur est survenue, réessaie plus tard.", ephemeral=True
+            )
+        finally:
+            self._imports.discard(user_id)
+        text = report_text(report)
+        try:
+            await interaction.edit_original_response(content=text[:2000])
+        except discord.HTTPException:
+            # Jeton expiré (import très long) : le bilan part en MP.
+            try:
+                await interaction.user.send(text[:2000])
+            except discord.HTTPException:
+                logger.info("Bilan d'import impossible à envoyer à %s", user_id)
 
     @app_commands.command(name="quetes")
     @app_commands.guild_only()
