@@ -617,11 +617,10 @@ class LiveMixin:
             if channel is not None and all(getattr(d, "id", None) != getattr(channel, "id", None) for d in dests):
                 dests.append(channel)
         mention = mention_of(guild, self.bot, user_id)
-        banner = f"{mention} · en stream"
         for channel in dests:
             try:
-                # Fiche réduite : le stream n'a pas besoin de la grande image.
-                message = await post_compact_fiche(self, guild, hit, channel, banner=banner)
+                # Fiche réduite, une seule ligne « @membre en stream sur #salon ».
+                message = await post_compact_fiche(self, guild, hit, channel, streamer=mention)
             except Exception:
                 logger.exception("Publication fiche stream impossible")
                 continue

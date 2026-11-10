@@ -374,10 +374,15 @@ def plan_banner_lines(plans: list[dict] | None) -> list[str]:
 def stream_live_items(
     channel_ids: list[int] | None = None,
     plans: list[dict] | None = None,
+    *,
+    streamer: str = "",
 ) -> list[discord.ui.Item]:
+    """`streamer` (mention) : une seule ligne « @membre en stream sur #salon »."""
     lines: list[str] = []
-    if channel_ids:
-        salons = " · ".join(f"<#{cid}>" for cid in channel_ids)
+    salons = " · ".join(f"<#{cid}>" for cid in channel_ids or [])
+    if streamer:
+        lines.append(f"{STREAMING} {streamer} en stream" + (f" sur {salons}" if salons else ""))
+    elif salons:
         lines.append(f"{STREAMING} Actuellement en stream sur {salons}")
     lines.extend(plan_banner_lines(plans))
     if not lines:
@@ -589,15 +594,12 @@ def render_compact_fiche(
     plans: list[dict] | None = None,
     guild_name: str = "",
     wid: str | None = None,
-    banner: str = "",
+    streamer: str = "",
 ) -> discord.ui.LayoutView:
     """Fiche réduite (lien collé, début de stream) : sans image large, avec les boutons publics."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
-    body.extend(stream_live_items(stream_channels or [], plans))
-    if banner:
-        body.append(discord.ui.TextDisplay(banner))
-        body.append(sep_tight())
+    body.extend(stream_live_items(stream_channels or [], plans, streamer=streamer))
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
@@ -616,9 +618,9 @@ async def post_compact_fiche(
     channel: discord.abc.Messageable,
     *,
     reference: discord.Message | None = None,
-    banner: str = "",
+    streamer: str = "",
 ) -> discord.Message | None:
-    if banner and cog.catalog is not None:
+    if streamer and cog.catalog is not None:
         # Début de stream : l'œuvre liée vient d'une recherche, on complète comme pour une fiche publiée.
         try:
             hit = await cog.catalog.enrich(hit)
@@ -640,7 +642,7 @@ async def post_compact_fiche(
         "social": social,
         "stream_channels": stream_channels,
         "plans": plans,
-        "banner": banner,
+        "streamer": streamer,
     })
     view = render_compact_fiche(
         hit,
@@ -651,7 +653,7 @@ async def post_compact_fiche(
         plans=plans,
         guild_name=guild.name,
         wid=wid,
-        banner=banner,
+        streamer=streamer,
     )
     try:
         kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
@@ -797,7 +799,7 @@ def render_compact_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutV
         plans=list(rec.payload.get("plans") or []),
         guild_name=str(rec.payload.get("guild_name") or ""),
         wid=rec.id if live else None,
-        banner=str(rec.payload.get("banner") or ""),
+        streamer=str(rec.payload.get("streamer") or ""),
     )
 
 
