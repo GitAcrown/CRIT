@@ -28,7 +28,7 @@ from .streaming import (
     resolve_post_channel,
 )
 from .ui.base import bind_view_message
-from .ui.fiche import post_published_fiche, stream_status_text
+from .ui.fiche import post_compact_fiche, post_published_fiche, stream_status_text
 from .ui.streams import StreamPlanDueView, StreamRemindView
 
 if TYPE_CHECKING:
@@ -620,7 +620,8 @@ class LiveMixin:
         banner = f"{mention} · en stream"
         for channel in dests:
             try:
-                message = await post_published_fiche(self, guild, hit, channel, banner=banner)
+                # Fiche réduite : le stream n'a pas besoin de la grande image.
+                message = await post_compact_fiche(self, guild, hit, channel, banner=banner)
             except Exception:
                 logger.exception("Publication fiche stream impossible")
                 continue

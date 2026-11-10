@@ -589,11 +589,15 @@ def render_compact_fiche(
     plans: list[dict] | None = None,
     guild_name: str = "",
     wid: str | None = None,
+    banner: str = "",
 ) -> discord.ui.LayoutView:
-    """Fiche postée en réponse à un lien : sans image large, avec les boutons publics."""
+    """Fiche réduite (lien collé, début de stream) : sans image large, avec les boutons publics."""
     view = discord.ui.LayoutView(timeout=None)
     body: list[discord.ui.Item] = []
     body.extend(stream_live_items(stream_channels or [], plans))
+    if banner:
+        body.append(discord.ui.TextDisplay(banner))
+        body.append(sep_tight())
     body.extend(fiche_intro(hit, backdrop=False))
     append_fiche_sections(
         body, hit, avg=avg, count=count, my_review=None, social_line=social, guild_name=guild_name,
@@ -612,7 +616,14 @@ async def post_compact_fiche(
     channel: discord.abc.Messageable,
     *,
     reference: discord.Message | None = None,
+    banner: str = "",
 ) -> discord.Message | None:
+    if banner and cog.catalog is not None:
+        # Début de stream : l'œuvre liée vient d'une recherche, on complète comme pour une fiche publiée.
+        try:
+            hit = await cog.catalog.enrich(hit)
+        except Exception:
+            logger.exception("Enrichissement de fiche réduite impossible")
     media_id = await cog.lookup_media_id(guild, hit)
     avg, count = await cog.media_stats(guild, media_id) if media_id else (None, 0)
     reviews = await cog.list_reviews(guild, media_id) if media_id else []
@@ -629,6 +640,7 @@ async def post_compact_fiche(
         "social": social,
         "stream_channels": stream_channels,
         "plans": plans,
+        "banner": banner,
     })
     view = render_compact_fiche(
         hit,
@@ -639,6 +651,7 @@ async def post_compact_fiche(
         plans=plans,
         guild_name=guild.name,
         wid=wid,
+        banner=banner,
     )
     try:
         kwargs: dict[str, Any] = {"view": view, "allowed_mentions": NO_PINGS}
@@ -784,6 +797,7 @@ def render_compact_record(rec: FicheRecord, *, live: bool) -> discord.ui.LayoutV
         plans=list(rec.payload.get("plans") or []),
         guild_name=str(rec.payload.get("guild_name") or ""),
         wid=rec.id if live else None,
+        banner=str(rec.payload.get("banner") or ""),
     )
 
 
