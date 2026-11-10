@@ -348,6 +348,37 @@ def _csv_bytes(header: list[str], rows: list[list[object]]) -> bytes:
     return buffer.getvalue().encode("utf-8-sig")
 
 
+LETTERBOXD_MAX_BYTES = 900 * 1024  # Letterboxd refuse les fichiers de plus de 1 Mo
+
+
+def _letterboxd_csvs(name: str, header: list[str], rows: list[list[object]]) -> list[tuple[str, bytes]]:
+    """CSV au format exact de Letterboxd : UTF-8 sans BOM, guillemets échappés `\\"`, sans espace
+    après les virgules, découpé en fichiers de moins de 1 Mo (en-tête répété)."""
+
+    def line(values: list[object]) -> str:
+        cells = []
+        for value in values:
+            text = str(value).replace("\r", "")
+            if any(char in text for char in ',"\n'):
+                text = '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            cells.append(text)
+        return ",".join(cells) + "\n"
+
+    head = line(header)
+    files: list[str] = []
+    current = head
+    for row in rows:
+        text = line(row)
+        if len((current + text).encode("utf-8")) > LETTERBOXD_MAX_BYTES and current != head:
+            files.append(current)
+            current = head
+        current += text
+    files.append(current)
+    if len(files) == 1:
+        return [(f"{name}.csv", files[0].encode("utf-8"))]
+    return [(f"{name}-{index}.csv", content.encode("utf-8")) for index, content in enumerate(files, 1)]
+
+
 def _day(stamp: object) -> str:
     try:
         return time.strftime("%Y-%m-%d", time.localtime(int(stamp)))  # type: ignore[arg-type]
@@ -383,10 +414,10 @@ class ExportMixin:
             user_id,
         )
 
-    async def export_letterboxd(self, user_id: int) -> tuple[bytes, int, int]:
-        """ZIP `notes.csv` + `watchlist.csv` au format d'import Letterboxd (films TMDB seulement).
+    async def export_letterboxd(self, user_id: int) -> tuple[list[tuple[str, bytes]], int, int]:
+        """`notes.csv` + `watchlist.csv` au format d'import Letterboxd (films TMDB seulement).
 
-        Renvoie (zip, films notés, films en signet)."""
+        Renvoie ([(nom, contenu)], films notés, films en signet)."""
         header = ["tmdbID", "Title", "Year", "Rating10", "WatchedDate", "Review"]
         rated: list[list[object]] = []
         for row in await self._export_rows(user_id):
@@ -409,17 +440,11 @@ class ExportMixin:
             tmdb_id = _tmdb_movie_id(row["source"], row["media_type"], str(row["source_id"]))
             if tmdb_id:
                 wanted.append([tmdb_id, row["title"], row["year"] or ""])
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("notes.csv", _csv_bytes(header, rated))
-            archive.writestr("watchlist.csv", _csv_bytes(["tmdbID", "Title", "Year"], wanted))
-            archive.writestr("LISEZ-MOI.txt", (
-                "Import sur Letterboxd :\n"
-                "- notes.csv : letterboxd.com/import (tes films notés, note sur 10, date vu, commentaire)\n"
-                "- watchlist.csv : Watchlist -> Import (tes films en signet)\n"
-                "Seuls les films sont exportés : Letterboxd ne gère pas les séries, jeux, musique ni livres.\n"
-            ).encode("utf-8"))
-        return buffer.getvalue(), len(rated), len(wanted)
+        # CSV directs (pas de ZIP) : Letterboxd prend les fichiers tels quels.
+        files = _letterboxd_csvs("notes", header, rated) if rated else []
+        if wanted:
+            files += _letterboxd_csvs("watchlist", ["tmdbID", "Title", "Year"], wanted)
+        return files, len(rated), len(wanted)
 
     async def export_carnet(self, user_id: int) -> tuple[bytes, int]:
         """CSV de toutes les notes, tous types : une sauvegarde lisible dans un tableur."""

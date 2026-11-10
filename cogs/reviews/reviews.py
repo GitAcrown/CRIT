@@ -873,28 +873,29 @@ class Reviews(StorageMixin, LiveMixin, ImportMixin, ExportMixin, commands.Cog):
             data, count = await self.export_carnet(user_id)
             if not count:
                 return await interaction.followup.send("**Rien à exporter ·** Ton carnet est vide.", ephemeral=True)
-            file = discord.File(io.BytesIO(data), filename=f"carnet-crit-{stamp}.csv")
+            files = [discord.File(io.BytesIO(data), filename=f"carnet-crit-{stamp}.csv")]
             text = (
                 f"**Carnet exporté ·** {count} note{'s' if count != 1 else ''}, tous types.\n"
                 "-# S'ouvre dans Excel, LibreOffice ou Google Sheets."
             )
         else:
-            data, rated, wanted = await self.export_letterboxd(user_id)
+            parts, rated, wanted = await self.export_letterboxd(user_id)
             if not rated and not wanted:
                 return await interaction.followup.send(
                     "**Rien à exporter ·** Aucun film noté ni en signet (Letterboxd ne gère que les films).",
                     ephemeral=True,
                 )
-            file = discord.File(io.BytesIO(data), filename=f"crit-vers-letterboxd-{stamp}.zip")
+            files = [discord.File(io.BytesIO(content), filename=name) for name, content in parts[:10]]
+            split = len(parts) > 2
             text = (
                 f"**Export Letterboxd ·** {rated} film{'s' if rated != 1 else ''} noté{'s' if rated != 1 else ''}"
                 f" · {wanted} en signet\n"
-                "1. Dézippe le fichier.\n"
-                "2. `notes.csv` → [letterboxd.com/import](https://letterboxd.com/import/)\n"
-                "3. `watchlist.csv` → ta Watchlist → **Import**\n"
-                "-# Seuls les films partent : Letterboxd ne gère pas les séries, jeux, musique ni livres."
+                + (f"- `notes{'-1, -2…' if split else ''}.csv` → [letterboxd.com/import](https://letterboxd.com/import/)"
+                   " (un fichier à la fois)\n" if rated else "")
+                + ("- `watchlist.csv` → importe-le depuis ta Watchlist sur Letterboxd\n" if wanted else "")
+                + "-# Seuls les films partent : Letterboxd ne gère pas les séries, jeux, musique ni livres."
             )
-        await interaction.followup.send(text, file=file, ephemeral=True)
+        await interaction.followup.send(text, files=files, ephemeral=True)
 
     @app_commands.command(name="quetes")
     @app_commands.guild_only()
