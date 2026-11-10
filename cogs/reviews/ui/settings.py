@@ -323,6 +323,7 @@ class HelpView(ReviewsLayout):
             "`/quetes` — 3 quêtes par semaine, ta série, la quête du mois, ton titre et tes skins d'étoiles\n"
             "`/reglages` — tes préférences (recherche, date, annonces, listes, stream)\n"
             "`/importer` — importe tes notes et ta watchlist Letterboxd (ZIP d'export ou CSV)\n"
+            "`/exporter` — tes films vers Letterboxd, ou tout ton carnet en CSV\n"
             "`/config` — salons d'annonces (par type) et longueur des commentaires "
             "*(Gérer le serveur)*\n"
             "`/help` — cette aide"

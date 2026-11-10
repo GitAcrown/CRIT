@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import time
 
 import aiohttp
@@ -40,7 +41,7 @@ from .formatting import (
     type_label,
 )
 from .links import MediaLink, find_media_links, message_is_only_links, pick_fiche_hit
-from .importer import MAX_IMPORT_BYTES, ImportError_, ImportMixin, parse_letterboxd, report_text
+from .importer import MAX_IMPORT_BYTES, ExportMixin, ImportError_, ImportMixin, parse_letterboxd, report_text
 from .live import LiveMixin
 from .prefs import UserPrefs, search_pref_includes
 from .progress import resolve_star_skin, title_for_level
@@ -68,7 +69,7 @@ from .ui.streams import StreamBindView, StreamHubView
 # Cog
 # ---------------------------------------------------------------------------
 
-class Reviews(StorageMixin, LiveMixin, ImportMixin, commands.Cog):
+class Reviews(StorageMixin, LiveMixin, ImportMixin, ExportMixin, commands.Cog):
     """Carnet de critiques commun à tous les serveurs (films, séries, jeux, musique, livres)."""
 
     def __init__(self, bot: commands.Bot):
@@ -855,6 +856,45 @@ class Reviews(StorageMixin, LiveMixin, ImportMixin, commands.Cog):
                 await interaction.user.send(text[:2000])
             except discord.HTTPException:
                 logger.info("Bilan d'import impossible à envoyer à %s", user_id)
+
+    @app_commands.command(name="exporter")
+    @app_commands.guild_only()
+    @app_commands.describe(format="Letterboxd (films, à importer sur letterboxd.com) ou carnet complet (CSV, tous types)")
+    @app_commands.choices(format=[
+        app_commands.Choice(name="Letterboxd (films)", value="letterboxd"),
+        app_commands.Choice(name="Carnet complet (CSV, tous types)", value="carnet"),
+    ])
+    async def critique_exporter(self, interaction: discord.Interaction, format: str = "letterboxd") -> None:
+        """Exporte tes notes : vers Letterboxd, ou tout ton carnet en CSV."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        user_id = interaction.user.id
+        stamp = time.strftime("%Y-%m-%d")
+        if format == "carnet":
+            data, count = await self.export_carnet(user_id)
+            if not count:
+                return await interaction.followup.send("**Rien à exporter ·** Ton carnet est vide.", ephemeral=True)
+            file = discord.File(io.BytesIO(data), filename=f"carnet-crit-{stamp}.csv")
+            text = (
+                f"**Carnet exporté ·** {count} note{'s' if count != 1 else ''}, tous types.\n"
+                "-# S'ouvre dans Excel, LibreOffice ou Google Sheets."
+            )
+        else:
+            data, rated, wanted = await self.export_letterboxd(user_id)
+            if not rated and not wanted:
+                return await interaction.followup.send(
+                    "**Rien à exporter ·** Aucun film noté ni en signet (Letterboxd ne gère que les films).",
+                    ephemeral=True,
+                )
+            file = discord.File(io.BytesIO(data), filename=f"crit-vers-letterboxd-{stamp}.zip")
+            text = (
+                f"**Export Letterboxd ·** {rated} film{'s' if rated != 1 else ''} noté{'s' if rated != 1 else ''}"
+                f" · {wanted} en signet\n"
+                "1. Dézippe le fichier.\n"
+                "2. `notes.csv` → [letterboxd.com/import](https://letterboxd.com/import/)\n"
+                "3. `watchlist.csv` → ta Watchlist → **Import**\n"
+                "-# Seuls les films partent : Letterboxd ne gère pas les séries, jeux, musique ni livres."
+            )
+        await interaction.followup.send(text, file=file, ephemeral=True)
 
     @app_commands.command(name="quetes")
     @app_commands.guild_only()

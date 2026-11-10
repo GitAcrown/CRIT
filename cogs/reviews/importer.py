@@ -330,3 +330,108 @@ def report_text(report: ImportReport) -> str:
         lines.append("-# Ajoute-les à la main avec `/search` si besoin.")
     lines.append("-# Pas d'XP ni d'annonce pour un import. Tes notes existantes n'ont pas été touchées.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Export : vers Letterboxd (films) ou carnet complet (tous types)
+# ---------------------------------------------------------------------------
+
+TYPE_NAMES = {"movie": "Film", "tv": "Série", "game": "Jeu", "album": "Album", "track": "Morceau", "book": "Livre"}
+
+
+def _csv_bytes(header: list[str], rows: list[list[object]]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(header)
+    writer.writerows(rows)
+    # BOM UTF-8 : Excel lit correctement les accents.
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def _day(stamp: object) -> str:
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(int(stamp)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+
+
+def _to_html(text: str) -> str:
+    """Commentaire Discord → critique Letterboxd (qui lit le HTML) : gras, italique, sauts de ligne."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.S)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text, flags=re.S)
+    text = re.sub(r"\|\|(.+?)\|\|", r"\1", text, flags=re.S)  # spoiler Discord : le texte reste
+    return text.replace("\n", "<br />")
+
+
+def _tmdb_movie_id(source: str, media_type: str, source_id: str) -> str:
+    if source != "tmdb" or media_type != "movie":
+        return ""
+    return source_id.split(":", 1)[0] if source_id.split(":", 1)[0].isdigit() else ""
+
+
+class ExportMixin:
+    """Export du carnet d'un membre (notes communes à tous les serveurs)."""
+
+    db: "dataio.ModelDataManager"
+
+    async def _export_rows(self, user_id: int) -> list:
+        return await self.db.fetchall(
+            """SELECT m.source, m.source_id, m.media_type, m.title, m.subtitle, m.year, m.url,
+                      r.rating, r.comment, r.experienced_at, r.spoiler, r.created_at
+               FROM reviews r JOIN media m ON m.id = r.media_id
+               WHERE r.user_id=? ORDER BY r.created_at""",
+            user_id,
+        )
+
+    async def export_letterboxd(self, user_id: int) -> tuple[bytes, int, int]:
+        """ZIP `notes.csv` + `watchlist.csv` au format d'import Letterboxd (films TMDB seulement).
+
+        Renvoie (zip, films notés, films en signet)."""
+        header = ["tmdbID", "Title", "Year", "Rating10", "WatchedDate", "Review"]
+        rated: list[list[object]] = []
+        for row in await self._export_rows(user_id):
+            tmdb_id = _tmdb_movie_id(row["source"], row["media_type"], str(row["source_id"]))
+            if not tmdb_id:
+                continue
+            rating = max(1, min(10, round(float(row["rating"]))))  # Letterboxd : 1 à 10
+            rated.append([
+                tmdb_id, row["title"], row["year"] or "", rating,
+                str(row["experienced_at"] or "")[:10], _to_html(row["comment"] or ""),
+            ])
+        wanted_rows = await self.db.fetchall(
+            """SELECT m.source, m.source_id, m.media_type, m.title, m.year
+               FROM watchlist w JOIN media m ON m.id = w.media_id
+               WHERE w.user_id=? ORDER BY w.added_at""",
+            user_id,
+        )
+        wanted: list[list[object]] = []
+        for row in wanted_rows:
+            tmdb_id = _tmdb_movie_id(row["source"], row["media_type"], str(row["source_id"]))
+            if tmdb_id:
+                wanted.append([tmdb_id, row["title"], row["year"] or ""])
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("notes.csv", _csv_bytes(header, rated))
+            archive.writestr("watchlist.csv", _csv_bytes(["tmdbID", "Title", "Year"], wanted))
+            archive.writestr("LISEZ-MOI.txt", (
+                "Import sur Letterboxd :\n"
+                "- notes.csv : letterboxd.com/import (tes films notés, note sur 10, date vu, commentaire)\n"
+                "- watchlist.csv : Watchlist -> Import (tes films en signet)\n"
+                "Seuls les films sont exportés : Letterboxd ne gère pas les séries, jeux, musique ni livres.\n"
+            ).encode("utf-8"))
+        return buffer.getvalue(), len(rated), len(wanted)
+
+    async def export_carnet(self, user_id: int) -> tuple[bytes, int]:
+        """CSV de toutes les notes, tous types : une sauvegarde lisible dans un tableur."""
+        header = ["Titre", "Type", "Année", "Auteur / créateur", "Note /10", "Commentaire", "Spoiler",
+                  "Vu le", "Noté le", "Source", "ID source", "Lien"]
+        rows = [
+            [
+                row["title"], TYPE_NAMES.get(row["media_type"], row["media_type"]), row["year"] or "",
+                row["subtitle"] or "", f"{float(row['rating']):g}", row["comment"] or "",
+                "oui" if row["spoiler"] else "", str(row["experienced_at"] or "")[:10],
+                _day(row["created_at"]), row["source"], row["source_id"], row["url"] or "",
+            ]
+            for row in await self._export_rows(user_id)
+        ]
+        return _csv_bytes(header, rows), len(rows)
