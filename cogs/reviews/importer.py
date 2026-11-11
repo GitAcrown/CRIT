@@ -1,4 +1,4 @@
-"""Import d'un export Letterboxd (ZIP officiel ou CSV au format Letterboxd).
+"""Import d'un export Letterboxd (ZIP officiel ou CSV au format Letterboxd) ou IMDb (CSV).
 
 Le ZIP (Réglages → Data → Export) contient `ratings.csv`, `reviews.csv`, `diary.csv` et
 `watchlist.csv`. Un CSV seul est aussi accepté : export partiel, ou CSV produit par un
@@ -41,6 +41,7 @@ class LetterboxdEntry:
     watched: str = ""  # AAAA-MM-JJ
     review: str = ""
     logged: str = ""  # date d'ajout dans Letterboxd (AAAA-MM-JJ)
+    imdb_id: str = ""  # export IMDb : correspondance exacte via TMDB /find
 
     @property
     def key(self) -> tuple[str, int | None]:
@@ -51,10 +52,14 @@ class LetterboxdEntry:
 class LetterboxdData:
     rated: list[LetterboxdEntry] = field(default_factory=list)
     watchlist: list[LetterboxdEntry] = field(default_factory=list)
+    source: str = "Letterboxd"
+    skipped: int = 0  # épisodes, jeux… que TMDB ne couvre pas
 
 
 @dataclass
 class ImportReport:
+    source: str = "Letterboxd"
+    skipped: int = 0
     imported: int = 0
     already: int = 0
     bookmarked: int = 0
@@ -182,7 +187,10 @@ def parse_letterboxd(raw: bytes, filename: str) -> LetterboxdData:
         return data
 
     if name.endswith(".csv"):
-        entries = [entry for row in _read_csv(raw) if (entry := _entry(row))]
+        rows = _read_csv(raw)
+        if rows and _is_imdb(rows[0]):
+            return _parse_imdb(rows, name)
+        entries = [entry for row in rows if (entry := _entry(row))]
         if not entries:
             raise ImportError_("Ce CSV est vide ou n'a pas de colonne `Name` / `Title`.")
         if "watchlist" in name or all(entry.rating is None for entry in entries):
@@ -190,7 +198,63 @@ def parse_letterboxd(raw: bytes, filename: str) -> LetterboxdData:
         else:
             data.rated = [entry for entry in entries if entry.rating is not None]
         return data
-    raise ImportError_("Envoie le ZIP d'export Letterboxd ou un fichier `.csv`.")
+    raise ImportError_("Envoie le ZIP d'export Letterboxd, ou un fichier `.csv` (Letterboxd ou IMDb).")
+
+
+# ---------------------------------------------------------------------------
+# IMDb : export des notes (ratings) ou de la watchlist, en CSV
+# ---------------------------------------------------------------------------
+
+_IMDB_ID = re.compile(r"\b(tt\d{5,})\b")
+# Types IMDb que TMDB connaît (films et séries) ; épisodes, jeux et podcasts sont ignorés.
+_IMDB_SKIPPED_TYPES = ("episode", "game", "podcast", "music video")
+
+
+def _is_imdb(row: dict[str, str]) -> bool:
+    keys = {(k or "").strip().casefold() for k in row}
+    return "const" in keys or ("url" in keys and "title type" in keys)
+
+
+def _imdb_id(row: dict[str, str]) -> str:
+    match = _IMDB_ID.search(_col(row, "Const") or _col(row, "URL"))
+    return match.group(1) if match else ""
+
+
+def _parse_imdb(rows: list[dict[str, str]], name: str) -> LetterboxdData:
+    """Notes IMDb sur 10 (entier) ; watchlist si pas de note ou fichier nommé « watchlist »."""
+    data = LetterboxdData(source="IMDb")
+    watchlist_file = "watchlist" in name or any(
+        (k or "").strip().casefold() == "position" for k in rows[0]
+    )
+    for row in rows:
+        imdb_id = _imdb_id(row)
+        title = _col(row, "Title", "Original Title")
+        if not imdb_id or not title:
+            continue
+        kind = _col(row, "Title Type", "Type").casefold()
+        if any(word in kind for word in _IMDB_SKIPPED_TYPES):
+            data.skipped += 1
+            continue
+        year_raw = _col(row, "Year")
+        raw_rating = _col(row, "Your Rating", "Your Ratings", "You rated")
+        try:
+            rating: float | None = max(1.0, min(10.0, round(float(raw_rating)))) if raw_rating else None
+        except ValueError:
+            rating = None
+        entry = LetterboxdEntry(
+            title=title,
+            year=int(year_raw) if year_raw.isdigit() else None,
+            rating=rating,
+            logged=_col(row, "Date Rated", "Date Added", "Created")[:10],
+            imdb_id=imdb_id,
+        )
+        if rating is not None and not watchlist_file:
+            data.rated.append(entry)
+        else:
+            data.watchlist.append(entry)
+    if not data.rated and not data.watchlist and not data.skipped:
+        raise ImportError_("Ce CSV IMDb ne contient aucune œuvre lisible.")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +262,11 @@ def parse_letterboxd(raw: bytes, filename: str) -> LetterboxdData:
 # ---------------------------------------------------------------------------
 
 async def match_film(catalog: "MediaCatalog", entry: LetterboxdEntry) -> MediaHit | None:
-    """Film TMDB du même titre, à un an près ; sans année, le premier résultat exact."""
-    query = f"{entry.title} {entry.year}" if entry.year else entry.title
+    """ID IMDb : correspondance exacte (film ou série). Sinon film TMDB du même titre, à un an près."""
+    if entry.imdb_id:
+        hits = await catalog.tmdb.find_imdb(entry.imdb_id)
+        return hits[0] if hits else None
+    query =f"{entry.title} {entry.year}" if entry.year else entry.title
     for attempt in (query, entry.title):
         hits = await catalog.tmdb.search(attempt, "movie", 5)
         for hit in hits:
@@ -227,7 +294,9 @@ class ImportMixin:
         progress: ProgressCallback,
     ) -> ImportReport:
         assert self.catalog is not None
-        report = ImportReport(total=len(data.rated) + len(data.watchlist))
+        report = ImportReport(
+            source=data.source, skipped=data.skipped, total=len(data.rated) + len(data.watchlist),
+        )
         max_len = await self.get_comment_max(guild)  # type: ignore[attr-defined]
         await self.remember_member(guild.id, user_id)  # type: ignore[attr-defined]
         semaphore = asyncio.Semaphore(MATCH_CONCURRENCY)
@@ -317,11 +386,13 @@ def _stamp(day: str) -> int | None:
 
 def report_text(report: ImportReport) -> str:
     lines = [
-        "**Import Letterboxd terminé**",
+        f"**Import {report.source} terminé**",
         f"{report.imported} note{'s' if report.imported != 1 else ''} ajoutée{'s' if report.imported != 1 else ''}"
         f" · {report.bookmarked} signet{'s' if report.bookmarked != 1 else ''}"
         f" · {report.already} déjà dans ton carnet",
     ]
+    if report.skipped:
+        lines.append(f"-# {report.skipped} ignoré{'s' if report.skipped > 1 else ''} (épisodes, jeux…) : TMDB ne les couvre pas.")
     if report.not_found:
         shown = report.not_found[:15]
         more = len(report.not_found) - len(shown)

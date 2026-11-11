@@ -80,7 +80,7 @@ class Reviews(StorageMixin, LiveMixin, ImportMixin, ExportMixin, commands.Cog):
         self._comment_max: dict[int, int] = {}
         self._prefs: dict[int, UserPrefs] = {}
         self._known_members: set[tuple[int, int]] = set()
-        self._imports: set[int] = set()  # membres avec un import Letterboxd en cours
+        self._imports: set[int] = set()  # membres avec un import (Letterboxd, IMDb) en cours
         self._stream_end_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._stream_remind_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._stream_session_reminded: set[tuple[int, int]] = set()
@@ -792,9 +792,9 @@ class Reviews(StorageMixin, LiveMixin, ImportMixin, ExportMixin, commands.Cog):
 
     @app_commands.command(name="importer")
     @app_commands.guild_only()
-    @app_commands.describe(fichier="ZIP d'export Letterboxd (Réglages → Data → Export) ou CSV au format Letterboxd")
+    @app_commands.describe(fichier="Export Letterboxd (ZIP ou CSV) ou export IMDb (notes ou watchlist, CSV)")
     async def critique_importer(self, interaction: discord.Interaction, fichier: discord.Attachment) -> None:
-        """Importe tes notes et ta watchlist Letterboxd dans ton carnet (sans XP ni annonce)."""
+        """Importe tes notes et ta watchlist Letterboxd ou IMDb dans ton carnet (sans XP ni annonce)."""
         guild = interaction.guild
         if not isinstance(guild, discord.Guild):
             return await interaction.response.send_message(
@@ -830,7 +830,7 @@ class Reviews(StorageMixin, LiveMixin, ImportMixin, ExportMixin, commands.Cog):
         async def progress(done: int, count: int) -> None:
             try:
                 await interaction.edit_original_response(
-                    content=f"**Import Letterboxd ·** {done}/{count} films traités…"
+                    content=f"**Import {data.source} ·** {done}/{count} œuvres traitées…"
                 )
             except discord.HTTPException:
                 pass
