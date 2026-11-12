@@ -60,6 +60,7 @@ SETTINGS = "<:settings:1568616643456798811>"
 SHUFFLE = "🔀"  # remplacé par assets/emojis/shuffle.png à la synchro
 OPEN = "↗️"  # remplacé par assets/emojis/open.png à la synchro
 SHELF = "🗂️"  # bouton Ranger (signet + listes), remplacé par assets/emojis/shelf.png
+FILTER = "🔽"  # bouton Tri / En cours du journal, remplacé par assets/emojis/filter.png
 
 # Les valeurs ci-dessous sont des secours Unicode, remplacées par assets/emojis/<nom>.png.
 # Icônes de niveau (lvl_*.png) et de titres spéciaux (title_*.png).
