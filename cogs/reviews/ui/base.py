@@ -182,13 +182,15 @@ class PageJumpButton(discord.ui.Button):
 
 
 def page_nav(parent: Any, attr: str, max_page: int, *middle: discord.ui.Item) -> discord.ui.ActionRow:
-    """← N/M → puis les contrôles du menu (tri, au hasard…) ; flèches et numéro grisés sur une seule page."""
+    """← N/M [contrôles du menu : tri, au hasard…] → : les flèches toujours aux extrémités.
+
+    Flèches et numéro grisés quand il n'y a qu'une page."""
     max_page = max(0, max_page)
     return discord.ui.ActionRow(
         PageButton(parent, attr, -1, "←", max_page),
         PageJumpButton(parent, attr, max_page),
-        PageButton(parent, attr, 1, "→", max_page),
         *middle,
+        PageButton(parent, attr, 1, "→", max_page),
     )
 
 
