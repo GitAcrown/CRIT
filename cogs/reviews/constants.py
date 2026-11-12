@@ -62,7 +62,7 @@ MAX_COMMENT_MAX = 500
 JOURNAL_PAGE = 4
 
 
-REVIEWS_PAGE = 5
+REVIEWS_PAGE = 4  # 5 dépassait la limite de 40 composants avec la rangée de pages
 
 
 CATALOG_PAGE = 8

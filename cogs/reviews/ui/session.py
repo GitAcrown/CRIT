@@ -43,7 +43,7 @@ from .actions import (
     SeasonScopeSelect,
 )
 from .base import (
-    PageButton,
+    page_nav,
     present_ephemeral_layout,
     ReviewsLayout,
     sep_tight,
@@ -315,10 +315,7 @@ class FicheView(ReviewsLayout):
             if seen:
                 text += f"\n{seen}"
             body.append(section_with_thumbnail(text, avatar))
-        if max_page > 0:
-            prev_btn = PageButton(self, "review_page", -1, "←", max_page)
-            next_btn = PageButton(self, "review_page", 1, "→", max_page)
-            actions.append(discord.ui.ActionRow(prev_btn, next_btn))
+        actions.append(page_nav(self, "review_page", max_page))
 
     def _action_rows(self) -> list[discord.ui.Item]:
         hit = self.hit

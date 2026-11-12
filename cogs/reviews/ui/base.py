@@ -140,14 +140,55 @@ class PageButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
-def page_nav(parent: Any, attr: str, max_page: int, *middle: discord.ui.Item) -> discord.ui.ActionRow | None:
-    """← [contrôles du milieu] → ; seulement les contrôles s'il n'y a qu'une page."""
-    if max_page <= 0:
-        return discord.ui.ActionRow(*middle) if middle else None
+class PageJumpModal(discord.ui.Modal, title="Aller à la page"):
+    def __init__(self, parent: Any, attr: str, max_page: int):
+        super().__init__()
+        self._hub = parent
+        self._attr = attr
+        self._max_page = max_page
+        self.page = discord.ui.TextInput(
+            placeholder=f"Page actuelle : {getattr(parent, attr) + 1}",
+            min_length=1,
+            max_length=4,
+        )
+        self.add_item(discord.ui.Label(text=f"Page (1 à {max_page + 1})", component=self.page))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.page.value).strip()
+        if not raw.isdigit():
+            self._hub.notice = f"**Page invalide ·** Entre un nombre entre 1 et {self._max_page + 1}."
+        else:
+            setattr(self._hub, self._attr, max(0, min(self._max_page, int(raw) - 1)))
+        self._hub._build()
+        await apply_view(interaction, self._hub)
+
+
+class PageJumpButton(discord.ui.Button):
+    """« 2/5 » entre les flèches : ouvre un formulaire pour sauter à une page. Grisé s'il n'y en a qu'une."""
+
+    def __init__(self, parent: Any, attr: str, max_page: int):
+        current = max(0, min(max_page, getattr(parent, attr)))
+        super().__init__(
+            label=f"{current + 1}/{max_page + 1}",
+            style=discord.ButtonStyle.secondary,
+            disabled=max_page <= 0,
+        )
+        self._hub = parent
+        self._attr = attr
+        self._max_page = max_page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(PageJumpModal(self._hub, self._attr, self._max_page))
+
+
+def page_nav(parent: Any, attr: str, max_page: int, *middle: discord.ui.Item) -> discord.ui.ActionRow:
+    """← N/M → puis les contrôles du menu (tri, au hasard…) ; flèches et numéro grisés sur une seule page."""
+    max_page = max(0, max_page)
     return discord.ui.ActionRow(
         PageButton(parent, attr, -1, "←", max_page),
-        *middle,
+        PageJumpButton(parent, attr, max_page),
         PageButton(parent, attr, 1, "→", max_page),
+        *middle,
     )
 
 
@@ -364,11 +405,23 @@ class ReviewsLayout(discord.ui.LayoutView):
         if control_separators:
             head = children[:sticky_head]
             children = head + with_control_separators(children[sticky_head:])
+        if notice_items:
+            # Discord refuse plus de 40 composants : l'avis cède sa place (trait, puis texte) plutôt que de casser le menu.
+            # +1 pour le Container, +2 pour la rangée « Partager » que certains menus ajoutent ensuite.
+            used = sum(item._total_count for item in self.children) + 1 + 2
+            for extra in notice_items:
+                if used + sum(child._total_count for child in children) <= MAX_COMPONENTS:
+                    break
+                children = [child for child in children if child is not extra]
+            notice_items = tuple(item for item in notice_items if any(child is item for child in children))
         if children:
             container = discord.ui.Container(*children, accent_colour=self.accent_colour)
             self.add_item(container)
             if notice_items:
                 self._schedule_notice_clear(self._layout_version, container, notice_items)
+
+
+MAX_COMPONENTS = 40  # limite Discord par message (tous niveaux confondus)
 
 
 def sep_tight() -> discord.ui.Separator:
