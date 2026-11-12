@@ -69,126 +69,124 @@ def _type_tile(media_type: str) -> str | None:
     return f"{emoji.url}?size=256" if emoji.id else None
 
 
-class JournalTypeSelect(discord.ui.Select):
-    def __init__(self, parent: "ProfileView"):
-        options = [
-            discord.SelectOption(
-                label=choice.name,
-                value=choice.value,
-                default=parent.journal_type == choice.value,
-            )
-            for choice in TYPE_CHOICES
-        ]
-        super().__init__(placeholder="Type", options=options, min_values=1, max_values=1)
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        self._hub.journal_type = self.values[0]
-        self._hub.journal_page = 0
-        self._hub._build()
-        await apply_view(interaction, self._hub)
-
-
-SORT_CYCLE = ("recent", "best", "worst")
-
-
-SORT_LABELS = {
-    "recent": "Tri : Récentes",
-    "best": "Tri : Meilleures",
-    "worst": "Tri : Pires",
-}
-
-
-SORT_STYLES = {
-    "recent": discord.ButtonStyle.primary,
-    "best": discord.ButtonStyle.success,
-    "worst": discord.ButtonStyle.danger,
-}
-
-
-def next_sort(current: str) -> str:
-    try:
-        index = SORT_CYCLE.index(current)
-    except ValueError:
-        return "recent"
-    return SORT_CYCLE[(index + 1) % len(SORT_CYCLE)]
-
-
-JOURNAL_SORT_OPTIONS = (
+SORT_OPTIONS = (
     ("recent", "Récentes", "Dernières notées en premier"),
     ("best", "Meilleures", "Les mieux notées en premier"),
     ("worst", "Pires", "Les moins bien notées en premier"),
 )
+SORT_NAMES = {value: name for value, name, _hint in SORT_OPTIONS}
 
 
-class JournalFilterModal(discord.ui.Modal, title="Trier le journal"):
-    """Tri du journal et filtre « en cours », réunis dans un seul formulaire."""
+class SortFilterModal(discord.ui.Modal):
+    """Tri, type et (si `ongoing_attr`) « en cours » réunis dans un seul formulaire.
 
-    def __init__(self, parent: "ProfileView"):
-        super().__init__()
-        self._hub = parent
+    Remplace les boutons de tri et menus de filtre posés dans le menu : moins de composants,
+    et tout se règle en une fois. Les valeurs vivent sur le menu (`hub`) dans les attributs donnés.
+    """
+
+    def __init__(
+        self,
+        hub: Any,
+        *,
+        title: str,
+        sort_attr: str,
+        type_attr: str,
+        page_attr: str,
+        ongoing_attr: str | None = None,
+    ):
+        super().__init__(title=title)
+        self._hub = hub
+        self._attrs = (sort_attr, type_attr, page_attr, ongoing_attr)
+        current_sort = getattr(hub, sort_attr)
+        current_type = getattr(hub, type_attr)
         self.sort = discord.ui.Select(
             options=[
-                discord.SelectOption(label=label, value=value, description=hint, default=parent.journal_sort == value)
-                for value, label, hint in JOURNAL_SORT_OPTIONS
+                discord.SelectOption(label=name, value=value, description=hint, default=current_sort == value)
+                for value, name, hint in SORT_OPTIONS
             ],
             min_values=1,
             max_values=1,
         )
         self.add_item(discord.ui.Label(text="Tri", component=self.sort))
-        self.ongoing = discord.ui.Checkbox(custom_id="ongoing", default=parent.journal_ongoing)
-        self.add_item(discord.ui.Label(
-            text="Seulement en cours",
-            description="Séries, jeux et livres pas encore terminés",
-            component=self.ongoing,
-        ))
+        self.kind = discord.ui.Select(
+            options=[
+                discord.SelectOption(
+                    label=choice.name,
+                    value=choice.value,
+                    emoji=select_emoji(choice.value) if choice.value != "all" else None,
+                    default=current_type == choice.value,
+                )
+                for choice in TYPE_CHOICES
+            ],
+            min_values=1,
+            max_values=1,
+        )
+        self.add_item(discord.ui.Label(text="Type", component=self.kind))
+        self.ongoing: discord.ui.Checkbox | None = None
+        if ongoing_attr:
+            self.ongoing = discord.ui.Checkbox(custom_id="ongoing", default=bool(getattr(hub, ongoing_attr)))
+            self.add_item(discord.ui.Label(
+                text="Seulement en cours",
+                description="Séries, jeux et livres pas encore terminés",
+                component=self.ongoing,
+            ))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        sort_attr, type_attr, page_attr, ongoing_attr = self._attrs
         hub = self._hub
-        hub.journal_sort = self.sort.values[0] if self.sort.values else hub.journal_sort
-        hub.journal_ongoing = bool(self.ongoing.value)
-        hub.journal_page = 0
+        if self.sort.values:
+            setattr(hub, sort_attr, self.sort.values[0])
+        if self.kind.values:
+            setattr(hub, type_attr, self.kind.values[0])
+        if ongoing_attr and self.ongoing is not None:
+            setattr(hub, ongoing_attr, bool(self.ongoing.value))
+        setattr(hub, page_attr, 0)
         hub._build()
         await apply_view(interaction, hub)
 
 
-class JournalFilterButton(discord.ui.Button):
-    """Entonnoir : ouvre le formulaire de tri. Le libellé rappelle le tri et le filtre actifs."""
+class SortFilterButton(discord.ui.Button):
+    """Entonnoir : ouvre `SortFilterModal`. Le libellé rappelle le tri et les filtres actifs,
+    bleu dès qu'on n'est plus sur « Récentes, tous types »."""
 
-    def __init__(self, parent: "ProfileView"):
-        label = dict((value, name) for value, name, _hint in JOURNAL_SORT_OPTIONS).get(parent.journal_sort, "Récentes")
-        if parent.journal_ongoing:
-            label += " · en cours"
-        active = parent.journal_sort != "recent" or parent.journal_ongoing
+    def __init__(
+        self,
+        hub: Any,
+        *,
+        title: str,
+        sort_attr: str,
+        type_attr: str,
+        page_attr: str,
+        ongoing_attr: str | None = None,
+    ):
+        sort = getattr(hub, sort_attr)
+        kind = getattr(hub, type_attr)
+        ongoing = bool(getattr(hub, ongoing_attr)) if ongoing_attr else False
+        parts = [SORT_NAMES.get(sort, "Récentes")]
+        if kind != "all":
+            parts.append(type_label(kind))
+        if ongoing:
+            parts.append("en cours")
+        active = sort != "recent" or kind != "all" or ongoing
         super().__init__(
-            label=label,
+            label=" · ".join(parts),
             emoji=discord.PartialEmoji.from_str(FILTER),
             style=discord.ButtonStyle.primary if active else discord.ButtonStyle.secondary,
         )
-        self._hub = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(JournalFilterModal(self._hub))
-
-
-class CycleSortButton(discord.ui.Button):
-    """Bouton entre les flèches : Récentes → Meilleures → Pires."""
-
-    def __init__(self, parent: Any, attr: str, page_attr: str):
-        current = getattr(parent, attr)
-        super().__init__(
-            label=SORT_LABELS.get(current, SORT_LABELS["recent"]),
-            style=SORT_STYLES.get(current, discord.ButtonStyle.primary),
+        self._hub = hub
+        self._modal_kwargs = dict(
+            title=title, sort_attr=sort_attr, type_attr=type_attr, page_attr=page_attr, ongoing_attr=ongoing_attr,
         )
-        self._hub = parent
-        self._attr = attr
-        self._page_attr = page_attr
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        setattr(self._hub, self._attr, next_sort(getattr(self._hub, self._attr)))
-        setattr(self._hub, self._page_attr, 0)
-        self._hub._build()
-        await apply_view(interaction, self._hub)
+        await interaction.response.send_modal(SortFilterModal(self._hub, **self._modal_kwargs))
+
+
+def journal_filter_button(hub: "ProfileView") -> SortFilterButton:
+    return SortFilterButton(
+        hub, title="Trier le journal", sort_attr="journal_sort", type_attr="journal_type",
+        page_attr="journal_page", ongoing_attr="journal_ongoing",
+    )
 
 
 class ProfileShareButton(discord.ui.Button):
@@ -598,10 +596,10 @@ class ProfileView(ReviewsLayout):
 
     def _journal_layout(self) -> tuple[list[discord.ui.Item], list[discord.ui.ActionRow], list[discord.ui.ActionRow]]:
         entries = self._filtered_journal()
-        filters = [discord.ui.ActionRow(JournalTypeSelect(self))]
+        filters: list[discord.ui.ActionRow] = []  # type, tri et « en cours » : dans le formulaire de l'entonnoir
         content: list[discord.ui.Item] = []
         actions: list[discord.ui.ActionRow] = []
-        controls = (JournalFilterButton(self),)
+        controls = (journal_filter_button(self),)
         if not self.journal_entries:
             content.append(discord.ui.TextDisplay("*Aucune œuvre notée pour l'instant.*"))
             return content, filters, actions

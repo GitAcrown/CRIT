@@ -12,7 +12,7 @@ from ..formatting import format_stars_select, type_label
 from ..progress import StarSkin
 from ..providers import MediaHit
 from .base import page_nav, ReviewsLayout, sep_tight, TabButton
-from .profile import CycleSortButton
+from .profile import SortFilterButton
 from .session import OpenFicheSelect, RandomFicheButton
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ class ServerHubView(ReviewsLayout):
         self.catalog_subtitle = catalog_subtitle
         self.tab = "catalogue"
         self.catalog_sort = "recent"
+        self.catalog_type = "all"  # filtre par type, réglé dans le formulaire de l'entonnoir
         self.star_skin = star_skin
         self.catalog_page = 0
         self.for_you_page = 0
@@ -61,6 +62,8 @@ class ServerHubView(ReviewsLayout):
             ordered = sorted(self.catalog, key=lambda item: (item[1], -item[2], -item[3]))
         else:
             ordered = sorted(self.catalog, key=lambda item: (item[3], item[1]), reverse=True)
+        if self.catalog_type != "all":
+            ordered = [item for item in ordered if item[0].media_type == self.catalog_type]
         return [(hit, avg, count) for hit, avg, count, _latest in ordered]
 
     def _ranked_layout(
@@ -79,8 +82,14 @@ class ServerHubView(ReviewsLayout):
             body.append(sep_tight())
             body.append(extra_row)
         rows: list[discord.ui.ActionRow] = []
+        funnel = SortFilterButton(
+            self, title="Trier le catalogue", sort_attr="catalog_sort", type_attr="catalog_type",
+            page_attr="catalog_page",
+        ) if page_attr == "catalog_page" else None
         if not items:
             body.append(discord.ui.TextDisplay(empty))
+            if funnel is not None:  # filtre trop strict : l'entonnoir reste pour le retirer
+                rows.append(discord.ui.ActionRow(funnel))
             return body, rows
         max_page = max(0, (len(items) - 1) // CATALOG_PAGE)
         page = min(getattr(self, page_attr), max_page)
@@ -105,8 +114,8 @@ class ServerHubView(ReviewsLayout):
             ],
         )))
         middle: list[discord.ui.Item] = []
-        if page_attr == "catalog_page":
-            middle.append(CycleSortButton(self, "catalog_sort", "catalog_page"))
+        if funnel is not None:
+            middle.append(funnel)
         middle.append(RandomFicheButton(self, [hit for hit, _avg, _count in items]))
         rows.append(page_nav(self, page_attr, max_page, *middle))
         return body, rows
