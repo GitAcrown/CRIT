@@ -11,6 +11,8 @@ Protocole (JSON, un objet par message, champ `t`) :
   (connecté)    programme {uid, guild_id, titre, correction?, fiche}  → lie {uid, oeuvre, autres, fiche} | non_lie {uid, raison}
                 corriger {uid, ref}                        → lie
                 chercher {q}                               → resultats {q, oeuvres}
+                quiz {guild_id}                            → quiz {guild_id, oeuvres: [{titre, annee, type, moyenne,
+                                                              nombre, notes: [{nom, note}]}]}  (notes du serveur)
                 fin_programme {uid} · fin_soiree · oublier → oublie
   CRIT → HERTZ  note {uid, note: {moyenne, nombre, derniere?}}   dès qu'un membre note le film en cours ou le
                 dernier film terminé (mise à jour en direct à l'écran)
@@ -299,6 +301,8 @@ class Hertz(commands.Cog):
             await self._corriger(li, d)
         elif t == "chercher":
             await self._chercher(li, d)
+        elif t == "quiz":
+            await self._quiz(li, d)
         elif t == "fin_programme":
             for (gid, uid), c in list(self.en_cours.items()):
                 if uid == li.user_id and c["uid"] == str(d.get("uid") or ""):
@@ -553,6 +557,44 @@ class Hertz(commands.Cog):
             films, series = await asyncio.gather(catalog.tmdb.search(q, "movie", 5), catalog.tmdb.search(q, "tv", 3))
             oeuvres = [oeuvre_json(h) for h in [*films, *series]]
         await li.envoyer({"t": "resultats", "q": q, "oeuvres": oeuvres})
+
+    async def _quiz(self, li: Liaison, d: dict[str, Any]) -> None:
+        """Les œuvres notées sur le serveur, pour les questions du mini-jeu de HERTZ."""
+        brut = str(d.get("guild_id") or "")
+        guild = self.bot.get_guild(int(brut)) if brut.isdigit() else None
+        reviews = self._reviews()
+        # seulement un serveur où se trouve la personne qui a autorisé cette régie
+        if guild is None or reviews is None or guild.get_member(li.user_id) is None:
+            await li.envoyer({"t": "quiz", "guild_id": brut, "oeuvres": []})
+            return
+        from cogs.reviews.formatting import user_display
+
+        on_server = "JOIN members gm ON gm.user_id = r.user_id AND gm.guild_id = ?"
+        lignes = await reviews.db.fetchall(
+            f"""SELECT m.id, m.title, m.year, m.media_type, AVG(r.rating) AS moy, COUNT(*) AS n
+                FROM reviews r {on_server} JOIN media m ON m.id = r.media_id
+                WHERE m.media_type IN ('movie', 'tv')
+                GROUP BY m.id ORDER BY n DESC, MAX(r.updated_at) DESC LIMIT 80""",
+            guild.id,
+        )
+        oeuvres: dict[int, dict[str, Any]] = {}
+        for r in lignes:
+            oeuvres[int(r["id"])] = {"titre": r["title"], "annee": r["year"],
+                                     "type": "série" if r["media_type"] == "tv" else "film",
+                                     "moyenne": round(float(r["moy"]), 2), "nombre": int(r["n"]), "notes": []}
+        if oeuvres:
+            marques = ",".join("?" * len(oeuvres))
+            notes = await reviews.db.fetchall(
+                f"""SELECT r.media_id, r.user_id, r.rating FROM reviews r {on_server}
+                    WHERE r.media_id IN ({marques}) ORDER BY r.rating DESC""",
+                guild.id, *oeuvres.keys(),
+            )
+            for r in notes:
+                o = oeuvres[int(r["media_id"])]
+                if len(o["notes"]) < 8:
+                    o["notes"].append({"nom": user_display(guild, self.bot, int(r["user_id"]))[0],
+                                       "note": float(r["rating"])})
+        await li.envoyer({"t": "quiz", "guild_id": brut, "oeuvres": list(oeuvres.values())})
 
     async def _terminer(self, guild_id: int, user_id: int) -> None:
         """Fin du film : le lien au live est retiré et sa fiche invite à noter."""
