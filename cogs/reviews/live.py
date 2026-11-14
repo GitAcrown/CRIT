@@ -70,9 +70,14 @@ class LiveMixin:
         self._cancel_stream_remind(guild.id, member.id)
         await self._schedule_stream_end(guild, member.id, ended)
 
+    def _hertz_connecte(self, user_id: int) -> bool:
+        """Une régie HERTZ connectée dit elle-même ce qui passe : pas de rappel « tu streames quoi ? »."""
+        hertz = self.bot.get_cog("Hertz")
+        return bool(hertz is not None and hertz.connecte(user_id))
+
     async def _schedule_stream_remind(self, guild: discord.Guild, user_id: int) -> None:
         key = (guild.id, user_id)
-        if key in self._stream_session_reminded:
+        if key in self._stream_session_reminded or self._hertz_connecte(user_id):
             return
         if await self.get_stream_link(guild, user_id):
             self._stream_session_reminded.add(key)
@@ -91,7 +96,7 @@ class LiveMixin:
             if guild is None:
                 return
             member = guild.get_member(user_id)
-            if member is None or member_stream_source(member) is None:
+            if member is None or member_stream_source(member) is None or self._hertz_connecte(user_id):
                 return
             if await self.get_stream_link(guild, user_id):
                 self._stream_session_reminded.add((guild_id, user_id))
@@ -631,6 +636,9 @@ class LiveMixin:
     async def finish_stream_link(self, guild: discord.Guild, user_id: int) -> None:
         self._stream_session_reminded.discard((guild.id, user_id))
         self._cancel_stream_remind(guild.id, user_id)
+        hertz = self.bot.get_cog("Hertz")
+        if hertz is not None and await hertz.fin_du_live(guild, user_id):
+            return  # film diffusé par HERTZ : sa fiche passe en « à noter », pas de deuxième fiche
         link = await self.get_stream_link(guild, user_id)
         if link is None:
             return

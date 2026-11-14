@@ -8,3 +8,4 @@ __pycache__/
 venv/
 
 assets/emojis/.sync.json
+cogs/hertz/data/
