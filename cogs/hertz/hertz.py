@@ -11,6 +11,8 @@ Protocole (JSON, un objet par message, champ `t`) :
   (connecté)    programme {uid, guild_id, titre, correction?, fiche}  → lie {uid, oeuvre, autres, fiche} | non_lie {uid, raison}
                 corriger {uid, ref}                        → lie
                 chercher {q}                               → resultats {q, oeuvres}
+                apercu {id, guild_id, titre, correction?}  → apercu {id, oeuvre, note}  (le prochain film : sa note
+                                                              arrive avant qu'il commence ; rien n'est lié ni publié)
                 quiz {guild_id}                            → quiz {guild_id, oeuvres: [{titre, annee, type, moyenne,
                                                               nombre, notes: [{nom, note}]}]}  (notes du serveur)
                 fin_programme {uid} · fin_soiree · oublier → oublie
@@ -303,6 +305,8 @@ class Hertz(commands.Cog):
             await self._chercher(li, d)
         elif t == "quiz":
             await self._quiz(li, d)
+        elif t == "apercu":
+            await self._apercu(li, d)
         elif t == "fin_programme":
             for (gid, uid), c in list(self.en_cours.items()):
                 if uid == li.user_id and c["uid"] == str(d.get("uid") or ""):
@@ -557,6 +561,18 @@ class Hertz(commands.Cog):
             films, series = await asyncio.gather(catalog.tmdb.search(q, "movie", 5), catalog.tmdb.search(q, "tv", 3))
             oeuvres = [oeuvre_json(h) for h in [*films, *series]]
         await li.envoyer({"t": "resultats", "q": q, "oeuvres": oeuvres})
+
+    async def _apercu(self, li: Liaison, d: dict[str, Any]) -> None:
+        """Le film qui va passer : l'œuvre trouvée et sa note du serveur, sans rien lier ni publier."""
+        ident = str(d.get("id") or "")[:32]
+        brut = str(d.get("guild_id") or "")
+        guild = self.bot.get_guild(int(brut)) if brut.isdigit() else None
+        if guild is None or guild.get_member(li.user_id) is None:
+            await li.envoyer({"t": "apercu", "id": ident, "oeuvre": None, "note": None})
+            return
+        hit, _ = await self._trouver(str(d.get("titre") or "")[:200], d.get("correction"))
+        await li.envoyer({"t": "apercu", "id": ident, "oeuvre": oeuvre_json(hit) if hit else None,
+                          "note": await self._note(guild, hit) if hit else None})
 
     async def _quiz(self, li: Liaison, d: dict[str, Any]) -> None:
         """Les œuvres notées sur le serveur, pour les questions du mini-jeu de HERTZ."""
