@@ -1166,7 +1166,14 @@ class StorageMixin(QuestMixin):
                 self.notify_bookmark_watchers(guild, user, hit, rating),
                 name="crit-bookmark-notify",
             )
+        self._notify_hertz(guild, hit, user, rating)
         return created, award
+
+    def _notify_hertz(self, guild: discord.Guild | None, hit: MediaHit, user: Any, rating: float | None) -> None:
+        """Film diffusé par une régie HERTZ : sa note du serveur se met à jour à l'écran."""
+        hertz = self.bot.get_cog("Hertz")  # type: ignore[attr-defined]
+        if hertz is not None and guild is not None:
+            asyncio.create_task(hertz.note_changee(guild, hit, user, rating), name="crit-hertz-note")
 
     async def notify_bookmark_watchers(
         self,
@@ -1220,3 +1227,4 @@ class StorageMixin(QuestMixin):
                 user_id,
                 media_id,
             )
+            self._notify_hertz(guild, hit, user_id, None)

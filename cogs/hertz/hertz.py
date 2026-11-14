@@ -12,6 +12,8 @@ Protocole (JSON, un objet par message, champ `t`) :
                 corriger {uid, ref}                        → lie
                 chercher {q}                               → resultats {q, oeuvres}
                 fin_programme {uid} · fin_soiree · oublier → oublie
+  CRIT → HERTZ  note {uid, note: {moyenne, nombre, derniere?}}   dès qu'un membre note le film en cours ou le
+                dernier film terminé (mise à jour en direct à l'écran)
 """
 
 from __future__ import annotations
@@ -168,6 +170,8 @@ class Hertz(commands.Cog):
         self.jetons: dict[str, dict[str, Any]] = {}
         # (serveur, membre) → film en cours lié par HERTZ : survit à une coupure de la connexion
         self.en_cours: dict[tuple[int, int], dict[str, Any]] = {}
+        # (serveur, membre) → dernier film terminé : ses nouvelles notes partent encore vers HERTZ
+        self.termines: dict[tuple[int, int], dict[str, Any]] = {}
         self._demandes: dict[int, float] = {}
         self._runner: web.AppRunner | None = None
 
@@ -414,7 +418,8 @@ class Hertz(commands.Cog):
             # même film (HERTZ s'est reconnecté, ou a été relancé) : pas de deuxième fiche
             courant["uid"] = uid
             await li.envoyer({"t": "lie", "uid": uid, "oeuvre": oeuvre_json(courant["hit"]),
-                              "autres": [oeuvre_json(h) for h in autres], "fiche": bool(courant.get("message_id"))})
+                              "autres": [oeuvre_json(h) for h in autres], "fiche": bool(courant.get("message_id")),
+                              "note": await self._note(guild, courant["hit"])})
             return
         if courant:
             await self._terminer(guild.id, li.user_id)
@@ -427,7 +432,36 @@ class Hertz(commands.Cog):
             if message is not None:
                 c["channel_id"], c["message_id"] = message.channel.id, message.id
         await li.envoyer({"t": "lie", "uid": uid, "oeuvre": oeuvre_json(hit),
-                          "autres": [oeuvre_json(h) for h in autres], "fiche": bool(c["message_id"])})
+                          "autres": [oeuvre_json(h) for h in autres], "fiche": bool(c["message_id"]),
+                          "note": await self._note(guild, hit)})
+
+    async def _note(self, guild: discord.Guild, hit: Any, derniere: dict | None = None) -> dict[str, Any]:
+        """Note du serveur pour cette œuvre (sur 10), comme sur la fiche."""
+        reviews = self._reviews()
+        moyenne, nombre = None, 0
+        if reviews is not None:
+            media_id = await reviews.lookup_media_id(guild, hit)
+            if media_id:
+                moyenne, nombre = await reviews.media_stats(guild, media_id)
+        note: dict[str, Any] = {"moyenne": round(moyenne, 2) if moyenne is not None else None, "nombre": nombre}
+        if derniere:
+            note["derniere"] = derniere
+        return note
+
+    async def note_changee(self, guild: discord.Guild, hit: Any, user: Any, rating: float | None) -> None:
+        """Appelé quand un membre note (ou retire sa note) : les régies qui diffusent ce film sont prévenues."""
+        try:
+            cible = hit.identity
+            derniere = {"nom": getattr(user, "display_name", None) or str(user), "note": rating} if rating is not None else None
+            for li in list(self.liaisons):
+                if li.user_id is None or li.ws.closed:
+                    continue
+                cle = (guild.id, li.user_id)
+                for c in (self.en_cours.get(cle), self.termines.get(cle)):
+                    if c and c["hit"].identity == cible:
+                        await li.envoyer({"t": "note", "uid": c["uid"], "note": await self._note(guild, hit, derniere)})
+        except Exception:
+            log.exception("Note vers HERTZ impossible")
 
     async def _destinations(self, reviews, guild: discord.Guild, salon: int, media_type: str) -> list:
         """Le chat du vocal où tout le monde regarde, sinon le salon d'annonces de CRIT."""
@@ -483,7 +517,7 @@ class Hertz(commands.Cog):
         c = self.en_cours[cle]
         if hit.identity == c["hit"].identity:   # c'était déjà le bon film : rien à refaire
             await li.envoyer({"t": "lie", "uid": uid, "oeuvre": oeuvre_json(hit), "autres": [],
-                              "fiche": bool(c["message_id"]), "corrige": True})
+                              "fiche": bool(c["message_id"]), "corrige": True, "note": await self._note(guild, hit)})
             return
         c["hit"] = hit
         await reviews.set_stream_link(guild, li.user_id, hit, channel_id=c["salon"], source="voice", post_channel_id=0)
@@ -504,7 +538,7 @@ class Hertz(commands.Cog):
             if nouveau is not None:
                 c["channel_id"], c["message_id"] = nouveau.channel.id, nouveau.id
         await li.envoyer({"t": "lie", "uid": uid, "oeuvre": oeuvre_json(hit), "autres": [],
-                          "fiche": bool(c["message_id"]), "corrige": True})
+                          "fiche": bool(c["message_id"]), "corrige": True, "note": await self._note(guild, hit)})
 
     async def _chercher(self, li: Liaison, d: dict[str, Any]) -> None:
         q = str(d.get("q") or "").strip()[:100]
@@ -523,6 +557,8 @@ class Hertz(commands.Cog):
     async def _terminer(self, guild_id: int, user_id: int) -> None:
         """Fin du film : le lien au live est retiré et sa fiche invite à noter."""
         c = self.en_cours.pop((guild_id, user_id), None)
+        if c is not None:
+            self.termines[(guild_id, user_id)] = {"uid": c["uid"], "hit": c["hit"]}
         guild = self.bot.get_guild(guild_id)
         reviews = self._reviews()
         if c is None or guild is None or reviews is None:
