@@ -16,7 +16,7 @@ Protocole (JSON, un objet par message, champ `t`) :
                 quiz {guild_id}                            → quiz {guild_id, oeuvres: [{titre, annee, type, moyenne,
                                                               nombre, notes: [{nom, note}]}]}  (notes du serveur)
                 fin_programme {uid} · fin_soiree · oublier → oublie
-  CRIT → HERTZ  note {uid, note: {moyenne, nombre, derniere?}}   dès qu'un membre note le film en cours ou le
+  CRIT → HERTZ  note {uid, note: {moyenne, nombre, avis, derniere?}}   dès qu'un membre note le film en cours ou le
                 dernier film terminé (mise à jour en direct à l'écran)
 """
 
@@ -446,15 +446,38 @@ class Hertz(commands.Cog):
     async def _note(self, guild: discord.Guild, hit: Any, derniere: dict | None = None) -> dict[str, Any]:
         """Note du serveur pour cette œuvre (sur 10), comme sur la fiche."""
         reviews = self._reviews()
-        moyenne, nombre = None, 0
+        moyenne, nombre, avis = None, 0, []
         if reviews is not None:
             media_id = await reviews.lookup_media_id(guild, hit)
             if media_id:
                 moyenne, nombre = await reviews.media_stats(guild, media_id)
-        note: dict[str, Any] = {"moyenne": round(moyenne, 2) if moyenne is not None else None, "nombre": nombre}
+                avis = await self._avis(reviews, guild, media_id)
+        note: dict[str, Any] = {"moyenne": round(moyenne, 2) if moyenne is not None else None, "nombre": nombre,
+                                "avis": avis}
         if derniere:
             note["derniere"] = derniere
         return note
+
+    async def _avis(self, reviews, guild: discord.Guild, media_id: Any) -> list[dict[str, Any]]:
+        """Les commentaires des membres (les plus récents d'abord), pour les faire défiler à l'écran.
+        Jamais ceux marqués « spoiler ». Au plus 12, coupés à 280 caractères."""
+        try:
+            from cogs.reviews.formatting import row_spoiler, user_display
+            out = []
+            for r in await reviews.list_reviews(guild, media_id):
+                texte = " ".join(str(r["comment"] or "").split())
+                if not texte or row_spoiler(r):
+                    continue
+                if len(texte) > 280:
+                    texte = texte[:277].rsplit(" ", 1)[0] + "…"
+                out.append({"nom": user_display(guild, self.bot, int(r["user_id"]))[0], "note": float(r["rating"]),
+                            "texte": texte})
+                if len(out) == 12:
+                    break
+            return out
+        except Exception:
+            log.exception("Commentaires pour HERTZ impossibles")
+            return []
 
     async def note_changee(self, guild: discord.Guild, hit: Any, user: Any, rating: float | None) -> None:
         """Appelé quand un membre note (ou retire sa note) : les régies qui diffusent ce film sont prévenues."""
