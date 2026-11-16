@@ -633,7 +633,50 @@ class Hertz(commands.Cog):
                 if len(o["notes"]) < 8:
                     o["notes"].append({"nom": user_display(guild, self.bot, int(r["user_id"]))[0],
                                        "note": float(r["rating"])})
-        await li.envoyer({"t": "quiz", "guild_id": brut, "oeuvres": list(oeuvres.values())})
+        avis: list[dict[str, Any]] = []
+        noms: dict[int, str] = {}
+        try:
+            avis, noms = await self._avis_quiz(reviews, guild, on_server)
+        except Exception:
+            log.exception("Commentaires du mini-jeu pour HERTZ impossibles")
+        await li.envoyer({"t": "quiz", "guild_id": brut, "oeuvres": list(oeuvres.values()), "avis": avis,
+                          "membres": list(dict.fromkeys(noms.values()))})
+
+    async def _avis_quiz(self, reviews, guild: discord.Guild, on_server: str):
+        """« Qui a noté ça ? » : des commentaires récents (jamais ceux marqués spoiler), et les membres qui notent."""
+        from cogs.reviews.formatting import row_spoiler, user_display
+
+        avis: list[dict[str, Any]] = []
+        noms: dict[int, str] = {}
+        lignes = await reviews.db.fetchall(
+            f"""SELECT r.*, m.title AS m_titre, m.year AS m_annee, m.media_type AS m_type, m.poster_url AS m_affiche
+                FROM reviews r {on_server} JOIN media m ON m.id = r.media_id
+                WHERE m.media_type IN ('movie', 'tv') AND r.comment IS NOT NULL AND TRIM(r.comment) != ''
+                ORDER BY r.updated_at DESC LIMIT 200""",
+            guild.id,
+        )
+        for r in lignes:
+            texte = " ".join(str(r["comment"] or "").split())
+            if len(texte) < 6 or row_spoiler(r):
+                continue
+            if len(texte) > 200:
+                texte = texte[:197].rsplit(" ", 1)[0] + "…"
+            uid = int(r["user_id"])
+            noms.setdefault(uid, user_display(guild, self.bot, uid)[0])
+            avis.append({"nom": noms[uid], "note": float(r["rating"]), "texte": texte, "titre": r["m_titre"],
+                         "annee": r["m_annee"], "type": "série" if r["m_type"] == "tv" else "film",
+                         "affiche": r["m_affiche"]})
+            if len(avis) == 80:
+                break
+        membres = await reviews.db.fetchall(
+            f"""SELECT r.user_id, COUNT(*) AS n FROM reviews r {on_server}
+                GROUP BY r.user_id ORDER BY n DESC LIMIT 40""",
+            guild.id,
+        )
+        for r in membres:
+            uid = int(r["user_id"])
+            noms.setdefault(uid, user_display(guild, self.bot, uid)[0])
+        return avis, noms
 
     async def _terminer(self, guild_id: int, user_id: int) -> None:
         """Fin du film : le lien au live est retiré et sa fiche invite à noter."""
