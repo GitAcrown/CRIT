@@ -610,7 +610,7 @@ class Hertz(commands.Cog):
 
         on_server = "JOIN members gm ON gm.user_id = r.user_id AND gm.guild_id = ?"
         lignes = await reviews.db.fetchall(
-            f"""SELECT m.id, m.title, m.year, m.media_type, AVG(r.rating) AS moy, COUNT(*) AS n
+            f"""SELECT m.id, m.title, m.year, m.media_type, m.poster_url, AVG(r.rating) AS moy, COUNT(*) AS n
                 FROM reviews r {on_server} JOIN media m ON m.id = r.media_id
                 WHERE m.media_type IN ('movie', 'tv')
                 GROUP BY m.id ORDER BY n DESC, MAX(r.updated_at) DESC LIMIT 80""",
@@ -620,7 +620,8 @@ class Hertz(commands.Cog):
         for r in lignes:
             oeuvres[int(r["id"])] = {"titre": r["title"], "annee": r["year"],
                                      "type": "série" if r["media_type"] == "tv" else "film",
-                                     "moyenne": round(float(r["moy"]), 2), "nombre": int(r["n"]), "notes": []}
+                                     "moyenne": round(float(r["moy"]), 2), "nombre": int(r["n"]), "notes": [],
+                                     "affiche": r["poster_url"] or None}   # affiche mystère de HERTZ
         if oeuvres:
             marques = ",".join("?" * len(oeuvres))
             notes = await reviews.db.fetchall(
